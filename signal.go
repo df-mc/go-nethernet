@@ -2,23 +2,21 @@ package nethernet
 
 import (
 	"bytes"
-	"errors"
+	"context"
 	"fmt"
 	"github.com/pion/webrtc/v4"
 	"strconv"
 	"strings"
 )
 
-var ErrSignalingCanceled = errors.New("nethernet: canceled")
-
 type Signaling interface {
 	Signal(signal *Signal) error
-	Notify(cancel <-chan struct{}, n Notifier)
+	Notify(ctx context.Context, n Notifier)
 
 	// Credentials will currently block until a credentials has received from the signaling service. This is usually
 	// present in WebSocket signaling connection. A nil *Credentials may be returned if no credentials or
 	// the implementation is not capable to do that.
-	Credentials() (*Credentials, error)
+	Credentials(ctx context.Context) (*Credentials, error)
 }
 
 type Notifier interface {

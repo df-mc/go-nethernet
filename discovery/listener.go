@@ -1,11 +1,13 @@
 package discovery
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-nethernet/internal"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"net"
 	"net/netip"
@@ -38,6 +40,8 @@ func (conf ListenConfig) Listen(network string, addr string) (*Listener, error) 
 		conf: conf,
 
 		addresses: make(map[uint64]address),
+
+		notifiers: make(map[uint32]nethernet.Notifier),
 
 		closed: make(chan struct{}),
 	}
@@ -130,22 +134,22 @@ func (l *Listener) Signal(signal *nethernet.Signal) error {
 	}
 }
 
-func (l *Listener) Notify(cancel <-chan struct{}, n nethernet.Notifier) {
+func (l *Listener) Notify(ctx context.Context, n nethernet.Notifier) {
 	l.notifiersMu.Lock()
 	i := l.notifyCount
 	l.notifiers[i] = n
 	l.notifyCount++
 	l.notifiersMu.Unlock()
 
-	go l.notify(cancel, n, i)
+	go l.notify(ctx, n, i)
 }
 
-func (l *Listener) notify(cancel <-chan struct{}, n nethernet.Notifier, i uint32) {
+func (l *Listener) notify(ctx context.Context, n nethernet.Notifier, i uint32) {
 	select {
 	case <-l.closed:
 		n.NotifyError(net.ErrClosed)
-	case <-cancel:
-		n.NotifyError(nethernet.ErrSignalingCanceled)
+	case <-ctx.Done():
+		n.NotifyError(ctx.Err())
 	}
 
 	l.notifiersMu.Lock()
@@ -153,7 +157,7 @@ func (l *Listener) notify(cancel <-chan struct{}, n nethernet.Notifier, i uint32
 	l.notifiersMu.Unlock()
 }
 
-func (l *Listener) Credentials() (*nethernet.Credentials, error) {
+func (l *Listener) Credentials(context.Context) (*nethernet.Credentials, error) {
 	select {
 	case <-l.closed:
 		return nil, net.ErrClosed
@@ -300,18 +304,16 @@ func (l *Listener) background() {
 
 func (l *Listener) deleteInactiveAddresses() {
 	l.addressesMu.Lock()
-	for networkID, a := range l.addresses {
-		if time.Since(a.t) < time.Second*15 {
-			delete(l.addresses, networkID)
-		}
-	}
+	maps.DeleteFunc(l.addresses, func(_ uint64, a address) bool {
+		return time.Since(a.t) > time.Second*15
+	})
 	l.addressesMu.Unlock()
 }
 
 func (l *Listener) write(b []byte, addr net.Addr) (n int, err error) {
 	if remote, ok := l.addrPort(addr); ok {
 		if local, ok := l.addrPort(l.conn.LocalAddr()); ok {
-			if remote.Compare(local) == 0 {
+			if remote.Addr().Compare(local.Addr()) == 0 {
 				bcast, err := broadcastAddress(addr)
 				if err != nil {
 					l.conf.Log.Error("error resolving broadcast address", slog.Any("addr", addr), internal.ErrAttr(err))

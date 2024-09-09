@@ -13,6 +13,7 @@ type ICEServer struct {
 	URLs     []string `json:"Urls"`
 }
 
+// gatherOptions transforms Credentials into [webrtc.ICEGatherOptions].
 func gatherOptions(credentials *Credentials) (opts webrtc.ICEGatherOptions) {
 	if credentials != nil && len(credentials.ICEServers) > 0 {
 		opts.ICEServers = make([]webrtc.ICEServer, len(credentials.ICEServers))

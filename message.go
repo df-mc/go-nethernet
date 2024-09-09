@@ -21,6 +21,8 @@ func parseMessage(b []byte) (*message, error) {
 	}, nil
 }
 
+// handleMessage handles a message received in [webrtc.DataChannel] labeled 'ReliableDataChannel'. It parses the data into message
+// using parseMessage. It handles remaining segments and its multiple segments, and send it to [Conn.Read] or [Conn.ReadPacket].
 func (c *Conn) handleMessage(b []byte) error {
 	msg, err := parseMessage(b)
 	if err != nil {

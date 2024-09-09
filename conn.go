@@ -11,32 +11,46 @@ import (
 	"log/slog"
 	"math/rand"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
+// Conn is an implementation of [net.Conn] interface for a peer connection between
+// a specific remote NetherNet network/connection. Conn is safe to use with concurrent
+// goroutines.
+//
+// A Conn is a WebRTC peer connection established with ICE, DTLS and SCTP transport, and
+// has two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel', most of
+// the methods implemented in Conn uses 'ReliableDataChannel' as it is unclear how 'UnreliableDataChannel'
+// works.
+//
+// A Conn may be established with a remote network ID using [Dialer.DialContext] and other aliases.
+// A Conn may be accepted from a Listener, which listens on a specific local network ID.
+//
+// Dialer and Listener initially negotiates its offer/answer and local ICE candidates of Conn
+// with a remote connection with an implementation of [Signaling].
+//
+// Once established using either Dialer or Listener, it will handle for messages sent in
+// 'ReliableDataChannel' (which can be read from [Conn.Read] or [Conn.ReadPacket]), and
+// closure of its ORTC transports that ensures all transports has been closed.
 type Conn struct {
 	ice  *webrtc.ICETransport
 	dtls *webrtc.DTLSTransport
 	sctp *webrtc.SCTPTransport
 
-	remote *description // A description parsed from an offer/answer signaled from the remote connection.
-
 	// candidateReceived notifies that a first candidate is received from the other
 	// end, and the Conn is ready to start its transports.
 	candidateReceived chan struct{}
-	// candidates includes all ICE candidates signaled from the remote connection.
+	// candidates includes all [webrtc.ICECandidate] signaled from the remote connection.
+	// When a new [webrtc.ICECandidate] is signaled, it will be appended atomically into the slice.
 	candidates   []webrtc.ICECandidate
 	candidatesMu sync.Mutex // Guards above
 
-	handler handler
-
-	// localCandidates includes all ICE candidates gathered.
-	localCandidates []webrtc.ICECandidate
-	// localNetworkID is the network ID of Dialer or Listener.
-	localNetworkID uint64
+	// negotiator is either Listener or Dialer.
+	negotiator negotiator
 
 	reliable, unreliable *webrtc.DataChannel // ReliableDataChannel and UnreliableDataChannel
 
@@ -45,14 +59,18 @@ type Conn struct {
 	// message includes a buffer of all previously-received segments, and last segment count.
 	message *message
 
-	once   sync.Once     // Closes closed only once.
+	once   sync.Once     // Closes below only once.
 	closed chan struct{} // Notifies that a Conn has been closed.
 
 	log *slog.Logger
 
-	id, networkID uint64 // Remote connection ID and network ID.
+	local         Addr
+	id, networkID uint64
 }
 
+// Read reads a message received in [webrtc.DataChannel] labeled 'ReliableDataChannel'.
+// The bytes of message data will be copied into the buffer. An error may be returned if the [Conn]
+// has closed by [Conn.Close].
 func (c *Conn) Read(b []byte) (n int, err error) {
 	select {
 	case <-c.closed:
@@ -62,6 +80,9 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	}
 }
 
+// ReadPacket reads a message received in [webrtc.DataChannel] labeled 'ReliableDataChannel',
+// and returns the bytes. It is implemented for Minecraft read operations to avoid some bug
+// related to use the Read method in decoder.
 func (c *Conn) ReadPacket() ([]byte, error) {
 	select {
 	case <-c.closed:
@@ -71,6 +92,9 @@ func (c *Conn) ReadPacket() ([]byte, error) {
 	}
 }
 
+// Write writes a message that contains the data into [webrtc.DataChannel] labeled 'ReliableDataChannel'
+// with segments. If the data length exceeds 10000 bytes, it will be split in a multiple segments. An error
+// may be returned while writing a segment into the [webrtc.DataChannel], or the [Conn] has closed by [Conn.Close].
 func (c *Conn) Write(b []byte) (n int, err error) {
 	select {
 	case <-c.closed:
@@ -101,45 +125,56 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	}
 }
 
+// SetDeadline is a no-op implementation of [net.Conn.SetDeadline] and returns ErrUnsupported.
 func (*Conn) SetDeadline(time.Time) error {
-	return errors.New("minecraft/nethernet: Conn: not implemented (yet)")
+	return ErrUnsupported
 }
 
+// SetReadDeadline is a no-op implementation of [net.Conn.SetReadDeadline] and returns ErrUnsupported.
 func (*Conn) SetReadDeadline(time.Time) error {
-	return errors.New("minecraft/nethernet: Conn: not implemented (yet)")
+	return ErrUnsupported
 }
 
+// SetWriteDeadline is a no-op implementation of [net.Conn.SetWriteDeadline] and returns ErrUnsupported.
 func (*Conn) SetWriteDeadline(time.Time) error {
-	return errors.New("minecraft/nethernet: Conn: not implemented (yet)")
+	return ErrUnsupported
 }
 
-// LocalAddr returns an Addr of local network ID. It also contains locally-gathered ICE candidates.
+// LocalAddr returns an Addr with the local network ID of the Conn. It also contains
+// locally-gathered ICE candidates.
 func (c *Conn) LocalAddr() net.Addr {
-	return &Addr{
-		NetworkID:    c.localNetworkID,
-		ConnectionID: c.id,
-		Candidates:   c.localCandidates,
-	}
+	addr := c.local
+	addr.ConnectionID = c.id
+	return &addr
 }
 
-// RemoteAddr returns an Addr of remote network ID. It also contains remotely-signaled ICE candidates.
+// RemoteAddr returns an Addr with the remote network ID of the Conn. It also contains
+// remotely-signaled ICE candidates, which is atomically added when a Signal of SignalTypeCandidate
+// is handled.
 func (c *Conn) RemoteAddr() net.Addr {
-	c.candidatesMu.Lock()
-	defer c.candidatesMu.Unlock()
+	addr := c.remoteAddr()
 
+	c.candidatesMu.Lock()
+	addr.Candidates = slices.Clone(c.candidates)
+	c.candidatesMu.Unlock()
+	return addr
+}
+
+func (c *Conn) remoteAddr() *Addr {
 	return &Addr{
 		NetworkID:    c.networkID,
 		ConnectionID: c.id,
-		Candidates:   c.candidates,
 	}
 }
 
-// Close closes the [Conn].
+// Close closes two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel' first,
+// then closes the SCTP, DTLS and ICE transport of the Conn once. An error joined using [errors.Join]
+// may be returned, which contains non-nil errors occurred during stopping the things.
 func (c *Conn) Close() (err error) {
 	c.once.Do(func() {
 		close(c.closed)
 
-		c.handler.handleClose(c)
+		c.negotiator.handleClose(c)
 
 		errs := make([]error, 0, 5)
 		errs = append(errs, c.reliable.Close())
@@ -152,10 +187,9 @@ func (c *Conn) Close() (err error) {
 	return err
 }
 
-// handleTransports stores functions to handle on ICE, DTLS and SCTP transport and
-// ReliableDataChannel and UnreliableDataChannel. If Close of any transports or data channels
-// has been called, it will call Close. If a message has been received in ReliableDataChannel, it
-// will call Conn.handleMessage.
+// handleTransports handles remote messages received in reliable [webrtc.DataChannel],
+// and closure of its two data channels, ICE, DTLS and SCTP transport to ensure that all
+// transports has been closed when one of them has been closed by the remote connection.
 func (c *Conn) handleTransports() {
 	c.reliable.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if err := c.handleMessage(msg.Data); err != nil {
@@ -174,7 +208,7 @@ func (c *Conn) handleTransports() {
 	c.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
 		switch state {
 		case webrtc.ICETransportStateClosed, webrtc.ICETransportStateDisconnected, webrtc.ICETransportStateFailed:
-			// This handler function itself is holding the lock, call Close in a goroutine.
+			// This negotiator function itself is holding the lock, call Close in a goroutine.
 			go c.Close() // We need to make sure that all transports has been closed
 		default:
 		}
@@ -182,19 +216,19 @@ func (c *Conn) handleTransports() {
 	c.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
 		switch state {
 		case webrtc.DTLSTransportStateClosed, webrtc.DTLSTransportStateFailed:
-			// This handler function itself is holding the lock, call Close in a goroutine.
+			// This negotiator function itself is holding the lock, call Close in a goroutine.
 			go c.Close() // We need to make sure that all transports has been closed
 		default:
 		}
 	})
 }
 
-// handleSignal handles an incoming signal received from the remote connection.
+// handleSignal handles an incoming Signal signaled from the remote connection.
 //
 // If the Signal is of SignalTypeCandidate, it will parse a [webrtc.ICECandidate] from its data
 // and adds to the ICE transport of the Conn.
 //
-// If the Signal is of SignalTypeError, it will close the Conn as failed.
+// If the Signal is of SignalTypeError, it will close the Conn immediately as failed.
 func (c *Conn) handleSignal(signal *Signal) error {
 	switch signal.Type {
 	case SignalTypeCandidate:
@@ -240,14 +274,17 @@ func (c *Conn) handleSignal(signal *Signal) error {
 		if err := c.Close(); err != nil {
 			return fmt.Errorf("close: %w", err)
 		}
+	default:
+		return fmt.Errorf("unknown signal type: %s", signal.Type)
 	}
 	return nil
 }
 
 const maxMessageSize = 10000
 
-// parseDescription parses a [sdp.SessionDescription] signaled from the remote connection
-// and returns a description.
+// parseDescription parses a [sdp.SessionDescription] signaled from the remote connection.
+// It will validate its fields and transforms/returns into a description, which can be used
+// for starting the ICE, DTLS and SCTP transports of a Conn.
 func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	if len(d.MediaDescriptions) != 1 {
 		return nil, fmt.Errorf("unexpected number of media descriptions: %d, expected 1", len(d.MediaDescriptions))
@@ -316,16 +353,23 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	}, nil
 }
 
-// description contains parameters of ICE, DTLS and SCTP transport.
+// description contains parameters for opening ICE, DTLS and SCTP transport.
+//
+// A description may be parsed by a negotiator (Listener or Dialer) using parseDescription
+// with a [sdp.SessionDescription] decoded from a Signal of SignalTypeOffer or SignalTypeAnswer.
+//
+// A description may be filled in by a negotiator (Listener or Dialer) to encode
+// a local description of a Conn.
 type description struct {
 	ice  webrtc.ICEParameters
 	dtls webrtc.DTLSParameters
 	sctp webrtc.SCTPCapabilities
 }
 
-// encode transforms the description into [sdp.SessionDescription] and calls
-// the Marshal method. It is called by Listener and Dialer with local parameters
-// of ICE, DTLS and SCTP transport to signal an offer/answer to the remote connection.
+// encode transforms the description into [sdp.SessionDescription] and encodes
+// them using the [sdp.SessionDescription.Marshal] method. It is called by a negotiator
+// (Listener or Dialer) with its description filled in with the local parameters to
+// signal a Signal of SignalTypeOffer or SignalTypeAnswer to the remote connection.
 func (desc description) encode() ([]byte, error) {
 	d := &sdp.SessionDescription{
 		Version: 0x2,
@@ -378,8 +422,10 @@ func (desc description) encode() ([]byte, error) {
 	return d.Marshal()
 }
 
-// setupAttribute returns a [sdp.Attribute] of 'setup' with a value "active" or
-// "actpass" based on the role of local DTLS parameters.
+// setupAttribute returns a [sdp.Attribute] with the key 'setup' of value
+// "active" or "actpass" based on the role of local DTLS parameters.
+// It is called by encode to include them to the media description of local
+// [sdp.SessionDescription].
 func (desc description) setupAttribute() sdp.Attribute {
 	attr := sdp.Attribute{Key: "setup"}
 	if desc.dtls.Role == webrtc.DTLSRoleServer {
@@ -390,25 +436,19 @@ func (desc description) setupAttribute() sdp.Attribute {
 	return attr
 }
 
-// newConn creates a new [Conn] from the ICE, DTLS and SCTP transport.
-func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, d *description, log *slog.Logger, id, networkID, localNetworkID uint64, candidates []webrtc.ICECandidate, h handler) *Conn {
-	if h == nil {
-		h = nopHandler{}
-	}
-
+// newConn creates a Conn from the ICE, DTLS and SCTP transport associated with the IDs. The local Addr containing the local network ID
+// will be used for returning local [net.Addr] of the Conn from [Conn.LocalAddr]. The negotiator (caller) must establish each transport
+// after creating a Conn when an ICE candidate has been signaled from the remote connection once. An implementation of negotiator may be
+// used to obtain a [slog.Logger] of the Conn, and few other methods to handle events such as closures.
+func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, id, networkID uint64, local Addr, n negotiator) *Conn {
 	return &Conn{
 		ice:  ice,
 		dtls: dtls,
 		sctp: sctp,
 
-		remote: d,
-
 		candidateReceived: make(chan struct{}, 1),
 
-		handler: h,
-
-		localNetworkID:  localNetworkID,
-		localCandidates: candidates,
+		negotiator: n,
 
 		packets: make(chan []byte),
 
@@ -416,19 +456,24 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 
 		closed: make(chan struct{}, 1),
 
-		log: log.With(slog.Group("connection",
+		log: n.log().With(slog.Group("connection",
 			slog.Uint64("id", id),
-			slog.Uint64("networkID", networkID))),
+			slog.Uint64("networkID", networkID),
+		)),
+
+		local: local,
 
 		id:        id,
 		networkID: networkID,
 	}
 }
 
-type handler interface {
+type negotiator interface {
+	// handleClose handles closure of the Conn. It is implemented for deleting closed connections on Listener.
 	handleClose(conn *Conn)
+	// log returns a base [slog.Logger] to be used as the logger of Conn. The Conn extends the [slog.Logger]
+	// with few additional attributes such as ID and network ID of the Conn.
+	log() *slog.Logger
 }
 
-type nopHandler struct{}
-
-func (nopHandler) handleClose(*Conn) {}
+var ErrUnsupported = errors.New("nethernet: unsupported")
