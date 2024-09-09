@@ -14,7 +14,7 @@ func TestListen(t *testing.T) {
 	cfg := ListenConfig{
 		NetworkID: rand.Uint64(),
 	}
-	d, err := cfg.Listen("udp", "192.168.2.193:7551")
+	d, err := cfg.Listen("udp", ":7551")
 	if err != nil {
 		t.Fatalf("error listening on discovery: %s", err)
 	}
