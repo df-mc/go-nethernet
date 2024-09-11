@@ -9,18 +9,29 @@ import (
 	"strings"
 )
 
+// Signaling implements an interface for sending and receiving Signal.
 type Signaling interface {
+	// Signal sends the Signal. An error may be returned.
 	Signal(signal *Signal) error
+	// Notify receives Signals and errors on the Notifier, which is either Listener or Dialer.
+	// The [context.Context] may be used to stop notifying.
 	Notify(ctx context.Context, n Notifier)
 
-	// Credentials will currently block until a credentials has received from the signaling service. This is usually
-	// present in WebSocket signaling connection. A nil *Credentials may be returned if no credentials or
-	// the implementation is not capable to do that.
+	// Credentials blocks until a Credentials has been received, and returns it. A nil Credentials may
+	// be returned if the Signaling implementation does not have a support. It is usually present in
+	// WebSocket signaling connection.
 	Credentials(ctx context.Context) (*Credentials, error)
 }
 
 type Notifier interface {
+	// NotifySignal notifies the Signal to the Notifier. It is called by the implementation of Signaling
+	// when a Signal has been received from the remote network.
 	NotifySignal(signal *Signal)
+	// NotifyError notifies the error to the Notifier. It is usually called by the implementation of Signaling
+	// with [context.DeadlineExceeded] or [context.Canceled] when the [context.Context] behind the Notifier
+	// has been canceled, or with [net.ErrClosed] if Signaling has been closed.
+	//
+	// The Listener will close itself if the error is one of the above.
 	NotifyError(err error)
 }
 
@@ -31,28 +42,27 @@ const (
 	// SignalTypeAnswer is sent by server to respond to Signals that have SignalTypeOffer. Signals that
 	// have SignalTypeAnswer usually has a data of local description of the host.
 	SignalTypeAnswer = "CONNECTRESPONSE"
-	// SignalTypeCandidate is sent by both server and client to notify a local candidate to
-	// remote connection. This is usually sent after SignalTypeOffer or SignalTypeAnswer by server/client.
-	// Signals that have SignalTypeCandidate usually has a data of local candidate gathered with additional
-	// credentials received from the Signaling implementation.
+	// SignalTypeCandidate is sent by both server and client to notify an ICE candidate to the remote
+	// connection. It is usually sent after SignalTypeOffer or SignalTypeAnswer by server/client. Signals
+	// that have SignalTypeCandidate usually has a data of ICE candidate gathered with credentials retrieved
+	// from Signaling implementation.
 	SignalTypeCandidate = "CANDIDATEADD"
-	// SignalTypeError is sent by both server and client to notify an error has occurred.
-	// Signals that have SignalTypeError has a Data of the code of error occurred, which is listed
-	// on the following constants.
+	// SignalTypeError is sent by both server and client to notify an error that has occurred in the
+	// connection. Signals that have SignalTypeError has a data of the code of the error occurred, which
+	// is defined on the constants below.
 	SignalTypeError = "CONNECTERROR"
 )
 
 type Signal struct {
-	// Type is the type of Signal. It is one of the constants defined above.
+	// Type is the type of Signal. It is one of constants defined above.
 	Type string
 	// ConnectionID is the unique ID of the connection that has sent the Signal.
-	// It is encoded in String as a second segment to identify a connection uniquely.
 	ConnectionID uint64
 	// Data is the actual data of the Signal.
 	Data string
 
-	// NetworkID is used internally by the implementations of Signaling type
-	// to reference a remote network with a number.
+	// NetworkID is used internally by the implementations of Signaling to reference
+	// a remote network.
 	NetworkID uint64
 }
 
@@ -91,7 +101,7 @@ func formatICECandidate(id int, candidate webrtc.ICECandidate, iceParams webrtc.
 	b.WriteByte(' ')
 	b.WriteByte('1')
 	b.WriteByte(' ')
-	b.WriteString("udp")
+	b.WriteString(candidate.Protocol.String())
 	b.WriteByte(' ')
 	b.WriteString(strconv.FormatUint(uint64(candidate.Priority), 10))
 	b.WriteByte(' ')

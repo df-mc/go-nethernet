@@ -22,27 +22,30 @@ type ListenConfig struct {
 	// value "listener" to mark that the Conn has been negotiated by Listener.
 	Log *slog.Logger
 
-	// API specifies custom configuration for WebRTC transports, and data channels. If left as nil, a new [webrtc.API]
-	// will be set from [webrtc.NewAPI]. The webrtc.SettingEngine of the API should not allow detaching data channels
-	// (by calling [webrtc.SettingEngine.DetachDataChannels]) as it requires additional steps on the Conn.
+	// API specifies custom configuration for WebRTC transports, and data channels. If left as nil, a new
+	// [webrtc.API] will be set from [webrtc.NewAPI]. The webrtc.SettingEngine of the API should not allow
+	// detaching data channels (by calling [webrtc.SettingEngine.DetachDataChannels]) as it requires additional
+	// steps on the Conn (which cannot be determined by the Conn to be enabled).
 	API *webrtc.API
 
-	// ConnContext returns a [context.Context] for the Conn that may be used to start ICE, DTLS and SCTP
-	// transports of the Conn in Listener. The parent [context.Context] may be used as the first parameter
-	// of creating a [context.Context], likely with [context.WithCancel] or [context.WithTimeout]. If set
+	// ConnContext returns a [context.Context] for the Conn, which may be used to start the ICE, DTLS and SCTP
+	// transports of the Conn in Listener. The parent [context.Context] may be used to create a [context.Context]
+	// to be returned (likely with [context.WithCancel] or [context.WithTimeout]) as the first parameter. If set
 	// as nil, a [context.Context] with 5 seconds timeout will be used instead.
 	ConnContext func(parent context.Context, conn *Conn) context.Context
-	// NegotiationContext returns a [context.Context] for negotiation that may occur by notifying a Signal
-	// of SignalTypeOffer in Listener. The parent [context.Context] may be used as the first parameter of
-	// creating a [context.Context], likely with [context.WithCancel] or [context.WithTimeout]. If set as
-	// nil, a [context.Context] with 15 seconds timeout will be used instead. If [context.Context.Err]
-	// returned [context.DeadlineExceeded], it signals back a Signal of SignalTypeError with ErrorCodeNegotiationTimeoutWaitingForAccept.
+
+	// NegotiationContext returns a [context.Context] for a negotiation, that may occur by notifying a Signal
+	// of SignalTypeOffer in Listener. The parent [context.Context] may be used to create a [context.Context]
+	// to be returned (likely with [context.WithCancel] or [context.WithTimeout]) as the first parameter. If
+	// set as nil, a [context.Context] with 5 seconds timeout will be used instead. When the returned context
+	// is done and [context.Context.Err] returns [context.DeadlineExceeded], it signals back a Signal of SignalTypeError
+	// with ErrorCodeNegotiationTimeoutWaitingForAccept.
 	NegotiationContext func(parent context.Context) context.Context
 }
 
-// Listen listens on the local network ID. The implementation of [Signaling] may be used to notify
-// incoming Signals signaled from the remote connections. A Listener will be returned, that is ready
-// to accept established Conn from [Listener.Accept].
+// Listen listens on a local network referenced on the ID and returns a Listener, that may be used to accept
+// established Conn from [Listener.Accept]. The implementation of [Signaling] may be used to notify incoming
+// Signals signaled from the remote connections.
 func (conf ListenConfig) Listen(networkID uint64, signaling Signaling) (*Listener, error) {
 	if conf.Log == nil {
 		conf.Log = slog.Default()
@@ -130,9 +133,8 @@ func (l *Listener) PongData([]byte) {}
 type listenerNotifier struct{ *Listener }
 
 // NotifySignal notifies an incoming Signal to the Listener. It calls corresponding Listener
-// methods for handling Signal of each type. If an signalError has been returned from the methods
-// of Listener, it signals a Signal of SignalTypeError back with the code of the error occurred
-// in the negotiation.
+// methods for handling Signal of each type. If an signalError has been returned, it signals
+// back SignalTypeError with the code of the error.
 func (l listenerNotifier) NotifySignal(signal *Signal) {
 	var err error
 	switch signal.Type {
@@ -372,7 +374,7 @@ func (l *Listener) context() context.Context {
 
 // startTransports establishes ICE transport as [webrtc.ICERoleControlled], DTLS transport as [webrtc.DTLSRoleServer]
 // and SCTP transport using the remote description. It will block until two data channels labeled 'ReliableDataChannel'
-// and 'UnreliableDataChannel' will be created by the remote connection. The [context.Context] is used to cancel method calls.
+// and 'UnreliableDataChannel' will be created by the remote connection. The [context.Context] is used to cancel blocking.
 func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *description) error {
 	conn.log.Debug("starting ICE transport as controlled")
 	iceRole := webrtc.ICERoleControlled
@@ -449,8 +451,8 @@ func (l *Listener) Close() error {
 }
 
 // A signalError may be returned by the methods of Listener to handle incoming Signals signaled from the
-// remote connection. The listenerNotifier may signal back a Signal with SignalTypeError to notify the error
-// code occurred during handling a Signal.
+// remote connection. The listenerNotifier may signal back with SignalTypeError to notify the error code
+// occurred during handling a Signal.
 type signalError struct {
 	// code is the code of the error occurred, it is one of constants defined in the below of SignalTypeError.
 	code       int
@@ -464,9 +466,9 @@ func (e *signalError) Error() string {
 // Unwrap returns the underlying error so that may be unwrapped with errors.Unwrap.
 func (e *signalError) Unwrap() error { return e.underlying }
 
-// wrapSignalError returns a signalError which includes the error as its underlying (that may be unwrapped
-// with errors.Unwrap) and the code to be signaled back to the remote connection. It is usually called by the
-// methods to handle incoming Signals signaled from the remote connection on Listener.
+// wrapSignalError returns a signalError which includes the error as its underlying error (that may be
+// unwrapped with errors.Unwrap) and the code to be signaled back to the remote connection. It is usually
+// called by the methods to handle incoming Signals signaled from the remote connection on Listener.
 func wrapSignalError(err error, code int) *signalError {
 	return &signalError{code: code, underlying: err}
 }

@@ -23,19 +23,16 @@ import (
 // goroutines.
 //
 // A Conn is a WebRTC peer connection established with ICE, DTLS and SCTP transport, and
-// has two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel', most of
+// two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel', most of
 // the methods implemented in Conn uses 'ReliableDataChannel' as it is unclear how 'UnreliableDataChannel'
 // works.
 //
-// A Conn may be established with a remote network ID using [Dialer.DialContext] and other aliases.
-// A Conn may be accepted from a Listener, which listens on a specific local network ID.
-//
-// Dialer and Listener initially negotiates its offer/answer and local ICE candidates of Conn
-// with a remote connection with an implementation of [Signaling].
+// A Conn may be established with remote network ID using [Dialer.DialContext] (and other aliases).
+// A Conn may be accepted from a Listener that listens on a local network.
 //
 // Once established using either Dialer or Listener, it will handle for messages sent in
 // 'ReliableDataChannel' (which can be read from [Conn.Read] or [Conn.ReadPacket]), and
-// closure of its ORTC transports that ensures all transports has been closed.
+// closure of its ORTC transports to ensure that all transports of Conn has been closed.
 type Conn struct {
 	ice  *webrtc.ICETransport
 	dtls *webrtc.DTLSTransport
@@ -115,7 +112,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			frag := b[i:end]
 			if err := c.reliable.Send(append([]byte{segments}, frag...)); err != nil {
 				if errors.Is(err, io.ErrClosedPipe) {
-					return n, net.ErrClosed
+					err = net.ErrClosed
 				}
 				return n, fmt.Errorf("write segment #%d: %w", segments, err)
 			}
@@ -150,7 +147,7 @@ func (c *Conn) LocalAddr() net.Addr {
 
 // RemoteAddr returns an Addr with the remote network ID of the Conn. It also contains
 // remotely-signaled ICE candidates, which is atomically added when a Signal of SignalTypeCandidate
-// is handled.
+// has been handled.
 func (c *Conn) RemoteAddr() net.Addr {
 	addr := c.remoteAddr()
 
@@ -160,6 +157,9 @@ func (c *Conn) RemoteAddr() net.Addr {
 	return addr
 }
 
+// remoteAddr returns a base Addr without ICE candidates signaled from the remote connection.
+// It is used by [Conn.RemoteAddr] to return the Addr with ICE candidates atomically gathered
+// and also in [Listener] for using Addr as the key of Conn.
 func (c *Conn) remoteAddr() *Addr {
 	return &Addr{
 		NetworkID:    c.networkID,
@@ -167,22 +167,22 @@ func (c *Conn) remoteAddr() *Addr {
 	}
 }
 
-// Close closes two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel' first,
-// then closes the SCTP, DTLS and ICE transport of the Conn once. An error joined using [errors.Join]
-// may be returned, which contains non-nil errors occurred during stopping the things.
+// Close closes two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel'
+// then closes the SCTP, DTLS and ICE transport of the Conn once. An error created using
+// [errors.Join] may be returned, which contains non-nil errors occurred during closure.
 func (c *Conn) Close() (err error) {
 	c.once.Do(func() {
 		close(c.closed)
 
 		c.negotiator.handleClose(c)
 
-		errs := make([]error, 0, 5)
-		errs = append(errs, c.reliable.Close())
-		errs = append(errs, c.unreliable.Close())
-		errs = append(errs, c.sctp.Stop())
-		errs = append(errs, c.dtls.Stop())
-		errs = append(errs, c.ice.Stop())
-		err = errors.Join(errs...)
+		err = errors.Join(
+			c.reliable.Close(),
+			c.unreliable.Close(),
+			c.sctp.Stop(),
+			c.dtls.Stop(),
+			c.ice.Stop(),
+		)
 	})
 	return err
 }
@@ -208,7 +208,7 @@ func (c *Conn) handleTransports() {
 	c.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
 		switch state {
 		case webrtc.ICETransportStateClosed, webrtc.ICETransportStateDisconnected, webrtc.ICETransportStateFailed:
-			// This negotiator function itself is holding the lock, call Close in a goroutine.
+			// This handler function itself is holding the lock, call Close in a goroutine.
 			go c.Close() // We need to make sure that all transports has been closed
 		default:
 		}
@@ -216,10 +216,14 @@ func (c *Conn) handleTransports() {
 	c.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
 		switch state {
 		case webrtc.DTLSTransportStateClosed, webrtc.DTLSTransportStateFailed:
-			// This negotiator function itself is holding the lock, call Close in a goroutine.
+			// This handler function itself is holding the lock, call Close in a goroutine.
 			go c.Close() // We need to make sure that all transports has been closed
 		default:
 		}
+	})
+	c.sctp.OnClose(func(err error) {
+		// This handler function itself is holding the lock, call Close in a goroutine.
+		go c.Close() // We need to make sure that all transports has been closed
 	})
 }
 
@@ -353,7 +357,7 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	}, nil
 }
 
-// description contains parameters for opening ICE, DTLS and SCTP transport.
+// description contains parameters for calling the Start method of ICE, DTLS and SCTP transport.
 //
 // A description may be parsed by a negotiator (Listener or Dialer) using parseDescription
 // with a [sdp.SessionDescription] decoded from a Signal of SignalTypeOffer or SignalTypeAnswer.
@@ -369,7 +373,7 @@ type description struct {
 // encode transforms the description into [sdp.SessionDescription] and encodes
 // them using the [sdp.SessionDescription.Marshal] method. It is called by a negotiator
 // (Listener or Dialer) with its description filled in with the local parameters to
-// signal a Signal of SignalTypeOffer or SignalTypeAnswer to the remote connection.
+// send a Signal of SignalTypeOffer or SignalTypeAnswer to the remote connection.
 func (desc description) encode() ([]byte, error) {
 	d := &sdp.SessionDescription{
 		Version: 0x2,
@@ -436,10 +440,12 @@ func (desc description) setupAttribute() sdp.Attribute {
 	return attr
 }
 
-// newConn creates a Conn from the ICE, DTLS and SCTP transport associated with the IDs. The local Addr containing the local network ID
-// will be used for returning local [net.Addr] of the Conn from [Conn.LocalAddr]. The negotiator (caller) must establish each transport
-// after creating a Conn when an ICE candidate has been signaled from the remote connection once. An implementation of negotiator may be
-// used to obtain a [slog.Logger] of the Conn, and few other methods to handle events such as closures.
+// newConn creates a Conn from the ICE, DTLS and SCTP transport associated with the IDs.
+// The local Addr containing the local network ID will be used for returning local [net.Addr]
+// of the Conn from [Conn.LocalAddr]. The implementation of negotiator may be used to obtain
+// a [slog.Logger] of the Conn, and few other methods to handle events such as closures. The
+// negotiator (caller) must establish each transport after creating a Conn when a first ICE
+// candidate has been signaled from the remote connection.
 func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, id, networkID uint64, local Addr, n negotiator) *Conn {
 	return &Conn{
 		ice:  ice,
@@ -469,10 +475,12 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 }
 
 type negotiator interface {
-	// handleClose handles closure of the Conn. It is implemented for deleting closed connections on Listener.
+	// handleClose handles closure of the Conn. It is implemented for deleting closed
+	// connections on Listener.
 	handleClose(conn *Conn)
-	// log returns a base [slog.Logger] to be used as the logger of Conn. The Conn extends the [slog.Logger]
-	// with few additional attributes such as ID and network ID of the Conn.
+	// log returns a base [slog.Logger] to be used as the logger of Conn. It will be
+	// extended when creating a Conn at newConn with additional attributes such as its
+	// ID and network ID.
 	log() *slog.Logger
 }
 
