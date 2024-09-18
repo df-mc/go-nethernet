@@ -9,7 +9,6 @@ import (
 	"github.com/pion/webrtc/v4"
 	"log/slog"
 	"math/rand"
-	"net"
 	"strconv"
 	"sync"
 )
@@ -323,7 +322,7 @@ func (d *dialerNotifier) NotifySignal(signal *Signal) {
 func (d *dialerNotifier) NotifyError(err error) {
 	d.errs <- err
 
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, ErrSignalingStopped) {
 		d.close()
 	}
 }
