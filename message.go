@@ -7,10 +7,12 @@ import (
 
 // message represents the structure of remote messages sent in ReliableDataChannel.
 type message struct {
-	segments uint8
-	data     []byte
+	segments uint8  // The count of segments of the packet.
+	data     []byte // The byte slice containing the message data.
 }
 
+// parseMessage parses the data into a message.
+// The first byte indicates the count of segments, and the remaining bytes are its payload.
 func parseMessage(b []byte) (*message, error) {
 	if len(b) < 2 {
 		return nil, io.ErrUnexpectedEOF
@@ -21,8 +23,9 @@ func parseMessage(b []byte) (*message, error) {
 	}, nil
 }
 
-// handleMessage handles a message received in [webrtc.DataChannel] labeled 'ReliableDataChannel'. It parses the data into message
-// using parseMessage. It handles remaining segments and its multiple segments, and send it to [Conn.Read] or [Conn.ReadPacket].
+// handleMessage handles a message received from a [webrtc.DataChannel] labeled 'ReliableDataChannel'.
+// It parses the incoming data into a message using parseMessage and handles the segments, and if all
+// segments has been received, it sends the message data to either [Conn.Read] or [Conn.ReadPacket].
 func (c *Conn) handleMessage(b []byte) error {
 	msg, err := parseMessage(b)
 	if err != nil {

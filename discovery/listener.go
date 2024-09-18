@@ -134,27 +134,24 @@ func (l *Listener) Signal(signal *nethernet.Signal) error {
 	}
 }
 
-func (l *Listener) Notify(ctx context.Context, n nethernet.Notifier) {
+func (l *Listener) Notify(n nethernet.Notifier) func() {
 	l.notifiersMu.Lock()
 	i := l.notifyCount
 	l.notifiers[i] = n
 	l.notifyCount++
 	l.notifiersMu.Unlock()
 
-	go l.notify(ctx, n, i)
+	return func() {
+		l.notifiersMu.Lock()
+		l.stop(i, n)
+		l.notifiersMu.Unlock()
+	}
 }
 
-func (l *Listener) notify(ctx context.Context, n nethernet.Notifier, i uint32) {
-	select {
-	case <-l.closed:
-		n.NotifyError(net.ErrClosed)
-	case <-ctx.Done():
-		n.NotifyError(ctx.Err())
-	}
+func (l *Listener) stop(i uint32, n nethernet.Notifier) {
+	n.NotifyError(nethernet.ErrSignalingStopped)
 
-	l.notifiersMu.Lock()
 	delete(l.notifiers, i)
-	l.notifiersMu.Unlock()
 }
 
 func (l *Listener) Credentials(context.Context) (*nethernet.Credentials, error) {
@@ -166,10 +163,14 @@ func (l *Listener) Credentials(context.Context) (*nethernet.Credentials, error) 
 	}
 }
 
+func (l *Listener) NetworkID() uint64 {
+	return l.conf.NetworkID
+}
+
 func (l *Listener) Responses() map[uint64][]byte {
 	l.responsesMu.Lock()
 	defer l.responsesMu.Unlock()
-	return l.responses
+	return maps.Clone(l.responses)
 }
 
 func (l *Listener) listen() {
@@ -276,6 +277,12 @@ func (l *Listener) PongData(b []byte) { l.pongData.Store(&b) }
 func (l *Listener) Close() (err error) {
 	l.once.Do(func() {
 		err = l.conn.Close()
+
+		l.notifiersMu.Lock()
+		for i, n := range l.notifiers {
+			l.stop(i, n)
+		}
+		l.notifiersMu.Unlock()
 	})
 	return err
 }

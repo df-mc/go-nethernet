@@ -15,38 +15,36 @@ import (
 	"time"
 )
 
+// ListenConfig encapsulates options for creating a new Listener through [ListenConfig.Listen].
+// It allows customizing logging, WebRTC API settings, and contexts for negotiations.
 type ListenConfig struct {
-	// Log is used to output several messages at many log levels. If left as nil, the default [slog.Logger]
-	// will be set from [slog.Default]. It will be extended when a Conn is being accepted by [Listener.Accept]
-	// with additional attributes such as its ID and network ID, and a [slog.Attr] with the key "src" with the
-	// value "listener" to mark that the Conn has been negotiated by Listener.
+	// Log is used for logging messages at various levels. If nil, the default [slog.Logger] will be set from
+	// [slog.Default]. Log will be extended when a Conn is being accepted by [Listener.Accept] with additional
+	// attributes such as the connection ID and network ID, and will have a 'src' attribute set to 'listener'
+	// to mark that the Conn has been negotiated by Listener.
 	Log *slog.Logger
 
-	// API specifies custom configuration for WebRTC transports, and data channels. If left as nil, a new
-	// [webrtc.API] will be set from [webrtc.NewAPI]. The webrtc.SettingEngine of the API should not allow
-	// detaching data channels (by calling [webrtc.SettingEngine.DetachDataChannels]) as it requires additional
-	// steps on the Conn (which cannot be determined by the Conn to be enabled).
+	// API specifies custom configuration for WebRTC transports and data channels. If nil, a new [webrtc.API] will
+	// be set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels,
+	// as it requires additional steps on the Conn (which cannot be determined by the Conn).
 	API *webrtc.API
 
-	// ConnContext returns a [context.Context] for the Conn, which may be used to start the ICE, DTLS and SCTP
-	// transports of the Conn in Listener. The parent [context.Context] may be used to create a [context.Context]
-	// to be returned (likely with [context.WithCancel] or [context.WithTimeout]) as the first parameter. If set
-	// as nil, a [context.Context] with 5 seconds timeout will be used instead.
+	// ConnContext provides a [context.Context] for starting the ICE, DTLS, and SCTP transports of the Conn. If nil,
+	// a default [context.Context] with 5 seconds timeout will be used. The parent [context.Context] may be used to
+	// create a [context.Context] to be returned (likely using [context.WithCancel] or [context.WithTimeout]).
 	ConnContext func(parent context.Context, conn *Conn) context.Context
 
-	// NegotiationContext returns a [context.Context] for a negotiation, that may occur by notifying a Signal
-	// of SignalTypeOffer in Listener. The parent [context.Context] may be used to create a [context.Context]
-	// to be returned (likely with [context.WithCancel] or [context.WithTimeout]) as the first parameter. If
-	// set as nil, a [context.Context] with 5 seconds timeout will be used instead. When the returned context
-	// is done and [context.Context.Err] returns [context.DeadlineExceeded], it signals back a Signal of SignalTypeError
-	// with ErrorCodeNegotiationTimeoutWaitingForAccept.
+	// NegotiationContext provides a [context.Context] for the negotiation. If nil, a default [context.Context]
+	// with 5 seconds timeout will be used. The parent [context.Context] may be used to create a [context.Context]
+	// to be returned (likely using [context.WithCancel] or [context.WithTimeout]). If the deadline of the context
+	// is exceeded, a Signal of SignalTypeError with ErrorCodeNegotiationTimeoutWaitingForAccept will be signaled back.
 	NegotiationContext func(parent context.Context) context.Context
 }
 
-// Listen listens on a local network referenced on the ID and returns a Listener, that may be used to accept
-// established Conn from [Listener.Accept]. The implementation of [Signaling] may be used to notify incoming
-// Signals signaled from the remote connections.
-func (conf ListenConfig) Listen(networkID uint64, signaling Signaling) (*Listener, error) {
+// Listen listens on the local network ID specified by the Signaling implementation. It returns a Listener
+// that may be used to accept established connections from [Listener.Accept]. Signaling will be used to notify
+// incoming Signals from remote connections.
+func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 	if conf.Log == nil {
 		conf.Log = slog.Default()
 	}
@@ -56,13 +54,13 @@ func (conf ListenConfig) Listen(networkID uint64, signaling Signaling) (*Listene
 	l := &Listener{
 		conf:      conf,
 		signaling: signaling,
-		networkID: networkID,
+		networkID: signaling.NetworkID(),
 
 		incoming: make(chan *Conn),
 
 		closed: make(chan struct{}),
 	}
-	signaling.Notify(l.context(), listenerNotifier{l})
+	l.stop = signaling.Notify(listenerNotifier{l})
 	return l, nil
 }
 
@@ -77,12 +75,13 @@ type Listener struct {
 
 	incoming chan *Conn
 
+	stop   func()
 	closed chan struct{}
 	once   sync.Once
 }
 
-// Accept waits for and returns the next [Conn] to the listener. An error may be
-// returned, if the listener has been closed.
+// Accept waits for and returns the next [Conn] to the Listener. An error may be
+// returned, if the Listener has been closed.
 func (l *Listener) Accept() (net.Conn, error) {
 	select {
 	case <-l.closed:
@@ -92,24 +91,31 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}
 }
 
-// Addr returns an Addr with the local network ID of Listener.
+// Addr returns an Addr that represents the local network ID of the Listener.
 func (l *Listener) Addr() net.Addr {
 	return &Addr{NetworkID: l.networkID}
 }
 
-// Addr represents a [net.Addr] from local or remote ConnectionID and NetworkID.
+// Addr represents a network address that encapsulates both local and remote connection
+// IDs and implements [net.Addr].
+//
+// The Addr provides details for the unique IDs of Conn and ICE Candidates used for establishing
+// network connectivity.
 type Addr struct {
-	// ConnectionID is a unique ID randomly generated first on the client. It is present in
-	// Signals sent from both client/server to uniquely identify a Conn.
+	// ConnectionID is a unique ID assigned to a connection. It is generated by the client and
+	// used in Signals signaled between clients and servers to uniquely reference a specific connection.
 	ConnectionID uint64
-	// NetworkID is a unique ID of the NetherNet network.
+
+	// NetworkID is a unique ID for the NetherNet network.
 	NetworkID uint64
-	// Candidates contains all ICE candidates either locally-gathered or remotely-signaled.
-	// It can be used to determine the UDP/TCP address of the connection used to connect ICE
-	// transport.
+
+	// Candidates contains a list of ICE candidates. These candidates are either gathered locally or
+	// signaled from a remote connection. ICE candidates are used to determine the UDP/TCP addresses
+	// for establishing ICE transport and can be used to determine the network address of the connection.
 	Candidates []webrtc.ICECandidate
 }
 
+// String formats the Addr as a string.
 func (addr *Addr) String() string {
 	b := &strings.Builder{}
 	b.WriteString(strconv.FormatUint(addr.NetworkID, 10))
@@ -122,6 +128,7 @@ func (addr *Addr) String() string {
 	return b.String()
 }
 
+// Network returns the network type for the Addr, which is always 'nethernet'.
 func (addr *Addr) Network() string { return "nethernet" }
 
 // ID returns the network ID of Listener.
@@ -130,11 +137,14 @@ func (l *Listener) ID() int64 { return int64(l.networkID) }
 // PongData is a stub.
 func (l *Listener) PongData([]byte) {}
 
+// listenerNotifier receives notifications for a Listener. It is registered to a Signaling
+// implementation by [ListenConfig.Listen] to create a new Listener.
 type listenerNotifier struct{ *Listener }
 
-// NotifySignal notifies an incoming Signal to the Listener. It calls corresponding Listener
-// methods for handling Signal of each type. If an signalError has been returned, it signals
-// back SignalTypeError with the code of the error.
+// NotifySignal notifies an incoming Signal to the Listener. It handles Signals of different
+// types by calling the corresponding methods for each type. If an error occurs while handling
+// the Signal, it attempts to cast the error as a signalError and if matches, it signals back
+// a Signal of type SignalTypeError with the error code.
 func (l listenerNotifier) NotifySignal(signal *Signal) {
 	var err error
 	switch signal.Type {
@@ -159,19 +169,18 @@ func (l listenerNotifier) NotifySignal(signal *Signal) {
 	}
 }
 
-// NotifyError notifies the error occurred in the Signaling implementation and closes the Listener if the error is
-// either [net.ErrClosed] or [context.DeadlineExceeded] or [context.Canceled] as no more incoming signals can be
-// notified by the Listener.
+// NotifyError notifies the Listener of an error that occurred in the Signaling implementation.
+// If the error is [ErrSignalingStopped], it will also close the Listener.
 func (l listenerNotifier) NotifyError(err error) {
 	l.conf.Log.Error("notified error in signaling", internal.ErrAttr(err))
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, ErrSignalingStopped) {
 		_ = l.Close()
 	}
 }
 
 // handleOffer handles an incoming Signal of SignalTypeOffer. It parses the data of Signal into [sdp.SessionDescription]
-// and transforms into remote description for later use in negotiation. An answer will be encoded from local parameters
-// of each transport and signaled back to the remote connection referenced in the offer.
+// and transforms into remote description for later use in negotiation. An answer will be created from local parameters of
+// each transport and signaled back to the remote connection referenced in the offer.
 func (l *Listener) handleOffer(signal *Signal) error {
 	d := &sdp.SessionDescription{}
 	if err := d.UnmarshalString(signal.Data); err != nil {
@@ -182,14 +191,17 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		return wrapSignalError(fmt.Errorf("parse offer: %w", err), ErrorCodeFailedToSetRemoteDescription)
 	}
 
-	var ctx context.Context
+	var (
+		ctx    context.Context
+		parent = listenerContext{closed: l.closed}
+	)
 	if l.conf.NegotiationContext != nil {
-		if ctx = l.conf.NegotiationContext(l.context()); ctx == nil {
+		if ctx = l.conf.NegotiationContext(parent); ctx == nil {
 			panic("nethernet: Listener: NegotiationContext returned nil")
 		}
 	} else {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(l.context(), time.Second*15)
+		ctx, cancel = context.WithTimeout(parent, time.Second*15)
 		defer cancel()
 	}
 	credentials, err := l.signaling.Credentials(ctx)
@@ -285,8 +297,10 @@ func (l *Listener) handleOffer(signal *Signal) error {
 	}
 }
 
-// handleSignal lookups for a Conn with the same ID and network ID of the Signal, and notifies it to the Conn
-// by calling Conn.handleSignal. It is used as a default switch of listenerNotifier.NotifySignal.
+// handleSignal looks up for a Conn that matches the ConnectionID and NetworkID of the Signal.
+// If a matching connection is found, it notifies the Signal by calling Conn.handleSignal. It
+// is called by the default handler in listenerNotifier.NotifySignal when the Signal type does
+// not match any specific handling cases.
 func (l *Listener) handleSignal(signal *Signal) error {
 	addr := &Addr{
 		ConnectionID: signal.ConnectionID,
@@ -299,20 +313,20 @@ func (l *Listener) handleSignal(signal *Signal) error {
 	return conn.(*Conn).handleSignal(signal)
 }
 
-// handleConn deletes the Conn from the Listener as it is closed and no longer can be negotiated
-// on the Listener.
+// handleClose deletes the Conn from the Listener, since it is closed and can no longer be negotiated.
 func (l *Listener) handleClose(conn *Conn) {
 	l.connections.Delete(conn.remoteAddr().String())
 }
 
-// log extends the [slog.Logger] from [ListenConfig.Log] with an additional attribute with the key
-// "src" and the value "listener" and returns it to be used as the logger of Conn.
+// log extends the [slog.Logger] from [ListenConfig.Log] with an additional [slog.Attr] of "src" with the
+// value "listener" to mark that the Conn has been negotiated by Listener, and returns it to be used as the logger
+// of a Conn.
 func (l *Listener) log() *slog.Logger {
 	return l.conf.Log.With(slog.String("src", "listener"))
 }
 
 // handleConn finalises the Conn. Once an ICE candidate for the Conn has been signaled from the remote
-// connection, it starts the transports of the Conn using the remote description and a [context.Context]
+// connection, it starts the transports of the Conn using the remote description and a context.Context]
 // returned from [ListenConfig.ConnContext].
 func (l *Listener) handleConn(conn *Conn, d *description) {
 	var err error
@@ -336,15 +350,18 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 		}
 	}()
 
-	var ctx context.Context
+	var (
+		ctx    context.Context
+		parent = listenerContext{closed: l.closed}
+	)
 	if l.conf.ConnContext != nil {
-		ctx = l.conf.ConnContext(l.context(), conn)
+		ctx = l.conf.ConnContext(parent, conn)
 		if ctx == nil {
 			panic("nethernet: ConnContext returned nil")
 		}
 	} else {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(l.context(), time.Second*5)
+		ctx, cancel = context.WithTimeout(parent, time.Second*5)
 		defer cancel()
 	}
 
@@ -361,20 +378,9 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 	}
 }
 
-// context returns the [context.Context] of the Listener, which will be canceled when the Listener is closed.
-// It is used to notify signals and as the parent of the [context.Context] used for negotiation.
-func (l *Listener) context() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-l.closed
-		cancel()
-	}()
-	return ctx
-}
-
 // startTransports establishes ICE transport as [webrtc.ICERoleControlled], DTLS transport as [webrtc.DTLSRoleServer]
 // and SCTP transport using the remote description. It will block until two data channels labeled 'ReliableDataChannel'
-// and 'UnreliableDataChannel' will be created by the remote connection. The [context.Context] is used to cancel blocking.
+// and 'UnreliableDataChannel' are created by the remote connection. The [context.Context] is used to cancel blocking.
 func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *description) error {
 	conn.log.Debug("starting ICE transport as controlled")
 	iceRole := webrtc.ICERoleControlled
@@ -426,7 +432,7 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 }
 
 // withContext calls the function with context-awareness (a little bit forcibly). It is useful for functions that
-// does not accept any [context.Context] as a parameter, like the Start method of each transport of the Conn (that
+// do not accept any [context.Context] as a parameter, such as the Start method of each transport of the Conn (that
 // will mostly hang if the remote connection does nothing).
 func withContext(ctx context.Context, f func() error) error {
 	err := make(chan error, 1)
@@ -441,11 +447,12 @@ func withContext(ctx context.Context, f func() error) error {
 	}
 }
 
-// Close closes the Listener. Any blocking methods will return net.ErrClosed as an error.
+// Close closes the Listener, ensuring that any blocking methods will return [net.ErrClosed] as an error.
 func (l *Listener) Close() error {
 	l.once.Do(func() {
 		close(l.closed)
 		close(l.incoming)
+		l.stop()
 	})
 	return nil
 }
@@ -466,9 +473,37 @@ func (e *signalError) Error() string {
 // Unwrap returns the underlying error so that may be unwrapped with errors.Unwrap.
 func (e *signalError) Unwrap() error { return e.underlying }
 
-// wrapSignalError returns a signalError which includes the error as its underlying error (that may be
-// unwrapped with errors.Unwrap) and the code to be signaled back to the remote connection. It is usually
-// called by the methods to handle incoming Signals signaled from the remote connection on Listener.
+// wrapSignalError returns a signalError that includes the error as its underlying error (which may be
+// unwrapped with [errors.Unwrap]) and the code to be signaled back to the remote connection. It is typically
+// called by methods handling incoming Signals on the Listener.
 func wrapSignalError(err error, code int) *signalError {
 	return &signalError{code: code, underlying: err}
+}
+
+// listenerContext implements [context.Context] for a Listener.
+type listenerContext struct{ closed <-chan struct{} }
+
+// Deadline returns the zero [time.Time] and false, indicating that deadlines are not used.
+func (listenerContext) Deadline() (zero time.Time, ok bool) {
+	return zero, false
+}
+
+// Done returns a channel that is closed when the Listener has been closed.
+func (ctx listenerContext) Done() <-chan struct{} {
+	return ctx.closed
+}
+
+// Err returns [net.ErrClosed] if the Listener has been closed. Returns nil otherwise.
+func (ctx listenerContext) Err() error {
+	select {
+	case <-ctx.closed:
+		return net.ErrClosed
+	default:
+		return nil
+	}
+}
+
+// Value returns nil for any key, as no values are associated with the context.
+func (listenerContext) Value(any) any {
+	return nil
 }

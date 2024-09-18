@@ -14,33 +14,35 @@ import (
 	"sync"
 )
 
+// Dialer encapsulates options for establishing a connection with a NetherNet network through [Dialer.DialContext]
+// and other aliases. It allows customizing logging, WebRTC API settings, and contexts for a negotiation.
 type Dialer struct {
-	// NetworkID and ConnectionID are the local IDs of a Conn being established. If
-	// left as zero, a random value will automatically set from rand.Uint64.
-	NetworkID, ConnectionID uint64
+	// ConnectionID is the unique ID of a Conn being established. If zero, a random value will be automatically
+	// set from [rand.Uint64].
+	ConnectionID uint64
 
-	// Log is used to output several messages at many log levels. If left as nil, the default [slog.Logger]
-	// will be set from [slog.Default]. It will be extended when returning a Conn with additional attributes
-	// such as its ID and network ID, and a [slog.Attr] with the key "src" with the value "dialer" to mark
-	// that the Conn has been negotiated by Dialer.
+	// Log is used for logging messages at various log levels. If nil, the default [slog.Logger] will be automatically
+	// set from [slog.Default]. Log will be extended when a Conn is being established by [Dialer] with additional attributes
+	// such as the connection ID and network ID, and will have a 'src' attribute set to 'listener' to mark that the Conn
+	// has been negotiated by Dialer.
 	Log *slog.Logger
 
 	// API specifies custom configuration for WebRTC transports, and data channels. If left as nil, a new [webrtc.API]
 	// will be set from [webrtc.NewAPI]. The webrtc.SettingEngine of the API should not allow detaching data channels
 	// (by calling [webrtc.SettingEngine.DetachDataChannels]) as it requires additional steps on the Conn.
+
+	// API specifies custom configuration for WebRTC transports and data channels. If nil, a new [webrtc.API] will be
+	// set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires
+	// additional steps on the Conn (which cannot be determined by the Conn).
 	API *webrtc.API
 }
 
-// DialContext establishes a Conn with a remote network with the ID. The implementation of [Signaling]
-// may be used to signal an offer and local ICE candidates. It notifies Signals of SignalTypeAnswer and
-// SignalTypeCandidate signaled from the remote connection. The [context.Context] may be used to cancel
-// the connection as soon as possible. If [context.Context.Err] returns [context.DeadlineExceeded], it
-// signals back a Signal of SignalTypeError with ErrorCodeInactivityTimeout or ErrorCodeNegotiationTimeoutWaitingForAccept
-// based on the progress. A Conn may be returned, that is ready to receive and send packets.
+// DialContext establishes a Conn with a remote network referenced by the ID. The Signaling implementation may be used to
+// signal an offer and local ICE candidates, and to notify Signals of SignalTypeAnswer and SignalTypeCandidate signaled from
+// the remote connection. The [context.Context] may be used to cancel the connection as soon as possible. If the [context.Context]
+// is done, and [context.Context.Err] returns [context.DeadlineExceeded], it signals back a Signal of SignalTypeError with ErrorCodeInactivityTimeout
+// or ErrorCodeNegotiationTimeoutWaitingForAccept based on the progress. A Conn may be returned, that is ready to receive and send packets.
 func (d Dialer) DialContext(ctx context.Context, networkID uint64, signaling Signaling) (*Conn, error) {
-	if d.NetworkID == 0 {
-		d.NetworkID = rand.Uint64()
-	}
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
 	}
@@ -127,14 +129,16 @@ func (d Dialer) DialContext(ctx context.Context, networkID uint64, signaling Sig
 			}
 		}
 
-		n := d.notifySignals(ctx, networkID, signaling)
+		n, stop := d.notifySignals(networkID, signaling)
 		select {
 		case <-ctx.Done():
 			if errors.Is(err, context.DeadlineExceeded) {
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
+			stop()
 			return nil, ctx.Err()
 		case err := <-n.errs:
+			stop()
 			return nil, fmt.Errorf("notified error from signaling: %w", err)
 		case signal := <-n.signals:
 			if signal.Type != SignalTypeAnswer {
@@ -154,10 +158,13 @@ func (d Dialer) DialContext(ctx context.Context, networkID uint64, signaling Sig
 			}
 
 			c := newConn(ice, dtls, sctp, d.ConnectionID, networkID, Addr{
-				NetworkID:    d.NetworkID,
+				NetworkID:    signaling.NetworkID(),
 				ConnectionID: d.ConnectionID,
 				Candidates:   candidates,
-			}, d)
+			}, dialerConn{
+				Dialer: d,
+				stop:   stop,
+			})
 			go d.handleConn(ctx, c, n.signals)
 
 			select {
@@ -181,12 +188,24 @@ func (d Dialer) DialContext(ctx context.Context, networkID uint64, signaling Sig
 	}
 }
 
-// handleClose is a no-op method to implement negotiator.
-func (Dialer) handleClose(*Conn) {}
+// dialerConn implements negotiator for a Conn negotiated by Dialer.
+type dialerConn struct {
+	Dialer
 
-// log returns Log of the Dialer. It will always be non-nil as it is always defaulted
-// to the [slog.Logger] from [slog.Default] before creating a Conn.
-func (d Dialer) log() *slog.Logger {
+	// stop is the function without parameters which is returned by [Signaling.Notify]
+	// to stop receiving notifications in Notifier from Signaling.
+	stop func()
+}
+
+// handleClose stops receiving notifications in Notifier from Signaling for incoming signals and errors.
+func (d dialerConn) handleClose(*Conn) {
+	d.stop()
+}
+
+// log returns the Log of the Dialer and extends it for a Conn with an additional [slog.Attr] of 'src'
+// set to 'dialer' to mark that the Conn has been negotiated by Dialer. [Dialer.Log] will always be
+// non-nil as it is always set up to the default [slog.Logger] before creating a Conn through newConn.
+func (d dialerConn) log() *slog.Logger {
 	return d.Log.With(slog.String("src", "dialer"))
 }
 
@@ -250,8 +269,8 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 	return nil
 }
 
-// handleConn handles incoming Signals signaled from the remote connection, and calls Conn.handleSignal
-// to handle them in the Conn. The [context.Context] is used to return immediately when it has been
+// handleConn handles incoming Signals signaled from the remote connection and calls Conn.handleSignal
+// to handle them within the Conn. The [context.Context] is used to return immediately when it has been
 // canceled or exceeded the deadline.
 func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Signal) {
 	for {
@@ -269,9 +288,10 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 	}
 }
 
-// notifySignals starts notifying incoming Signals that has the same network ID and [Dialer.ConnectionID]
-// with dialerNotifier. The [context.Context] is used to cancel the notification.
-func (d Dialer) notifySignals(ctx context.Context, networkID uint64, signaling Signaling) *dialerNotifier {
+// notifySignals registers dialerNotifier to the Signaling to receive notifications of incoming Signals that has
+// the same network ID and same ConnectionID of Dialer. A *dialerNotifier and a function to stop receiving notifications
+// will be returned.
+func (d Dialer) notifySignals(networkID uint64, signaling Signaling) (*dialerNotifier, func()) {
 	n := &dialerNotifier{
 		Dialer: d,
 
@@ -279,18 +299,18 @@ func (d Dialer) notifySignals(ctx context.Context, networkID uint64, signaling S
 		errs:      make(chan error),
 		networkID: networkID,
 	}
-	signaling.Notify(ctx, n)
-	return n
+	return n, signaling.Notify(n)
 }
 
+// dialerNotifier notifies incoming Signals and errors.
 type dialerNotifier struct {
 	Dialer
 
 	signals chan *Signal // Notifies incoming Signal that has the same IDs
 	errs    chan error   // Notifies error occurred in Signaling
 
-	once      sync.Once
-	networkID uint64
+	once      sync.Once // Ensures closure only occur once
+	networkID uint64    // Remote network ID
 }
 
 func (d *dialerNotifier) NotifySignal(signal *Signal) {
