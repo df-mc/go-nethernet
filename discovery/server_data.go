@@ -14,6 +14,7 @@ type ServerData struct {
 	PlayerCount    int32
 	MaxPlayerCount int32
 	IsEditorWorld  bool
+	Hardcore       bool
 	TransportLayer int32
 }
 
@@ -27,6 +28,7 @@ func (d *ServerData) MarshalBinary() ([]byte, error) {
 	_ = binary.Write(buf, binary.LittleEndian, d.PlayerCount)
 	_ = binary.Write(buf, binary.LittleEndian, d.MaxPlayerCount)
 	_ = binary.Write(buf, binary.LittleEndian, d.IsEditorWorld)
+	_ = binary.Write(buf, binary.LittleEndian, d.Hardcore)
 	_ = binary.Write(buf, binary.LittleEndian, d.TransportLayer)
 
 	return buf.Bytes(), nil
@@ -59,6 +61,9 @@ func (d *ServerData) UnmarshalBinary(data []byte) error {
 	}
 	if err := binary.Read(buf, binary.LittleEndian, &d.IsEditorWorld); err != nil {
 		return fmt.Errorf("read editor world: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &d.Hardcore); err != nil {
+		return fmt.Errorf("read hardcore: %w", err)
 	}
 	if err := binary.Read(buf, binary.LittleEndian, &d.TransportLayer); err != nil {
 		return fmt.Errorf("read transport layer: %w", err)

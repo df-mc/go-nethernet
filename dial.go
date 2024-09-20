@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"strconv"
-	"sync"
 )
 
 // Dialer encapsulates options for establishing a connection with a NetherNet network through [Dialer.DialContext]
@@ -276,6 +275,8 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 		select {
 		case <-ctx.Done():
 			return
+		case <-conn.closed:
+			return
 		case signal := <-signals:
 			switch signal.Type {
 			case SignalTypeCandidate, SignalTypeError:
@@ -294,8 +295,10 @@ func (d Dialer) notifySignals(networkID uint64, signaling Signaling) (*dialerNot
 	n := &dialerNotifier{
 		Dialer: d,
 
-		signals:   make(chan *Signal),
-		errs:      make(chan error),
+		signals: make(chan *Signal),
+		errs:    make(chan error),
+		closed:  make(chan struct{}),
+
 		networkID: networkID,
 	}
 	return n, signaling.Notify(n)
@@ -305,22 +308,32 @@ func (d Dialer) notifySignals(networkID uint64, signaling Signaling) (*dialerNot
 type dialerNotifier struct {
 	Dialer
 
-	signals chan *Signal // Notifies incoming Signal that has the same IDs
-	errs    chan error   // Notifies error occurred in Signaling
+	signals chan *Signal  // Notifies incoming Signal that has the same IDs
+	errs    chan error    // Notifies error occurred in Signaling
+	closed  chan struct{} // Notifies that dialerNotifier is closed, and ensures that closure occur only once
 
-	once      sync.Once // Ensures closure only occur once
-	networkID uint64    // Remote network ID
+	networkID uint64 // Remote network ID
 }
 
 func (d *dialerNotifier) NotifySignal(signal *Signal) {
 	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
 		return
 	}
+
 	d.signals <- signal
 }
 
 func (d *dialerNotifier) NotifyError(err error) {
-	d.errs <- err
+	select {
+	case <-d.closed:
+		return
+	default:
+	}
+
+	select {
+	case d.errs <- err:
+	default:
+	}
 
 	if errors.Is(err, ErrSignalingStopped) {
 		d.close()
@@ -328,8 +341,7 @@ func (d *dialerNotifier) NotifyError(err error) {
 }
 
 func (d *dialerNotifier) close() {
-	d.once.Do(func() {
-		close(d.signals)
-		close(d.errs)
-	})
+	close(d.signals)
+	close(d.errs)
+	close(d.closed)
 }

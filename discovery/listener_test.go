@@ -24,7 +24,7 @@ func TestListen(t *testing.T) {
 		}
 	})
 	d.ServerData(&ServerData{
-		Version:        0x2,
+		Version:        0x3,
 		ServerName:     "Da1z981",
 		LevelName:      "LAN のデバッグ",
 		GameType:       2,
@@ -38,7 +38,7 @@ func TestListen(t *testing.T) {
 	})))
 
 	var c nethernet.ListenConfig
-	l, err := c.Listen(cfg.NetworkID, d)
+	l, err := c.Listen(d)
 	if err != nil {
 		t.Fatalf("error listening: %s", err)
 	}
