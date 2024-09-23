@@ -25,10 +25,6 @@ type Dialer struct {
 	// has been negotiated by Dialer.
 	Log *slog.Logger
 
-	// API specifies custom configuration for WebRTC transports, and data channels. If left as nil, a new [webrtc.API]
-	// will be set from [webrtc.NewAPI]. The webrtc.SettingEngine of the API should not allow detaching data channels
-	// (by calling [webrtc.SettingEngine.DetachDataChannels]) as it requires additional steps on the Conn.
-
 	// API specifies custom configuration for WebRTC transports and data channels. If nil, a new [webrtc.API] will be
 	// set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires
 	// additional steps on the Conn (which cannot be determined by the Conn).
@@ -248,17 +244,21 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 	if err := withContext(ctx, func() error {
 		var err error
 		conn.reliable, err = d.API.NewDataChannel(conn.sctp, &webrtc.DataChannelParameters{
-			Label: "ReliableDataChannel",
+			Label:   "ReliableDataChannel",
+			Ordered: true,
 		})
 		return err
 	}); err != nil {
 		return fmt.Errorf("create ReliableDataChannel: %w", err)
 	}
 	if err := withContext(ctx, func() error {
-		var err error
+		var (
+			err            error
+			maxRetransmits uint16 = 0
+		)
 		conn.unreliable, err = d.API.NewDataChannel(conn.sctp, &webrtc.DataChannelParameters{
-			Label:   "UnreliableDataChannel",
-			Ordered: false,
+			Label:          "UnreliableDataChannel",
+			MaxRetransmits: &maxRetransmits,
 		})
 		return err
 	}); err != nil {

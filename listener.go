@@ -77,7 +77,6 @@ type Listener struct {
 
 	stop   func()
 	closed chan struct{}
-	once   sync.Once
 }
 
 // Accept waits for and returns the next [Conn] to the Listener. An error may be
@@ -113,6 +112,12 @@ type Addr struct {
 	// signaled from a remote connection. ICE candidates are used to determine the UDP/TCP addresses
 	// for establishing ICE transport and can be used to determine the network address of the connection.
 	Candidates []webrtc.ICECandidate
+
+	// SelectedCandidate is the candidate selected to connect with the ICE transport within a Conn.
+	// An ICE candidate may be used to determine the UDP/TCP address of the connection. It may be nil
+	// if the Conn has been closed, or if the Conn has encountered an error when obtaining the selected
+	// ICE candidate pair.
+	SelectedCandidate *webrtc.ICECandidate
 }
 
 // String formats the Addr as a string.
@@ -123,6 +128,12 @@ func (addr *Addr) String() string {
 	if addr.ConnectionID != 0 {
 		b.WriteByte('(')
 		b.WriteString(strconv.FormatUint(addr.ConnectionID, 10))
+		b.WriteByte(')')
+	}
+	if addr.SelectedCandidate != nil {
+		b.WriteByte(' ')
+		b.WriteByte('(')
+		b.WriteString(addr.SelectedCandidate.String())
 		b.WriteByte(')')
 	}
 	return b.String()
@@ -332,7 +343,7 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 	var err error
 	defer func() {
 		if err != nil {
-			l.connections.Delete(conn.remoteAddr().String()) // Stop notifying for the Conn.
+			_ = conn.Close() // Stop notifying for the Conn.
 
 			if errors.Is(err, context.DeadlineExceeded) {
 				if err := l.signaling.Signal(&Signal{
@@ -368,6 +379,9 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 	select {
 	case <-ctx.Done():
 		err = ctx.Err()
+	case <-l.closed:
+	case <-conn.closed:
+		return
 	case <-conn.candidateReceived:
 		conn.log.Debug("received first candidate")
 		if err = l.startTransports(ctx, conn, d); err != nil {
@@ -398,21 +412,18 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	}
 
 	conn.log.Debug("starting SCTP transport")
-	var (
-		once   = new(sync.Once)
-		opened = make(chan struct{}, 1)
-	)
+	opened := make(chan struct{}, 1)
 	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
 		switch channel.Label() {
 		case "ReliableDataChannel":
 			conn.reliable = channel
 		case "UnreliableDataChannel":
 			conn.unreliable = channel
+		default:
+			return
 		}
 		if conn.reliable != nil && conn.unreliable != nil {
-			once.Do(func() {
-				close(opened)
-			})
+			close(opened)
 		}
 	})
 	if err := withContext(ctx, func() error {
@@ -449,12 +460,15 @@ func withContext(ctx context.Context, f func() error) error {
 
 // Close closes the Listener, ensuring that any blocking methods will return [net.ErrClosed] as an error.
 func (l *Listener) Close() error {
-	l.once.Do(func() {
+	select {
+	case <-l.closed:
+		return nil
+	default:
 		close(l.closed)
 		close(l.incoming)
 		l.stop()
-	})
-	return nil
+		return nil
+	}
 }
 
 // A signalError may be returned by the methods of Listener to handle incoming Signals signaled from the
