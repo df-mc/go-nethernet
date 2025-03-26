@@ -1,5 +1,5 @@
 name: Go
-on: [push, pr]
+on: [push, pull_request]
 jobs:
 
   build:
