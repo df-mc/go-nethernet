@@ -3,7 +3,7 @@
 go-nethernet is a library that implements a basic version of the NetherNet protocol, which is currently used
 for Minecraft: Bedrock Edition connections over LAN and Xbox Live.
 
-!NOTE
+> [!WARNING]
 > This library is still in development and is not yet feature-complete.
 
 ### Documentation
