@@ -63,8 +63,9 @@ type Conn struct {
 
 	log *slog.Logger
 
-	local         Addr
-	id, networkID uint64
+	local     Addr
+	id        uint64
+	networkID string
 }
 
 // Read receives a message from the 'ReliableDataChannel'. The bytes of the message data are copied to
@@ -462,7 +463,7 @@ func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole 
 // a [slog.Logger] of the Conn, and few other methods to handle events such as closures. The
 // negotiator (caller) must establish each transport after creating a Conn when a first ICE
 // candidate has been signaled from the remote connection.
-func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, id, networkID uint64, local Addr, n negotiator) *Conn {
+func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, id uint64, networkID string, local Addr, n negotiator) *Conn {
 	return &Conn{
 		ice:  ice,
 		dtls: dtls,
@@ -480,7 +481,7 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 
 		log: n.log().With(slog.Group("connection",
 			slog.Uint64("id", id),
-			slog.Uint64("networkID", networkID),
+			slog.String("networkID", networkID),
 		)),
 
 		local: local,

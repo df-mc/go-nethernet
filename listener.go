@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v4"
 	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pion/sdp/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // ListenConfig encapsulates options for creating a new Listener through [ListenConfig.Listen].
@@ -50,10 +51,14 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 	if conf.API == nil {
 		conf.API = webrtc.NewAPI()
 	}
+	networkID, err := strconv.ParseUint(signaling.NetworkID(), 10, 64)
+	if err != nil {
+		return nil, err
+	}
 	l := &Listener{
 		conf:      conf,
 		signaling: signaling,
-		networkID: signaling.NetworkID(),
+		networkID: networkID,
 
 		incoming: make(chan *Conn),
 
@@ -91,7 +96,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 
 // Addr returns an Addr that represents the local network ID of the Listener.
 func (l *Listener) Addr() net.Addr {
-	return &Addr{NetworkID: l.networkID}
+	return &Addr{NetworkID: strconv.FormatUint(l.networkID, 10)}
 }
 
 // Addr represents a network address that encapsulates both local and remote connection
@@ -105,7 +110,7 @@ type Addr struct {
 	ConnectionID uint64
 
 	// NetworkID is a unique ID for the NetherNet network.
-	NetworkID uint64
+	NetworkID string
 
 	// Candidates contains a list of ICE candidates. These candidates are either gathered locally or
 	// signaled from a remote connection. ICE candidates are used to determine the UDP/TCP addresses
@@ -122,7 +127,7 @@ type Addr struct {
 // String formats the Addr as a string.
 func (addr *Addr) String() string {
 	b := &strings.Builder{}
-	b.WriteString(strconv.FormatUint(addr.NetworkID, 10))
+	b.WriteString(addr.NetworkID)
 	b.WriteByte(' ')
 	if addr.ConnectionID != 0 {
 		b.WriteByte('(')
@@ -298,7 +303,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		}
 
 		c := newConn(ice, dtls, sctp, signal.ConnectionID, signal.NetworkID, Addr{
-			NetworkID:  l.networkID,
+			NetworkID:  strconv.FormatUint(l.networkID, 10),
 			Candidates: candidates,
 		}, l)
 
