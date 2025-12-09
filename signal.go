@@ -5,9 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/pion/webrtc/v4"
 	"strconv"
 	"strings"
+
+	"github.com/pion/webrtc/v4"
 )
 
 // Signaling implements an interface for sending and receiving Signals over a network.
@@ -28,7 +29,7 @@ type Signaling interface {
 
 	// NetworkID returns the local network ID of Signaling. It is used by Listener to obtain its local
 	// network ID.
-	NetworkID() uint64
+	NetworkID() string
 	// PongData sets the server data in the format of a RakNet pong response. It is used by the Listener
 	// to respond to a ping request in the correct format.
 	PongData(b []byte)
@@ -87,7 +88,7 @@ type Signal struct {
 	// NetworkID is the internal ID used by Signaling to reference a remote network and not
 	// included to the String representation to be signaled to the remote network. If sent by
 	// a server, it represents the sender ID. If sent by a client, it represents the recipient ID.
-	NetworkID uint64
+	NetworkID string
 }
 
 // MarshalText returns the bytes of a string representation returned from [Signal.String].
