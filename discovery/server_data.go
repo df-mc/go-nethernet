@@ -17,7 +17,7 @@ type ServerData struct {
 	LevelName string
 	// GameType is the default game mode of the world. Players receive this game mode when they
 	// join. It remains unchanged during gameplay and may be updated the next time the world is hosted.
-	GameType int
+	GameType uint8
 	// PlayerCount is teh amount of players currently connected to the world. Worlds
 	// with a player count of 0 or less are not displayed by clients, so it should at
 	// least 1 even if the server reports 0 to prevent world cards not appearing for the server.
@@ -48,7 +48,7 @@ func (d *ServerData) MarshalBinary() ([]byte, error) {
 	_ = binary.Write(buf, binary.LittleEndian, version)
 	writeBytes[uint8](buf, []byte(d.ServerName))
 	writeBytes[uint8](buf, []byte(d.LevelName))
-	_ = binary.Write(buf, binary.LittleEndian, uint8(d.GameType<<1))
+	_ = binary.Write(buf, binary.LittleEndian, d.GameType<<1)
 	_ = binary.Write(buf, binary.LittleEndian, d.PlayerCount)
 	_ = binary.Write(buf, binary.LittleEndian, d.MaxPlayerCount)
 	_ = binary.Write(buf, binary.LittleEndian, d.EditorWorld)
@@ -84,7 +84,7 @@ func (d *ServerData) UnmarshalBinary(data []byte) error {
 	if err := binary.Read(buf, binary.LittleEndian, &gameType); err != nil {
 		return fmt.Errorf("read game type: %w", err)
 	}
-	d.GameType = int(gameType >> 1)
+	d.GameType = gameType >> 1
 	if err := binary.Read(buf, binary.LittleEndian, &d.PlayerCount); err != nil {
 		return fmt.Errorf("read player count: %w", err)
 	}
