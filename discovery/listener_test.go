@@ -166,6 +166,7 @@ func TestListen(t *testing.T) {
 		PlayerCount:    1,
 		MaxPlayerCount: 8,
 		TransportLayer: 2,
+		ConnectionType: 4,
 	})
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
