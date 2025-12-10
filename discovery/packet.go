@@ -114,11 +114,8 @@ func writeBytes[L ~uint32 | ~uint8](w io.Writer, b []byte) {
 }
 
 const (
-	// IDRequestPacket is the packet ID for RequestPacket.
 	IDRequestPacket uint16 = iota
-	// IDResponsePacket is the packet ID for ResponsePacket.
 	IDResponsePacket
-	// IDMessagePacket is the packet ID for MessagePacket.
 	IDMessagePacket
 )
 
