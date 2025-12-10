@@ -138,11 +138,10 @@ func (l *Listener) Signal(signal *nethernet.Signal) error {
 			return fmt.Errorf("no address found for network ID: %d", networkID)
 		}
 
-		_, err = l.conn.WriteTo(Marshal(&MessagePacket{
+		return l.write(&MessagePacket{
 			RecipientID: networkID,
 			Data:        signal.String(),
-		}, l.conf.NetworkID), addr.addr)
-		return err
+		}, addr.addr)
 	}
 }
 
@@ -214,6 +213,13 @@ func (l *Listener) listen() {
 	}
 }
 
+// write writes the packet to the destination address using the network ID of Listener.
+func (l *Listener) write(pk Packet, addr net.Addr) error {
+	b := Marshal(pk, l.conf.NetworkID)
+	_, err := l.conn.WriteTo(b, addr)
+	return err
+}
+
 // handlePacket handles a packet data received from the remote network. An addr will be mapped
 // for the NetherNet ID for future use in [NetherNet.Signal], if decoding was successful.
 func (l *Listener) handlePacket(data []byte, addr net.Addr) error {
@@ -260,16 +266,16 @@ func (l *Listener) handleRequest(addr net.Addr) error {
 	if data == nil {
 		return errors.New("application data not set yet")
 	}
-	if _, err := l.conn.WriteTo(Marshal(&ResponsePacket{
+	if err := l.write(&ResponsePacket{
 		ApplicationData: *data,
-	}, l.conf.NetworkID), addr); err != nil {
+	}, addr); err != nil {
 		return fmt.Errorf("write response: %w", err)
 	}
 	return nil
 }
 
 // handleResponse handles a ResponsePacket sent from the servers.
-// It stores its ApplicationData to the responses atomically.
+// It stores its ApplicationData to the responses atomically along with the sender ID.
 func (l *Listener) handleResponse(pk *ResponsePacket, senderID uint64) error {
 	l.responsesMu.Lock()
 	l.responses[senderID] = pk.ApplicationData
@@ -359,7 +365,7 @@ func (l *Listener) background() {
 			l.deleteInactiveAddresses()
 
 			if l.conf.BroadcastAddress != nil {
-				if _, err := l.conn.WriteTo(Marshal(&RequestPacket{}, l.conf.NetworkID), l.conf.BroadcastAddress); err != nil {
+				if err := l.write(&RequestPacket{}, l.conf.BroadcastAddress); err != nil {
 					if !errors.Is(err, net.ErrClosed) {
 						l.conf.Log.Error("error broadcasting request", slog.Any("error", err))
 					}
