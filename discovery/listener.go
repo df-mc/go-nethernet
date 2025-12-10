@@ -64,18 +64,22 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	}
 	go l.listen()
 
-	if conf.BroadcastAddress == nil && addrPort.Port() != 7551 {
+	if conf.BroadcastAddress == nil && addrPort.Port() != DefaultPort {
 		// If the port for the address is 7551, it means no applications are listening on this network
 		// and server discovery using limited broadcast on net.IPv4bcast is not meaningful.
 		conf.BroadcastAddress = &net.UDPAddr{
 			IP:   net.IPv4bcast,
-			Port: 7551,
+			Port: DefaultPort,
 		}
 	}
 	go l.background()
 
 	return l, nil
 }
+
+// DefaultPort is the port used for LAN discovery in Minecraft: Bedrock Edition.
+// Servers should listen on this port to receive RequestPacket broadcasted from clients.
+const DefaultPort = 7551
 
 // Listener represents a listener for LAN discovery. It uses UDP as the underlying protocol
 // and allows both discovering servers on the network using broadcast or announcing servers

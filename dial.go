@@ -186,8 +186,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 type dialerConn struct {
 	Dialer
 
-	// stop is the function without parameters which is returned by [Signaling.Notify]
-	// to stop receiving notifications in Notifier from Signaling.
+	// stop is a function that can be called without parameters, which is returned by
+	// [Signaling.Notify] to stop notifying signals from Signaling.
 	stop func()
 }
 

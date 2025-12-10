@@ -8,9 +8,9 @@ import (
 
 // MessagePacket is sent by both server and client to negotiate a NetherNet connection.
 type MessagePacket struct {
-	// RecipientID is the ID of NetherNet network that has sent the packet. Note that
-	// this is not connection ID, which is included in the Data and only used once in
-	// negotiation while network ID may be used across many connections.
+	// RecipientID is the network ID to be signaled by MessagePacket. Note that this is
+	// not the connection ID. The connection ID is included in the Data field and used only
+	// during a single negotiation, whereas the network ID may be used across multiple connections.
 	RecipientID uint64
 	// Data is the actual data for signaling. It contains the string form of nethernet.Signal.
 	Data string
