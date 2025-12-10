@@ -18,7 +18,7 @@ type ServerData struct {
 	// GameType is the default game mode of the world. Players receive this game mode when they
 	// join. It remains unchanged during gameplay and may be updated the next time the world is hosted.
 	GameType uint8
-	// PlayerCount is teh amount of players currently connected to the world. Worlds
+	// PlayerCount is the amount of players currently connected to the world. Worlds
 	// with a player count of 0 or less are not displayed by clients, so it should at
 	// least 1 even if the server reports 0 to prevent world cards not appearing for the server.
 	PlayerCount int32
