@@ -50,6 +50,15 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 		return nil, err
 	}
 
+	if conf.BroadcastAddress == nil && addrPort.Port() != DefaultPort {
+		// If the port for the address is 7551, it means no applications are listening on this network
+		// and server discovery using limited broadcast on net.IPv4bcast is not meaningful.
+		conf.BroadcastAddress = &net.UDPAddr{
+			IP:   net.IPv4bcast,
+			Port: DefaultPort,
+		}
+	}
+
 	l := &Listener{
 		conn: conn,
 
@@ -62,16 +71,8 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		closed: make(chan struct{}),
 	}
-	go l.listen()
 
-	if conf.BroadcastAddress == nil && addrPort.Port() != DefaultPort {
-		// If the port for the address is 7551, it means no applications are listening on this network
-		// and server discovery using limited broadcast on net.IPv4bcast is not meaningful.
-		conf.BroadcastAddress = &net.UDPAddr{
-			IP:   net.IPv4bcast,
-			Port: DefaultPort,
-		}
-	}
+	go l.listen()
 	go l.background()
 
 	return l, nil

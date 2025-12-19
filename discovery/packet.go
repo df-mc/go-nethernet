@@ -58,7 +58,7 @@ func Unmarshal(b []byte) (Packet, uint64, error) {
 
 	hash := hmac.New(sha256.New, key[:])
 	hash.Write(payload)
-	if checksum := hash.Sum(nil); bytes.Compare(b[:32], checksum) != 0 {
+	if checksum := hash.Sum(nil); !bytes.Equal(b[:32], checksum) {
 		return nil, 0, fmt.Errorf("checksum mismatch: %x != %x", b[:32], checksum)
 	}
 	buf := bytes.NewBuffer(payload)
