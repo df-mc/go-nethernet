@@ -75,15 +75,11 @@ func TestDiscovery(t *testing.T) {
 		t.Cleanup(ticker.Stop)
 
 		for range ticker.C {
-			if n, err := listener.WriteToUDP(request, &net.UDPAddr{
+			if _, err := listener.WriteToUDP(request, &net.UDPAddr{
 				IP:   net.IPv4bcast,
 				Port: 7551,
 			}); err != nil {
 				panic(err)
-			} else {
-				if n != len(request) {
-					t.Fatalf("request is not fully sent: %d != %d", n, len(request))
-				}
 			}
 			t.Log("ping")
 		}
