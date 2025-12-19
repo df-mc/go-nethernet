@@ -42,7 +42,7 @@ func (r MessageReliability) Parameters() *webrtc.DataChannelParameters {
 			MaxRetransmits: &param,
 		}
 	default:
-		panic(fmt.Sprintf("nethernet: MessageReliability.Parameters: unknown value"))
+		panic("nethernet: MessageReliability.Parameters: unknown value")
 	}
 }
 
