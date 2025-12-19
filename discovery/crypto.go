@@ -5,12 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+
 	"github.com/andreburgaud/crypt2go/ecb"
 	"github.com/andreburgaud/crypt2go/padding"
 )
 
+// key is the encryption key used for packets transmitted during LAN discovery.
 var key = sha256.Sum256(binary.LittleEndian.AppendUint64(nil, 0xdeadbeef)) // 0xdeadbeef is also referenced as Application ID
 
+// encrypt encrypts the content of the bytes using AES-ECB with PKCS7 padding.
 func encrypt(src []byte) []byte {
 	block, _ := aes.NewCipher(key[:])
 	mode := ecb.NewECBEncrypter(block)
@@ -21,6 +24,7 @@ func encrypt(src []byte) []byte {
 	return dst
 }
 
+// decrypt decrypts the content of the bytes using AES-ECB with PKCS7 padding.
 func decrypt(src []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
