@@ -395,6 +395,7 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 	case <-conn.candidateReceived:
 		conn.log.Debug("received first candidate")
 		if err = l.startTransports(ctx, conn, d); err != nil {
+			conn.log.Error("error starting transports", slog.Any("error", err))
 			return
 		}
 		conn.handleTransports()
@@ -423,18 +424,26 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 
 	conn.log.Debug("starting SCTP transport")
 	opened := make(chan struct{}, 1)
+	var cancel context.CancelCauseFunc
+	ctx, cancel = context.WithCancelCause(ctx)
 	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
-		switch channel.Label() {
-		case "ReliableDataChannel":
-			conn.reliable = channel
-		case "UnreliableDataChannel":
-			conn.unreliable = channel
-		default:
-			return
+		for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
+			if r.Valid(channel) {
+				if conn.channels[r] != nil {
+					cancel(fmt.Errorf("data channel opened for same reliability parameters: %q", r.Parameters().Label))
+					return
+				}
+				conn.channels[r] = wrapDataChannel(channel)
+				for rr := MessageReliability(0); rr < messageReliabilityCapacity; rr++ {
+					if conn.channels[rr] == nil {
+						return
+					}
+				}
+				close(opened)
+				return
+			}
 		}
-		if conn.reliable != nil && conn.unreliable != nil {
-			close(opened)
-		}
+		cancel(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
 	})
 	if err := withContext(ctx, func() error {
 		return conn.sctp.Start(d.sctp)
@@ -448,7 +457,7 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	case <-opened:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return context.Cause(ctx)
 	}
 }
 

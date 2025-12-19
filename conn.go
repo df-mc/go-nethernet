@@ -47,17 +47,16 @@ type Conn struct {
 	// candidates includes all [webrtc.ICECandidate] signaled from the remote connection.
 	// New candidates are appended atomically to the slice.
 	candidates   []webrtc.ICECandidate
-	candidatesMu sync.Mutex // Guards above
+	candidatesMu sync.Mutex // Guards candidates
 
 	// negotiator is either Listener or Dialer that the Conn has been negotiated through.
 	negotiator negotiator
 
-	reliable, unreliable *webrtc.DataChannel // ReliableDataChannel and UnreliableDataChannel
-
-	packets chan []byte
-
-	// message includes a buffer of previously-received segments and the count of the last segment.
-	message *message
+	// channels contains *dataChannel used for sending messages in multiple MessageReliability.
+	//
+	// There is currently two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel'
+	// that are expected to both open during negotiating a new Conn.
+	channels [messageReliabilityCapacity]*dataChannel
 
 	once   sync.Once     // Ensures closure occur only once
 	closed chan struct{} // Notifies that a Conn has been closed.
@@ -71,53 +70,72 @@ type Conn struct {
 
 // Read receives a message from the 'ReliableDataChannel'. The bytes of the message data are copied to
 // the given data. An error may be returned if the Conn has been closed by [Conn.Close].
-func (c *Conn) Read(b []byte) (n int, err error) {
+func (conn *Conn) Read(b []byte) (n int, err error) {
+	pk, err := conn.Receive(MessageReliabilityReliable)
+	if err != nil {
+		return n, err
+	}
+	return copy(b, pk), nil
+}
+
+// Receive receives a packet in fully reconstructed state combined from multiple segments
+// received from the data channel responsible for the MessageReliability. An error may be
+// returned if the Conn has been closed by [Conn.Close].
+func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	select {
-	case <-c.closed:
-		return n, net.ErrClosed
-	case pk := <-c.packets:
-		return copy(b, pk), nil
+	case <-conn.closed:
+		return nil, net.ErrClosed
+	case pk := <-conn.channels[r].packets:
+		return pk, nil
 	}
 }
 
 // ReadPacket receives a message from the 'ReliableDataChannel' and returns the bytes. It is
 // implemented for Minecraft read operations to avoid some bugs related to the Read method in
 // their decoder.
-func (c *Conn) ReadPacket() ([]byte, error) {
-	select {
-	case <-c.closed:
-		return nil, net.ErrClosed
-	case pk := <-c.packets:
-		return pk, nil
-	}
+func (conn *Conn) ReadPacket() ([]byte, error) {
+	return conn.Receive(MessageReliabilityReliable)
 }
 
 // PacketHeader always returns 0 and false as no header is prefixed before packets.
-func (c *Conn) PacketHeader() (byte, bool) {
+func (conn *Conn) PacketHeader() (byte, bool) {
 	return 0, false
 }
 
 // Write writes the data into the 'ReliableDataChannel'. If the data exceeds 10000 bytes, it is split into
 // multiple segments. An error may be returned while writing a segment or if the Conn has been closed by [Conn.Close].
-func (c *Conn) Write(b []byte) (n int, err error) {
+func (conn *Conn) Write(b []byte) (n int, err error) {
+	return conn.Send(b, MessageReliabilityReliable)
+}
+
+// Send writes the data into the data channel responsible for the given MessageReliability.
+// If the data exceeds 10,000 bytes, it is split into multiple segments. An error may be
+// returned while writing one or more segments or the Conn has been closed by [Conn.Close].
+func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err error) {
 	select {
-	case <-c.closed:
+	case <-conn.closed:
 		return n, net.ErrClosed
 	default:
-		segments := uint8(len(b) / maxMessageSize)
-		if len(b)%maxMessageSize != 0 {
+		d := conn.channels[reliability]
+
+		// We need to hold a lock while sending multiple segments to this channel.
+		d.write.Lock()
+		defer d.write.Unlock()
+
+		segments := uint8(len(data) / maxMessageSize)
+		if len(data)%maxMessageSize != 0 {
 			segments++ // If there's a remainder, we need an additional segment.
 		}
 
-		for i := 0; i < len(b); i += maxMessageSize {
+		for i := 0; i < len(data); i += maxMessageSize {
 			segments--
 
 			end := i + maxMessageSize
-			if end > len(b) {
-				end = len(b)
+			if end > len(data) {
+				end = len(data)
 			}
-			frag := b[i:end]
-			if err := c.reliable.Send(append([]byte{segments}, frag...)); err != nil {
+			frag := data[i:end]
+			if err := d.Send(append([]byte{segments}, frag...)); err != nil {
 				if errors.Is(err, io.ErrClosedPipe) {
 					err = net.ErrClosed
 				}
@@ -146,10 +164,10 @@ func (*Conn) SetWriteDeadline(time.Time) error {
 
 // LocalAddr returns an Addr that includes the local network ID of the Conn with locally-gathered
 // ICE candidates.
-func (c *Conn) LocalAddr() net.Addr {
-	addr := c.local
-	addr.ConnectionID = c.id
-	pair, _ := c.ice.GetSelectedCandidatePair()
+func (conn *Conn) LocalAddr() net.Addr {
+	addr := conn.local
+	addr.ConnectionID = conn.id
+	pair, _ := conn.ice.GetSelectedCandidatePair()
 	if pair != nil {
 		addr.SelectedCandidate = pair.Local
 	}
@@ -158,14 +176,14 @@ func (c *Conn) LocalAddr() net.Addr {
 
 // RemoteAddr returns an Addr that includes the remote network ID of the Conn with remotely-signaled
 // ICE candidates. Candidates are atomically added when a Signal of type SignalTypeCandidate has been handled.
-func (c *Conn) RemoteAddr() net.Addr {
-	addr := c.remoteAddr()
+func (conn *Conn) RemoteAddr() net.Addr {
+	addr := conn.remoteAddr()
 
-	c.candidatesMu.Lock()
-	addr.Candidates = slices.Clone(c.candidates)
-	c.candidatesMu.Unlock()
+	conn.candidatesMu.Lock()
+	addr.Candidates = slices.Clone(conn.candidates)
+	conn.candidatesMu.Unlock()
 
-	pair, _ := c.ice.GetSelectedCandidatePair()
+	pair, _ := conn.ice.GetSelectedCandidatePair()
 	if pair != nil {
 		addr.SelectedCandidate = pair.Remote
 	}
@@ -175,34 +193,30 @@ func (c *Conn) RemoteAddr() net.Addr {
 // remoteAddr returns a base Addr without ICE candidates signaled from the remote connection.
 // It is used by [Conn.RemoteAddr] for returning the Addr with candidates and also by [Listener]
 // for using Addr as the key for Conn.
-func (c *Conn) remoteAddr() *Addr {
+func (conn *Conn) remoteAddr() *Addr {
 	return &Addr{
-		NetworkID:    c.networkID,
-		ConnectionID: c.id,
+		NetworkID:    conn.networkID,
+		ConnectionID: conn.id,
 	}
 }
 
 // Close closes the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,
 // and ICE transports of the Conn. An error may be returned using [errors.Join], which contains
 // non-nil errors encountered during closure.
-func (c *Conn) Close() (err error) {
-	c.once.Do(func() {
-		close(c.closed)
+func (conn *Conn) Close() (err error) {
+	conn.once.Do(func() {
+		close(conn.closed)
+		conn.negotiator.handleClose(conn)
 
-		c.negotiator.handleClose(c)
-
-		if c.reliable != nil {
-			err = c.reliable.Close()
-		}
-		if c.unreliable != nil {
-			err = errors.Join(err, c.unreliable.Close())
+		for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
+			err = errors.Join(err, conn.channels[r].Close())
 		}
 
 		err = errors.Join(
 			err,
-			c.sctp.Stop(),
-			c.dtls.Stop(),
-			c.ice.Stop(),
+			conn.sctp.Stop(),
+			conn.dtls.Stop(),
+			conn.ice.Stop(),
 		)
 	})
 	return err
@@ -211,40 +225,45 @@ func (c *Conn) Close() (err error) {
 // handleTransports handles incoming messages from the 'ReliableDataChannel' and ensures
 // closure of its two data channels, as well as ICE, DTLS, and SCTP transports when any of
 // them are closed by the remote connection.
-func (c *Conn) handleTransports() {
-	c.reliable.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if err := c.handleMessage(msg.Data); err != nil {
-			c.log.Error("error handling remote message", slog.Any("error", err))
-		}
+func (conn *Conn) handleTransports() {
+	for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
+		conn.channels[r].OnMessage(func(msg webrtc.DataChannelMessage) {
+			if err := conn.channels[r].handleMessage(msg.Data); err != nil {
+				conn.log.Error("error handling remote message",
+					slog.String("label", conn.channels[r].Label()),
+					slog.Any("error", err),
+				)
+			}
+		})
+		conn.channels[r].OnClose(func() {
+			_ = conn.Close()
+		})
+	}
+
+	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
+		conn.log.Error("connection was not expected to open a data channel after connection it is fully established", slog.String("label", channel.Label()))
+		_ = conn.Close()
 	})
 
-	c.reliable.OnClose(func() {
-		_ = c.Close()
-	})
-
-	c.unreliable.OnClose(func() {
-		_ = c.Close()
-	})
-
-	c.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
+	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
 		switch state {
 		case webrtc.ICETransportStateClosed, webrtc.ICETransportStateDisconnected, webrtc.ICETransportStateFailed:
 			// This handler function itself is holding the lock, call Close in a goroutine.
-			go c.Close() // We need to make sure that all transports has been closed
+			go conn.Close() // We need to make sure that all transports has been closed
 		default:
 		}
 	})
-	c.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
+	conn.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
 		switch state {
 		case webrtc.DTLSTransportStateClosed, webrtc.DTLSTransportStateFailed:
 			// This handler function itself is holding the lock, call Close in a goroutine.
-			go c.Close() // We need to make sure that all transports has been closed
+			go conn.Close() // We need to make sure that all transports has been closed
 		default:
 		}
 	})
-	c.sctp.OnClose(func(err error) {
+	conn.sctp.OnClose(func(err error) {
 		// This handler function itself is holding the lock, call Close in a goroutine.
-		go c.Close() // We need to make sure that all transports has been closed
+		go conn.Close() // We need to make sure that all transports has been closed
 	})
 }
 
@@ -254,7 +273,7 @@ func (c *Conn) handleTransports() {
 // adds it to the ICE transport of the Conn.
 //
 // If the Signal is of SignalTypeError, it closes the Conn immediately.
-func (c *Conn) handleSignal(signal *Signal) error {
+func (conn *Conn) handleSignal(signal *Signal) error {
 	switch signal.Type {
 	case SignalTypeCandidate:
 		candidate, err := ice.UnmarshalCandidate(signal.Data)
@@ -279,23 +298,23 @@ func (c *Conn) handleSignal(signal *Signal) error {
 			i.RelatedAddress, i.RelatedPort = r.Address, uint16(r.Port)
 		}
 
-		if err := c.ice.AddRemoteCandidate(&i); err != nil {
+		if err := conn.ice.AddRemoteCandidate(&i); err != nil {
 			return fmt.Errorf("add remote candidate: %w", err)
 		}
 
-		c.candidatesMu.Lock()
-		if len(c.candidates) == 0 {
-			close(c.candidateReceived)
+		conn.candidatesMu.Lock()
+		if len(conn.candidates) == 0 {
+			close(conn.candidateReceived)
 		}
-		c.candidates = append(c.candidates, i)
-		c.candidatesMu.Unlock()
+		conn.candidates = append(conn.candidates, i)
+		conn.candidatesMu.Unlock()
 	case SignalTypeError:
 		code, err := strconv.ParseUint(signal.Data, 10, 32)
 		if err != nil {
 			return fmt.Errorf("parse error code: %w", err)
 		}
-		c.log.Error("connection failed with error", slog.Uint64("code", code))
-		if err := c.Close(); err != nil {
+		conn.log.Error("connection failed with error", slog.Uint64("code", code))
+		if err := conn.Close(); err != nil {
 			return fmt.Errorf("close: %w", err)
 		}
 	default:
@@ -473,10 +492,6 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 		candidateReceived: make(chan struct{}, 1),
 
 		negotiator: n,
-
-		packets: make(chan []byte),
-
-		message: &message{},
 
 		closed: make(chan struct{}, 1),
 

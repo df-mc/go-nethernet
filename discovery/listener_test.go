@@ -172,7 +172,7 @@ func TestListen(t *testing.T) {
 	})))
 
 	factory := logging.NewDefaultLoggerFactory()
-	factory.DefaultLogLevel = logging.LogLevelDebug
+	// factory.DefaultLogLevel = logging.LogLevelDebug
 	c := nethernet.ListenConfig{
 		API: webrtc.NewAPI(webrtc.WithSettingEngine(webrtc.SettingEngine{
 			LoggerFactory: factory,
@@ -197,5 +197,10 @@ func TestListen(t *testing.T) {
 			return
 		}
 		t.Logf("accepted: %s", conn.RemoteAddr())
+		time.AfterFunc(time.Second*5, func() {
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

@@ -241,28 +241,12 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
-	if err := withContext(ctx, func() error {
-		var err error
-		conn.reliable, err = d.API.NewDataChannel(conn.sctp, &webrtc.DataChannelParameters{
-			Label:   "ReliableDataChannel",
-			Ordered: true,
-		})
-		return err
-	}); err != nil {
-		return fmt.Errorf("create ReliableDataChannel: %w", err)
-	}
-	if err := withContext(ctx, func() error {
-		var (
-			err            error
-			maxRetransmits uint16 = 0
-		)
-		conn.unreliable, err = d.API.NewDataChannel(conn.sctp, &webrtc.DataChannelParameters{
-			Label:          "UnreliableDataChannel",
-			MaxRetransmits: &maxRetransmits,
-		})
-		return err
-	}); err != nil {
-		return fmt.Errorf("create UnreliableDataChannel: %w", err)
+	for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
+		c, err := d.API.NewDataChannel(conn.sctp, r.Parameters())
+		if err != nil {
+			return fmt.Errorf("create %s: %w", r.Parameters().Label, err)
+		}
+		conn.channels[r] = wrapDataChannel(c)
 	}
 	return nil
 }
