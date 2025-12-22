@@ -106,17 +106,20 @@ type Listener struct {
 
 	// notifyCount counts the total notifiers registered for the Listener.
 	// It is used as the ID for [nethernet.Notifier] and should not be decreased at all.
+	// notifyCount should be atomically accessed by holding a lock on notifiersMu.
 	notifyCount uint32
 	notifiers   map[uint32]nethernet.Notifier
-	notifiersMu sync.RWMutex // guards notifiers and notifyCount
+	notifiersMu sync.RWMutex
 
 	// responses stores a map whose keys are NetherNet network IDs which value is an
 	// application-specific data sent as ResponsePacket from the servers in the network.
 	responses   map[uint64][]byte
 	responsesMu sync.RWMutex
 
-	closed chan struct{} // I assume there's no reason for using context
-	once   sync.Once     // once ensures the Listener is closed only once.
+	// closed is a channel that is closed when the Listener closes.
+	closed chan struct{}
+	// once ensures the Listener is closed only once.
+	once sync.Once
 }
 
 // Signal sends a NetherNet signal to the corresponding address for the network ID.
