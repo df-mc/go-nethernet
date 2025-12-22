@@ -77,7 +77,10 @@ type Listener struct {
 
 	signaling Signaling
 	networkID string
-	id        uint64 // used for identifying Listener with an uint64.
+	// id is an uint64 representation of the networkID.
+	// When the networkID can be parsed as an uint64, it will be directly used.
+	// Otherwise, a random value will be generated.
+	id uint64
 
 	connections sync.Map
 
