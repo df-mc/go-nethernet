@@ -325,17 +325,37 @@ func (l *Listener) PongData(b []byte) {
 	}
 	players, _ := strconv.Atoi(parts[4])
 	maxPlayers, _ := strconv.Atoi(parts[5])
+	gameType, ok := parsePongGameType(parts[8])
+	if !ok {
+		l.conf.Log.Debug("unexpected pong game type", slog.String("gametype", parts[8]))
+	}
+
 	d := &ServerData{
 		ServerName:     parts[1],
 		LevelName:      parts[7],
-		GameType:       0, // TODO: Parse from parts[8] (survival, creative...)
+		GameType:       gameType,
 		PlayerCount:    int32(players),
 		MaxPlayerCount: int32(maxPlayers),
 		EditorWorld:    false,
 		Hardcore:       false,
 		TransportLayer: 2,
+		ConnectionType: 4,
 	}
 	l.ServerData(d)
+}
+
+// parsePongGameType converts the game type string from the pong data to its uint8 representation.
+// Returns 0 and false if the game type is not valid.
+func parsePongGameType(v string) (uint8, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "survival":
+		return 0, true
+	case "creative":
+		return 1, true
+	case "adventure":
+		return 2, true
+	}
+	return 0, false
 }
 
 // Close closes the Listener. Any notifiers registered to the Listener will be stopped.
