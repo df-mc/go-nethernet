@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"strconv"
+	"sync"
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -126,15 +127,23 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		n, stop := d.notifySignals(networkID, signaling)
 		select {
 		case <-ctx.Done():
-			if errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
 			stop()
 			return nil, ctx.Err()
-		case err := <-n.errs:
+		case err, ok := <-n.errs:
+			if !ok {
+				stop()
+				return nil, ErrSignalingStopped
+			}
 			stop()
 			return nil, fmt.Errorf("notified error from signaling: %w", err)
-		case signal := <-n.signals:
+		case signal, ok := <-n.signals:
+			if !ok {
+				stop()
+				return nil, ErrSignalingStopped
+			}
 			if signal.Type != SignalTypeAnswer {
 				d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
 				return nil, fmt.Errorf("received signal for non-answer: %s", signal.String())
@@ -163,7 +172,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 
 			select {
 			case <-ctx.Done():
-				if errors.Is(err, context.DeadlineExceeded) {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
 				}
 				return nil, ctx.Err()
@@ -261,7 +270,14 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 			return
 		case <-conn.closed:
 			return
-		case signal := <-signals:
+		case signal, ok := <-signals:
+			if !ok {
+				// Signals channel closed, connection should be closed as well
+				if err := conn.Close(); err != nil {
+					conn.log.Error("error closing conn", slog.Any("error", err))
+				}
+				return
+			}
 			switch signal.Type {
 			case SignalTypeCandidate, SignalTypeError:
 				if err := conn.handleSignal(signal); err != nil {
@@ -295,16 +311,27 @@ type dialerNotifier struct {
 	signals chan *Signal  // Notifies incoming Signal that has the same IDs
 	errs    chan error    // Notifies error occurred in Signaling
 	closed  chan struct{} // Notifies that dialerNotifier is closed, and ensures that closure occur only once
+	once    sync.Once
 
 	networkID string // Remote network ID
 }
 
 func (d *dialerNotifier) NotifySignal(signal *Signal) {
+	if signal == nil {
+		panic("nethernet: NotifySignal: signal is nil")
+	}
 	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
 		return
 	}
-
-	d.signals <- signal
+	select {
+	case <-d.closed:
+		return
+	default:
+	}
+	select {
+	case d.signals <- signal:
+	case <-d.closed:
+	}
 }
 
 func (d *dialerNotifier) NotifyError(err error) {
@@ -325,7 +352,9 @@ func (d *dialerNotifier) NotifyError(err error) {
 }
 
 func (d *dialerNotifier) close() {
-	close(d.signals)
-	close(d.errs)
-	close(d.closed)
+	d.once.Do(func() {
+		close(d.closed)
+		close(d.signals)
+		close(d.errs)
+	})
 }
