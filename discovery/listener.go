@@ -339,10 +339,13 @@ func (l *Listener) PongData(b []byte) {
 		EditorWorld:    false,
 		Hardcore:       false,
 		TransportLayer: 2,
+		ConnectionType: 4,
 	}
 	l.ServerData(d)
 }
 
+// parsePongGameType converts the game type string from the pong data to its uint8 representation.
+// Returns 0 and false if the game type is not valid.
 func parsePongGameType(v string) (uint8, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "survival":
@@ -351,8 +354,6 @@ func parsePongGameType(v string) (uint8, bool) {
 		return 1, true
 	case "adventure":
 		return 2, true
-	case "spectator":
-		return 3, true
 	}
 	return 0, false
 }
