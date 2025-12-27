@@ -102,7 +102,7 @@ type Listener struct {
 	// by addressesMu for atomic access in concurrent goroutines like background and
 	// handlePacket.
 	addresses   map[uint64]address
-	addressesMu sync.RWMutex // guards addresses
+	addressesMu sync.RWMutex
 
 	// notifyCount counts the total notifiers registered for the Listener.
 	// It is used as the ID for [nethernet.Notifier] and should not be decreased at all.

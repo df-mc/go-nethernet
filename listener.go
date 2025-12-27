@@ -196,10 +196,11 @@ func (l listenerNotifier) NotifySignal(signal *Signal) {
 // NotifyError notifies the Listener of an error that occurred in the Signaling implementation.
 // If the error is [ErrSignalingStopped], it will also close the Listener.
 func (l listenerNotifier) NotifyError(err error) {
-	l.conf.Log.Error("notified error in signaling", slog.Any("error", err))
 	if errors.Is(err, ErrSignalingStopped) {
 		_ = l.Close()
+		return
 	}
+	l.conf.Log.Error("notified error in signaling", slog.Any("error", err))
 }
 
 // handleOffer handles an incoming Signal of SignalTypeOffer. It parses the data of Signal into [sdp.SessionDescription]
