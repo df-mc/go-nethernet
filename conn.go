@@ -147,6 +147,17 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 	}
 }
 
+// Latency returns the current latency to the remote connection as half the round trip time (RTT)
+// from the selected ICE candidate pair. If no candidate pair is selected or statistics are
+// unavailable, it returns 0.
+func (conn *Conn) Latency() time.Duration {
+	stats, ok := conn.ice.GetSelectedCandidatePairStats()
+	if !ok || stats.CurrentRoundTripTime == 0 {
+		return 0
+	}
+	return time.Duration(stats.CurrentRoundTripTime*float64(time.Second)) / 2
+}
+
 // SetDeadline is a no-op implementation of [net.Conn.SetDeadline] and returns ErrUnsupported.
 func (*Conn) SetDeadline(time.Time) error {
 	return ErrUnsupported
