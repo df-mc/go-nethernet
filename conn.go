@@ -116,6 +116,9 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 	case <-conn.closed:
 		return n, net.ErrClosed
 	default:
+		if reliability == MessageReliabilityUnreliable && len(data) > maxMessageSize {
+			return n, fmt.Errorf("data larger than %d cannot be sent over UnreliableDataChannel", len(data))
+		}
 		d := conn.channels[reliability]
 
 		// We need to hold a lock while sending multiple segments to this channel.
