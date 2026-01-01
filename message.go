@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -42,7 +43,7 @@ func (r MessageReliability) Parameters() *webrtc.DataChannelParameters {
 			MaxRetransmits: &param,
 		}
 	default:
-		panic("nethernet: MessageReliability.Parameters: unknown value")
+		panic(fmt.Sprintf("nethernet: MessageReliability.Parameters: unknown value: %d", r))
 	}
 }
 
@@ -84,6 +85,7 @@ func wrapDataChannel(channel *webrtc.DataChannel) *dataChannel {
 			data: make([]byte, 0, math.MaxUint8*maxMessageSize),
 		},
 		packets: make(chan []byte),
+		closed:  make(chan struct{}),
 	}
 }
 
@@ -103,6 +105,9 @@ type dataChannel struct {
 	// packets can be used to receive packets that are fully-reconstructed from
 	// one or more segments received in the dataChannel.
 	packets chan []byte
+
+	// closed is a channel that is closed when a dataChannel is closed.
+	closed chan struct{}
 }
 
 // message represents the structure of remote messages sent in ReliableDataChannel.
@@ -129,6 +134,12 @@ func parseMessage(b []byte) (*message, error) {
 // the incoming data into a message using parseMessage and handles the segments, and if all segments has
 // been received, it sends the buffer to either [Conn.Read] or [Conn.ReadPacket].
 func (c *dataChannel) handleMessage(b []byte) error {
+	select {
+	case <-c.closed:
+		return net.ErrClosed
+	default:
+	}
+
 	msg, err := parseMessage(b)
 	if err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -145,14 +156,19 @@ func (c *dataChannel) handleMessage(b []byte) error {
 		return nil
 	}
 
-	c.packets <- c.data
-	c.data = c.data[:0]
+	select {
+	case c.packets <- c.data:
+		c.data = nil
+	case <-c.closed:
+	}
 
 	return nil
 }
 
 // Close closes the underlying [webrtc.DataChannel].
+// It must be called by [Conn.Close] for ensuring that it is closed only once.
 func (c *dataChannel) Close() error {
+	close(c.closed)
 	close(c.packets)
 	clear(c.data)
 	return c.DataChannel.Close()
