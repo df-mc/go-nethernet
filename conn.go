@@ -133,10 +133,7 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		for i := 0; i < len(data); i += maxMessageSize {
 			segments--
 
-			end := i + maxMessageSize
-			if end > len(data) {
-				end = len(data)
-			}
+			end := min(len(data), i+maxMessageSize)
 			frag := data[i:end]
 			if err := d.Send(append([]byte{segments}, frag...)); err != nil {
 				if errors.Is(err, io.ErrClosedPipe) {

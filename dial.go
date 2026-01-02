@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"strconv"
 	"sync"
 
@@ -37,7 +38,7 @@ type Dialer struct {
 // the remote connection. The [context.Context] may be used to cancel the connection as soon as possible. If the [context.Context]
 // is done, and [context.Context.Err] returns [context.DeadlineExceeded], it signals back a Signal of SignalTypeError with ErrorCodeInactivityTimeout
 // or ErrorCodeNegotiationTimeoutWaitingForAccept based on the progress. A Conn may be returned, that is ready to receive and send packets.
-func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (*Conn, error) {
+func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (conn *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
 	}
@@ -125,24 +126,26 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		}
 
 		n, stop := d.notifySignals(networkID, signaling)
+		defer func() {
+			if err != nil {
+				stop()
+			}
+		}()
+
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
-			stop()
 			return nil, ctx.Err()
 		case err, ok := <-n.errs:
 			if !ok {
-				stop()
-				return nil, ErrSignalingStopped
+				return nil, net.ErrClosed
 			}
-			stop()
 			return nil, fmt.Errorf("notified error from signaling: %w", err)
 		case signal, ok := <-n.signals:
 			if !ok {
-				stop()
-				return nil, ErrSignalingStopped
+				return nil, net.ErrClosed
 			}
 			if signal.Type != SignalTypeAnswer {
 				d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
