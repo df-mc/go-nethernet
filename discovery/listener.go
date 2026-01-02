@@ -66,7 +66,7 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		addresses: make(map[uint64]address),
 
-		notifiers: make(map[uint32]nethernet.Notifier),
+		notifiers: make(map[uint32]chan<- *nethernet.Signal),
 		responses: make(map[uint64][]byte),
 
 		closed: make(chan struct{}),
@@ -108,7 +108,7 @@ type Listener struct {
 	// notifyCount counts the total notifiers registered for the Listener.
 	// It is used as the ID for [nethernet.Notifier] and should not be decreased at all.
 	notifyCount uint32
-	notifiers   map[uint32]nethernet.Notifier
+	notifiers   map[uint32]chan<- *nethernet.Signal
 	notifiersMu sync.RWMutex // guards notifiers and notifyCount
 
 	// responses stores a map whose keys are NetherNet network IDs which value is an
@@ -121,8 +121,10 @@ type Listener struct {
 }
 
 // Signal sends a NetherNet signal to the corresponding address for the network ID.
-func (l *Listener) Signal(signal *nethernet.Signal) error {
+func (l *Listener) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
 	case <-l.closed:
 		return net.ErrClosed
 	default:
@@ -148,26 +150,29 @@ func (l *Listener) Signal(signal *nethernet.Signal) error {
 
 // Notify registers the notifier on the Listener for notifying signals and returns
 // a function for stop notifying signals on the notifier.
-func (l *Listener) Notify(n nethernet.Notifier) (stop func()) {
+func (l *Listener) Notify(signals chan<- *nethernet.Signal) (stop func()) {
 	l.notifiersMu.Lock()
 	i := l.notifyCount
-	l.notifiers[i] = n
+	l.notifiers[i] = signals
 	l.notifyCount++
 	l.notifiersMu.Unlock()
 
 	return func() {
 		l.notifiersMu.Lock()
-		l.stop(i, n)
+		l.stop(i)
 		l.notifiersMu.Unlock()
 	}
+}
+
+// Context returns a context that is canceled when the Listener is closed.
+func (l *Listener) Context() context.Context {
+	return listenerContext{l.closed}
 }
 
 // stop stops notifying signals on the notifier with the corresponding ID. The ID
 // is internally assigned for the notifier and contained in the stop function returned
 // by [Listener.Notify]. It should not be called by anywhere else.
-func (l *Listener) stop(i uint32, n nethernet.Notifier) {
-	n.NotifyError(nethernet.ErrSignalingStopped)
-
+func (l *Listener) stop(i uint32) {
 	delete(l.notifiers, i)
 }
 
@@ -299,8 +304,8 @@ func (l *Listener) handleMessage(pk *MessagePacket, senderID uint64) error {
 	signal.NetworkID = strconv.FormatUint(senderID, 10)
 
 	l.notifiersMu.Lock()
-	for _, n := range l.notifiers {
-		n.NotifySignal(signal)
+	for _, signals := range l.notifiers {
+		signals <- signal
 	}
 	l.notifiersMu.Unlock()
 
@@ -364,8 +369,8 @@ func (l *Listener) Close() (err error) {
 		err = l.conn.Close()
 
 		l.notifiersMu.Lock()
-		for i, n := range l.notifiers {
-			l.stop(i, n)
+		for i := range l.notifiers {
+			l.stop(i)
 		}
 		l.notifiersMu.Unlock()
 	})
@@ -415,4 +420,32 @@ type address struct {
 	t time.Time
 	// addr is the UDP address known for sending packets with the networkID.
 	addr net.Addr
+}
+
+// listenerContext implements [context.Context] for a Listener.
+type listenerContext struct{ closed <-chan struct{} }
+
+// Deadline returns the zero [time.Time] and false, indicating that deadlines are not used.
+func (listenerContext) Deadline() (zero time.Time, ok bool) {
+	return zero, false
+}
+
+// Done returns a channel that is closed when the Listener has been closed.
+func (ctx listenerContext) Done() <-chan struct{} {
+	return ctx.closed
+}
+
+// Err returns [net.ErrClosed] if the Listener has been closed. Returns nil otherwise.
+func (ctx listenerContext) Err() error {
+	select {
+	case <-ctx.closed:
+		return net.ErrClosed
+	default:
+		return nil
+	}
+}
+
+// Value returns nil for any key, as no values are associated with the context.
+func (listenerContext) Value(any) any {
+	return nil
 }

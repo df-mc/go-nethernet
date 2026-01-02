@@ -8,7 +8,6 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
-	"sync"
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -33,11 +32,10 @@ type Dialer struct {
 	API *webrtc.API
 }
 
-// DialContext establishes a Conn with a remote network referenced by the ID. The Signaling implementation may be used to
-// signal an offer and local ICE candidates, and to notify Signals of SignalTypeAnswer and SignalTypeCandidate signaled from
-// the remote connection. The [context.Context] may be used to cancel the connection as soon as possible. If the [context.Context]
-// is done, and [context.Context.Err] returns [context.DeadlineExceeded], it signals back a Signal of SignalTypeError with ErrorCodeInactivityTimeout
-// or ErrorCodeNegotiationTimeoutWaitingForAccept based on the progress. A Conn may be returned, that is ready to receive and send packets.
+// DialContext establishes a Conn with a remote network referenced by the ID. The Signaling is used to signal
+// an offer with local candidates, and also to notify incoming signals received from the remote network. The
+// [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
+// ready to receive and send packets.
 func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (conn *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
@@ -97,7 +95,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		sctpCapabilities := sctp.GetCapabilities()
 
 		// Signals may be received very early when signaling an offer with local candidates.
-		n, stop := d.notifySignals(networkID, signaling)
+		signals, stop := d.notifySignals(networkID, signaling)
 		defer func() {
 			if err != nil {
 				stop()
@@ -114,7 +112,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		if err != nil {
 			return nil, fmt.Errorf("encode offer: %w", err)
 		}
-		if err := signaling.Signal(&Signal{
+		if err := signaling.Signal(ctx, &Signal{
 			Type:         SignalTypeOffer,
 			Data:         string(offer),
 			ConnectionID: d.ConnectionID,
@@ -123,7 +121,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			return nil, fmt.Errorf("signal offer: %w", err)
 		}
 		for i, candidate := range candidates {
-			if err := signaling.Signal(&Signal{
+			if err := signaling.Signal(ctx, &Signal{
 				Type:         SignalTypeCandidate,
 				Data:         formatICECandidate(i, candidate, iceParams),
 				ConnectionID: d.ConnectionID,
@@ -139,12 +137,9 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
 			return nil, ctx.Err()
-		case err, ok := <-n.errs:
-			if !ok {
-				return nil, net.ErrClosed
-			}
-			return nil, fmt.Errorf("notified error from signaling: %w", err)
-		case signal, ok := <-n.signals:
+		case <-signaling.Context().Done():
+			return nil, context.Cause(signaling.Context())
+		case signal, ok := <-signals:
 			if !ok {
 				return nil, net.ErrClosed
 			}
@@ -172,7 +167,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 				Dialer: d,
 				stop:   stop,
 			})
-			go d.handleConn(ctx, c, n.signals)
+			go d.handleConn(ctx, c, signals)
 
 			select {
 			case <-ctx.Done():
@@ -220,7 +215,7 @@ func (d dialerConn) log() *slog.Logger {
 // [Signaling] implementation with the remote network ID and the code of the error
 // occurred.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
-	_ = signaling.Signal(&Signal{
+	_ = signaling.Signal(context.Background(), &Signal{
 		Type:         SignalTypeError,
 		Data:         strconv.Itoa(code),
 		ConnectionID: d.ConnectionID,
@@ -295,70 +290,25 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 // notifySignals registers dialerNotifier to the Signaling to receive notifications of incoming Signals that has
 // the same network ID and same ConnectionID of Dialer. A *dialerNotifier and a function to stop receiving notifications
 // will be returned.
-func (d Dialer) notifySignals(networkID string, signaling Signaling) (*dialerNotifier, func()) {
-	n := &dialerNotifier{
-		Dialer: d,
+func (d Dialer) notifySignals(networkID string, signaling Signaling) (chan *Signal, func()) {
+	var (
+		signals  = make(chan *Signal)
+		filtered = make(chan *Signal)
+	)
+	stop := signaling.Notify(signals)
 
-		signals: make(chan *Signal),
-		errs:    make(chan error),
-		closed:  make(chan struct{}),
-
-		networkID: networkID,
-	}
-	return n, signaling.Notify(n)
-}
-
-// dialerNotifier notifies incoming Signals and errors.
-type dialerNotifier struct {
-	Dialer
-
-	signals chan *Signal  // Notifies incoming Signal that has the same IDs
-	errs    chan error    // Notifies error occurred in Signaling
-	closed  chan struct{} // Notifies that dialerNotifier is closed, and ensures that closure occur only once
-	once    sync.Once
-
-	networkID string // Remote network ID
-}
-
-func (d *dialerNotifier) NotifySignal(signal *Signal) {
-	if signal == nil {
-		panic("nethernet: NotifySignal: signal is nil")
-	}
-	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
-		return
-	}
-	select {
-	case <-d.closed:
-		return
-	default:
-	}
-	select {
-	case d.signals <- signal:
-	case <-d.closed:
-	}
-}
-
-func (d *dialerNotifier) NotifyError(err error) {
-	select {
-	case <-d.closed:
-		return
-	default:
-	}
-
-	select {
-	case d.errs <- err:
-	default:
-	}
-
-	if errors.Is(err, ErrSignalingStopped) {
-		d.close()
-	}
-}
-
-func (d *dialerNotifier) close() {
-	d.once.Do(func() {
-		close(d.closed)
-		close(d.signals)
-		close(d.errs)
-	})
+	go func() {
+		for {
+			signal, ok := <-signals
+			if !ok {
+				close(filtered)
+				return
+			}
+			if signal.NetworkID != networkID {
+				continue
+			}
+			filtered <- signal
+		}
+	}()
+	return filtered, stop
 }
