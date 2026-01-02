@@ -165,7 +165,7 @@ func (l *Listener) PongData(b []byte) {
 	l.signaling.PongData(b)
 }
 
-// listen receives incoming signals received from remote networks from the channel.
+// listen receives incoming signals sent from remote networks in the channel.
 // It is called as a goroutine from [ListenConfig.Listen] and initiates all incoming
 // connections from offers. When either the listener is closed or the signaling context
 // is canceled, the goroutine will automatically break.
