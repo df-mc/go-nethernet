@@ -40,17 +40,6 @@ type Signaling interface {
 	PongData(b []byte)
 }
 
-// Notifier receives notifications from Signaling.
-type Notifier interface {
-	// NotifySignal notifies the Signal to the Notifier. It is called by Signaling when a Signal
-	// has been signaled from the remote network denoted in [Signal.NetworkID].
-	NotifySignal(signal *Signal)
-
-	// NotifyError notifies the error to the Notifier. If the error is ErrSignalingStopped, the
-	// Dialer will return immediately, and the Listener will close itself.
-	NotifyError(err error)
-}
-
 const (
 	// SignalTypeOffer is signaled by a client to request a connection to the remote host.
 	// Signals of SignalTypeOffer typically contain a data for a local description of the connection.
