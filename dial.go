@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"strconv"
+	"sync"
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -167,6 +168,11 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 				Dialer: d,
 				stop:   stop,
 			})
+			defer func() {
+				if err != nil {
+					_ = c.Close()
+				}
+			}()
 			go d.handleConn(ctx, c, signals)
 
 			select {
@@ -287,28 +293,43 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 	}
 }
 
-// notifySignals registers dialerNotifier to the Signaling to receive notifications of incoming Signals that has
-// the same network ID and same ConnectionID of Dialer. A *dialerNotifier and a function to stop receiving notifications
-// will be returned.
-func (d Dialer) notifySignals(networkID string, signaling Signaling) (chan *Signal, func()) {
+// notifySignals registers a channel to the Signaling to receive notifications of incoming Signals that has
+// the same network ID and same ConnectionID of Dialer. A channel for filtered signals and a function to stop
+// receiving notifications will be returned.
+func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Signal, func()) {
 	var (
-		signals  = make(chan *Signal)
-		filtered = make(chan *Signal)
+		signals     = make(chan *Signal)
+		filtered    = make(chan *Signal)
+		ctx, cancel = context.WithCancel(context.Background())
 	)
 	stop := signaling.Notify(signals)
+	var once sync.Once
 
 	go func() {
+		defer close(filtered)
 		for {
-			signal, ok := <-signals
-			if !ok {
-				close(filtered)
+			select {
+			case <-ctx.Done():
 				return
+			case signal, ok := <-signals:
+				if !ok {
+					return
+				}
+				if signal.NetworkID != networkID || signal.ConnectionID != d.ConnectionID {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case filtered <- signal:
+				}
 			}
-			if signal.NetworkID != networkID {
-				continue
-			}
-			filtered <- signal
 		}
 	}()
-	return filtered, stop
+	return filtered, func() {
+		once.Do(func() {
+			stop()
+			cancel()
+		})
+	}
 }

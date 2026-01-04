@@ -148,8 +148,10 @@ func (l *Listener) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	}
 }
 
-// Notify registers the notifier on the Listener for notifying signals and returns
-// a function for stop notifying signals on the notifier.
+// Notify registers a channel to receive incoming NetherNet signals.
+//
+// The returned stop function unregisters the channel and closes it. Callers must not close
+// the channel themselves.
 func (l *Listener) Notify(signals chan<- *nethernet.Signal) (stop func()) {
 	l.notifiersMu.Lock()
 	i := l.notifyCount
@@ -159,7 +161,7 @@ func (l *Listener) Notify(signals chan<- *nethernet.Signal) (stop func()) {
 
 	return func() {
 		l.notifiersMu.Lock()
-		l.stop(i)
+		l.stop(i, signals)
 		l.notifiersMu.Unlock()
 	}
 }
@@ -172,8 +174,12 @@ func (l *Listener) Context() context.Context {
 // stop stops notifying signals on the notifier with the corresponding ID. The ID
 // is internally assigned for the notifier and contained in the stop function returned
 // by [Listener.Notify]. It should not be called by anywhere else.
-func (l *Listener) stop(i uint32) {
+func (l *Listener) stop(i uint32, ch chan<- *nethernet.Signal) {
+	if _, ok := l.notifiers[i]; !ok {
+		return
+	}
 	delete(l.notifiers, i)
+	close(ch)
 }
 
 // Credentials returns a nil *nethernet.Credentials with a nil error if the Listener is not closed.
@@ -369,8 +375,8 @@ func (l *Listener) Close() (err error) {
 		err = l.conn.Close()
 
 		l.notifiersMu.Lock()
-		for i := range l.notifiers {
-			l.stop(i)
+		for i, ch := range l.notifiers {
+			l.stop(i, ch)
 		}
 		l.notifiersMu.Unlock()
 	})
