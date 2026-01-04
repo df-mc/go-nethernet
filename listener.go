@@ -268,7 +268,8 @@ func (l *Listener) handleOffer(signal *Signal) error {
 
 	select {
 	case <-ctx.Done():
-		return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeFailedToCreatePeerConnection)
+		_ = gatherer.Close()
+		return wrapSignalError(fmt.Errorf("gather local candidates: %w", ctx.Err()), ErrorCodeFailedToCreatePeerConnection)
 	case <-gatherFinished:
 		ice := l.conf.API.NewICETransport(gatherer)
 		dtls, err := l.conf.API.NewDTLSTransport(ice, nil)

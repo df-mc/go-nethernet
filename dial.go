@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"sync"
@@ -73,6 +73,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	}
 	select {
 	case <-ctx.Done():
+		_ = gatherer.Close()
 		return nil, ctx.Err()
 	case <-gatherFinished:
 		ice := d.API.NewICETransport(gatherer)

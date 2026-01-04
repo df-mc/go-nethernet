@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"slices"
 	"strconv"
@@ -219,8 +219,10 @@ func (conn *Conn) Close() (err error) {
 		close(conn.closed)
 		conn.negotiator.handleClose(conn)
 
-		for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
-			err = errors.Join(err, conn.channels[r].Close())
+		for r := range messageReliabilityCapacity {
+			if conn.channels[r] != nil {
+				err = errors.Join(err, conn.channels[r].Close())
+			}
 		}
 
 		err = errors.Join(
