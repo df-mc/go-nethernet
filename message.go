@@ -85,7 +85,7 @@ func wrapDataChannel(channel *webrtc.DataChannel) *dataChannel {
 			data: make([]byte, 0, math.MaxUint8*maxMessageSize),
 		},
 		packets: make(chan []byte),
-		closed:  make(chan struct{}),
+		close:   make(chan struct{}),
 	}
 }
 
@@ -106,8 +106,10 @@ type dataChannel struct {
 	// one or more segments received in the dataChannel.
 	packets chan []byte
 
-	// closed is a channel that is closed when a dataChannel is closed.
-	closed chan struct{}
+	// close is a channel that is closed when a dataChannel is closed.
+	close chan struct{}
+	// once ensures the dataChannel is closed only once.
+	once sync.Once
 }
 
 // message represents the structure of remote messages sent in ReliableDataChannel.
@@ -135,7 +137,7 @@ func parseMessage(b []byte) (*message, error) {
 // been received, it sends the buffer to either [Conn.Read] or [Conn.ReadPacket].
 func (c *dataChannel) handleMessage(b []byte) error {
 	select {
-	case <-c.closed:
+	case <-c.close:
 		return net.ErrClosed
 	default:
 	}
@@ -159,17 +161,19 @@ func (c *dataChannel) handleMessage(b []byte) error {
 	select {
 	case c.packets <- c.data:
 		c.data = nil
-	case <-c.closed:
+	case <-c.close:
 	}
 
 	return nil
 }
 
 // Close closes the underlying [webrtc.DataChannel].
-// It must be called by [Conn.Close] for ensuring that it is closed only once.
-func (c *dataChannel) Close() error {
-	close(c.closed)
-	close(c.packets)
-	clear(c.data)
-	return c.DataChannel.Close()
+func (c *dataChannel) Close() (err error) {
+	c.once.Do(func() {
+		close(c.close)
+		close(c.packets)
+		clear(c.data)
+		err = c.DataChannel.Close()
+	})
+	return err
 }
