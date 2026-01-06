@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v4"
 	"log/slog"
 	"math/rand"
 	"strconv"
+
+	"github.com/pion/sdp/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // Dialer encapsulates options for establishing a connection with a NetherNet network through [Dialer.DialContext]
@@ -35,7 +36,7 @@ type Dialer struct {
 // the remote connection. The [context.Context] may be used to cancel the connection as soon as possible. If the [context.Context]
 // is done, and [context.Context.Err] returns [context.DeadlineExceeded], it signals back a Signal of SignalTypeError with ErrorCodeInactivityTimeout
 // or ErrorCodeNegotiationTimeoutWaitingForAccept based on the progress. A Conn may be returned, that is ready to receive and send packets.
-func (d Dialer) DialContext(ctx context.Context, networkID uint64, signaling Signaling) (*Conn, error) {
+func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (*Conn, error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
 	}
@@ -185,8 +186,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID uint64, signaling Sig
 type dialerConn struct {
 	Dialer
 
-	// stop is the function without parameters which is returned by [Signaling.Notify]
-	// to stop receiving notifications in Notifier from Signaling.
+	// stop is a function that can be called without parameters, which is returned by
+	// [Signaling.Notify] to stop notifying signals from Signaling.
 	stop func()
 }
 
@@ -205,7 +206,7 @@ func (d dialerConn) log() *slog.Logger {
 // signalError signals a Signal of SignalTypeError into the remote connection using the
 // [Signaling] implementation with the remote network ID and the code of the error
 // occurred.
-func (d Dialer) signalError(signaling Signaling, networkID uint64, code int) {
+func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	_ = signaling.Signal(&Signal{
 		Type:         SignalTypeError,
 		Data:         strconv.Itoa(code),
@@ -290,7 +291,7 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 // notifySignals registers dialerNotifier to the Signaling to receive notifications of incoming Signals that has
 // the same network ID and same ConnectionID of Dialer. A *dialerNotifier and a function to stop receiving notifications
 // will be returned.
-func (d Dialer) notifySignals(networkID uint64, signaling Signaling) (*dialerNotifier, func()) {
+func (d Dialer) notifySignals(networkID string, signaling Signaling) (*dialerNotifier, func()) {
 	n := &dialerNotifier{
 		Dialer: d,
 
@@ -311,7 +312,7 @@ type dialerNotifier struct {
 	errs    chan error    // Notifies error occurred in Signaling
 	closed  chan struct{} // Notifies that dialerNotifier is closed, and ensures that closure occur only once
 
-	networkID uint64 // Remote network ID
+	networkID string // Remote network ID
 }
 
 func (d *dialerNotifier) NotifySignal(signal *Signal) {

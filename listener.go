@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v4"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pion/sdp/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // ListenConfig encapsulates options for creating a new Listener through [ListenConfig.Listen].
@@ -50,10 +52,16 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 	if conf.API == nil {
 		conf.API = webrtc.NewAPI()
 	}
+	networkID := signaling.NetworkID()
+	id, err := strconv.ParseUint(networkID, 10, 64)
+	if err != nil {
+		id = rand.Uint64()
+	}
 	l := &Listener{
 		conf:      conf,
 		signaling: signaling,
-		networkID: signaling.NetworkID(),
+		networkID: networkID,
+		id:        id,
 
 		incoming: make(chan *Conn),
 
@@ -68,7 +76,11 @@ type Listener struct {
 	conf ListenConfig
 
 	signaling Signaling
-	networkID uint64
+	networkID string
+	// id is an uint64 representation of the networkID.
+	// When the networkID can be parsed as an uint64, it will be directly used.
+	// Otherwise, a random value will be generated.
+	id uint64
 
 	connections sync.Map
 
@@ -105,7 +117,7 @@ type Addr struct {
 	ConnectionID uint64
 
 	// NetworkID is a unique ID for the NetherNet network.
-	NetworkID uint64
+	NetworkID string
 
 	// Candidates contains a list of ICE candidates. These candidates are either gathered locally or
 	// signaled from a remote connection. ICE candidates are used to determine the UDP/TCP addresses
@@ -122,7 +134,7 @@ type Addr struct {
 // String formats the Addr as a string.
 func (addr *Addr) String() string {
 	b := &strings.Builder{}
-	b.WriteString(strconv.FormatUint(addr.NetworkID, 10))
+	b.WriteString(addr.NetworkID)
 	b.WriteByte(' ')
 	if addr.ConnectionID != 0 {
 		b.WriteByte('(')
@@ -142,7 +154,7 @@ func (addr *Addr) String() string {
 func (addr *Addr) Network() string { return "nethernet" }
 
 // ID returns the network ID of Listener.
-func (l *Listener) ID() int64 { return int64(l.networkID) }
+func (l *Listener) ID() int64 { return int64(l.id) }
 
 // PongData is a stub.
 func (l *Listener) PongData(b []byte) {
@@ -184,10 +196,11 @@ func (l listenerNotifier) NotifySignal(signal *Signal) {
 // NotifyError notifies the Listener of an error that occurred in the Signaling implementation.
 // If the error is [ErrSignalingStopped], it will also close the Listener.
 func (l listenerNotifier) NotifyError(err error) {
-	l.conf.Log.Error("notified error in signaling", slog.Any("error", err))
 	if errors.Is(err, ErrSignalingStopped) {
 		_ = l.Close()
+		return
 	}
+	l.conf.Log.Error("notified error in signaling", slog.Any("error", err))
 }
 
 // handleOffer handles an incoming Signal of SignalTypeOffer. It parses the data of Signal into [sdp.SessionDescription]
