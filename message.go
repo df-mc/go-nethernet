@@ -159,9 +159,10 @@ func (c *dataChannel) handleMessage(b []byte) error {
 	}
 
 	select {
+	case <-c.close:
+		return net.ErrClosed
 	case c.packets <- c.data:
 		c.data = nil
-	case <-c.close:
 	}
 
 	return nil
@@ -171,7 +172,6 @@ func (c *dataChannel) handleMessage(b []byte) error {
 func (c *dataChannel) Close() (err error) {
 	c.once.Do(func() {
 		close(c.close)
-		close(c.packets)
 		clear(c.data)
 		err = c.DataChannel.Close()
 	})
