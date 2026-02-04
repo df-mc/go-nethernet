@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
+	"net"
 	"strconv"
+	"sync"
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -31,12 +33,11 @@ type Dialer struct {
 	API *webrtc.API
 }
 
-// DialContext establishes a Conn with a remote network referenced by the ID. The Signaling implementation may be used to
-// signal an offer and local ICE candidates, and to notify Signals of SignalTypeAnswer and SignalTypeCandidate signaled from
-// the remote connection. The [context.Context] may be used to cancel the connection as soon as possible. If the [context.Context]
-// is done, and [context.Context.Err] returns [context.DeadlineExceeded], it signals back a Signal of SignalTypeError with ErrorCodeInactivityTimeout
-// or ErrorCodeNegotiationTimeoutWaitingForAccept based on the progress. A Conn may be returned, that is ready to receive and send packets.
-func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (*Conn, error) {
+// DialContext establishes a Conn with a remote network referenced by the ID. The Signaling is used to signal
+// an offer with local candidates, and also to notify incoming signals received from the remote network. The
+// [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
+// ready to receive and send packets.
+func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (conn *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
 	}
@@ -72,6 +73,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	}
 	select {
 	case <-ctx.Done():
+		_ = gatherer.Close()
 		return nil, ctx.Err()
 	case <-gatherFinished:
 		ice := d.API.NewICETransport(gatherer)
@@ -94,6 +96,14 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		}
 		sctpCapabilities := sctp.GetCapabilities()
 
+		// Signals may be received very early when signaling an offer with local candidates.
+		signals, stop := d.notifySignals(networkID, signaling)
+		defer func() {
+			if err != nil {
+				stop()
+			}
+		}()
+
 		// Encode an offer using the local parameters!
 		dtlsParams.Role = webrtc.DTLSRoleServer
 		offer, err := description{
@@ -104,7 +114,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		if err != nil {
 			return nil, fmt.Errorf("encode offer: %w", err)
 		}
-		if err := signaling.Signal(&Signal{
+		if err := signaling.Signal(ctx, &Signal{
 			Type:         SignalTypeOffer,
 			Data:         string(offer),
 			ConnectionID: d.ConnectionID,
@@ -113,7 +123,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			return nil, fmt.Errorf("signal offer: %w", err)
 		}
 		for i, candidate := range candidates {
-			if err := signaling.Signal(&Signal{
+			if err := signaling.Signal(ctx, &Signal{
 				Type:         SignalTypeCandidate,
 				Data:         formatICECandidate(i, candidate, iceParams),
 				ConnectionID: d.ConnectionID,
@@ -123,18 +133,18 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			}
 		}
 
-		n, stop := d.notifySignals(networkID, signaling)
 		select {
 		case <-ctx.Done():
-			if errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
-			stop()
 			return nil, ctx.Err()
-		case err := <-n.errs:
-			stop()
-			return nil, fmt.Errorf("notified error from signaling: %w", err)
-		case signal := <-n.signals:
+		case <-signaling.Context().Done():
+			return nil, context.Cause(signaling.Context())
+		case signal, ok := <-signals:
+			if !ok {
+				return nil, net.ErrClosed
+			}
 			if signal.Type != SignalTypeAnswer {
 				d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
 				return nil, fmt.Errorf("received signal for non-answer: %s", signal.String())
@@ -159,11 +169,16 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 				Dialer: d,
 				stop:   stop,
 			})
-			go d.handleConn(ctx, c, n.signals)
+			defer func() {
+				if err != nil {
+					_ = c.Close()
+				}
+			}()
+			go d.handleConn(ctx, c, signals)
 
 			select {
 			case <-ctx.Done():
-				if errors.Is(err, context.DeadlineExceeded) {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
 				}
 				return nil, ctx.Err()
@@ -207,7 +222,7 @@ func (d dialerConn) log() *slog.Logger {
 // [Signaling] implementation with the remote network ID and the code of the error
 // occurred.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
-	_ = signaling.Signal(&Signal{
+	_ = signaling.Signal(context.Background(), &Signal{
 		Type:         SignalTypeError,
 		Data:         strconv.Itoa(code),
 		ConnectionID: d.ConnectionID,
@@ -241,28 +256,12 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
-	if err := withContext(ctx, func() error {
-		var err error
-		conn.reliable, err = d.API.NewDataChannel(conn.sctp, &webrtc.DataChannelParameters{
-			Label:   "ReliableDataChannel",
-			Ordered: true,
-		})
-		return err
-	}); err != nil {
-		return fmt.Errorf("create ReliableDataChannel: %w", err)
-	}
-	if err := withContext(ctx, func() error {
-		var (
-			err            error
-			maxRetransmits uint16 = 0
-		)
-		conn.unreliable, err = d.API.NewDataChannel(conn.sctp, &webrtc.DataChannelParameters{
-			Label:          "UnreliableDataChannel",
-			MaxRetransmits: &maxRetransmits,
-		})
-		return err
-	}); err != nil {
-		return fmt.Errorf("create UnreliableDataChannel: %w", err)
+	for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
+		c, err := d.API.NewDataChannel(conn.sctp, r.Parameters())
+		if err != nil {
+			return fmt.Errorf("create %s: %w", r.Parameters().Label, err)
+		}
+		conn.channels[r] = wrapDataChannel(c)
 	}
 	return nil
 }
@@ -277,7 +276,14 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 			return
 		case <-conn.closed:
 			return
-		case signal := <-signals:
+		case signal, ok := <-signals:
+			if !ok {
+				// Signals channel closed, connection should be closed as well
+				if err := conn.Close(); err != nil {
+					conn.log.Error("error closing conn", slog.Any("error", err))
+				}
+				return
+			}
 			switch signal.Type {
 			case SignalTypeCandidate, SignalTypeError:
 				if err := conn.handleSignal(signal); err != nil {
@@ -288,60 +294,43 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 	}
 }
 
-// notifySignals registers dialerNotifier to the Signaling to receive notifications of incoming Signals that has
-// the same network ID and same ConnectionID of Dialer. A *dialerNotifier and a function to stop receiving notifications
-// will be returned.
-func (d Dialer) notifySignals(networkID string, signaling Signaling) (*dialerNotifier, func()) {
-	n := &dialerNotifier{
-		Dialer: d,
+// notifySignals registers a channel to the Signaling to receive notifications of incoming Signals that has
+// the same network ID and same ConnectionID of Dialer. A channel for filtered signals and a function to stop
+// receiving notifications will be returned.
+func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Signal, func()) {
+	var (
+		signals     = make(chan *Signal)
+		filtered    = make(chan *Signal)
+		ctx, cancel = context.WithCancel(context.Background())
+	)
+	stop := signaling.Notify(signals)
+	var once sync.Once
 
-		signals: make(chan *Signal),
-		errs:    make(chan error),
-		closed:  make(chan struct{}),
-
-		networkID: networkID,
+	go func() {
+		defer close(filtered)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case signal, ok := <-signals:
+				if !ok {
+					return
+				}
+				if signal.NetworkID != networkID || signal.ConnectionID != d.ConnectionID {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case filtered <- signal:
+				}
+			}
+		}
+	}()
+	return filtered, func() {
+		once.Do(func() {
+			stop()
+			cancel()
+		})
 	}
-	return n, signaling.Notify(n)
-}
-
-// dialerNotifier notifies incoming Signals and errors.
-type dialerNotifier struct {
-	Dialer
-
-	signals chan *Signal  // Notifies incoming Signal that has the same IDs
-	errs    chan error    // Notifies error occurred in Signaling
-	closed  chan struct{} // Notifies that dialerNotifier is closed, and ensures that closure occur only once
-
-	networkID string // Remote network ID
-}
-
-func (d *dialerNotifier) NotifySignal(signal *Signal) {
-	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
-		return
-	}
-
-	d.signals <- signal
-}
-
-func (d *dialerNotifier) NotifyError(err error) {
-	select {
-	case <-d.closed:
-		return
-	default:
-	}
-
-	select {
-	case d.errs <- err:
-	default:
-	}
-
-	if errors.Is(err, ErrSignalingStopped) {
-		d.close()
-	}
-}
-
-func (d *dialerNotifier) close() {
-	close(d.signals)
-	close(d.errs)
-	close(d.closed)
 }
