@@ -94,6 +94,10 @@ func wrapDataChannel(channel *webrtc.DataChannel) *dataChannel {
 type dataChannel struct {
 	*webrtc.DataChannel
 
+	// reliability is the reliability parameter for dataChannel.
+	// It controls how multiple segments received in the data channel is handled.
+	reliability MessageReliability
+
 	// When writing multiple segments to the dataChannel, it should be locked using
 	// its embedded [sync.Mutex] for guaranteeing ordered segment counts.
 	write sync.Mutex
@@ -145,6 +149,10 @@ func (c *dataChannel) handleMessage(b []byte) error {
 	msg, err := parseMessage(b)
 	if err != nil {
 		return fmt.Errorf("parse: %w", err)
+	}
+
+	if c.reliability == MessageReliabilityUnreliable && msg.segments > 1 {
+		return fmt.Errorf("unexpected segment count on UnreliableDataChannel: %d", msg.segments)
 	}
 
 	if c.segments > 0 && c.segments-1 != msg.segments {
