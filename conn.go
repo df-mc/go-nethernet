@@ -102,6 +102,15 @@ func (conn *Conn) PacketHeader() (byte, bool) {
 	return 0, false
 }
 
+// DisableEncryption always reports true as no encryption should be done on Minecraft connection.
+// Disabling encryption is insecure and may allow attackers to replay Login packets.
+// Servers should perform additional verification (for example, ensuring the player
+// joined the Xbox Live multiplayer session) to confirm the client is legitimately
+// authenticated.
+func (conn *Conn) DisableEncryption() bool {
+	return true
+}
+
 // Write writes the data into the 'ReliableDataChannel'. If the data exceeds 10000 bytes, it is split into
 // multiple segments. An error may be returned while writing a segment or if the Conn has been closed by [Conn.Close].
 func (conn *Conn) Write(b []byte) (n int, err error) {
