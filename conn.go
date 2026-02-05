@@ -97,9 +97,9 @@ func (conn *Conn) ReadPacket() ([]byte, error) {
 	return conn.Receive(MessageReliabilityReliable)
 }
 
-// PacketHeader always returns 0 and false as no header is prefixed before packets.
-func (conn *Conn) PacketHeader() (byte, bool) {
-	return 0, false
+// BatchHeader always returns a nil slice as no header is prefixed before packets.
+func (conn *Conn) BatchHeader() []byte {
+	return nil
 }
 
 // DisableEncryption always reports true as no encryption should be done on Minecraft connection.
