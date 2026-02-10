@@ -67,7 +67,9 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 
 		closed: make(chan struct{}),
 	}
-	l.stop = signaling.Notify(listenerNotifier{l})
+	signals := make(chan *Signal)
+	l.stop = signaling.Notify(signals)
+	go l.listen(signals)
 	return l, nil
 }
 
@@ -77,10 +79,7 @@ type Listener struct {
 
 	signaling Signaling
 	networkID string
-	// id is an uint64 representation of the networkID.
-	// When the networkID can be parsed as an uint64, it will be directly used.
-	// Otherwise, a random value will be generated.
-	id uint64
+	id        uint64 // used for identifying Listener with an uint64.
 
 	connections sync.Map
 
@@ -104,6 +103,11 @@ func (l *Listener) Accept() (net.Conn, error) {
 // Addr returns an Addr that represents the local network ID of the Listener.
 func (l *Listener) Addr() net.Addr {
 	return &Addr{NetworkID: l.networkID}
+}
+
+// Context returns a context that is canceled when the Listener is closed.
+func (l *Listener) Context() context.Context {
+	return listenerContext{l.closed}
 }
 
 // Addr represents a network address that encapsulates both local and remote connection
@@ -161,46 +165,53 @@ func (l *Listener) PongData(b []byte) {
 	l.signaling.PongData(b)
 }
 
-// listenerNotifier receives notifications for a Listener. It is registered to a Signaling
-// implementation by [ListenConfig.Listen] to create a new Listener.
-type listenerNotifier struct{ *Listener }
-
-// NotifySignal notifies an incoming Signal to the Listener. It handles Signals of different
-// types by calling the corresponding methods for each type. If an error occurs while handling
-// the Signal, it attempts to cast the error as a signalError and if matches, it signals back
-// a Signal of type SignalTypeError with the error code.
-func (l listenerNotifier) NotifySignal(signal *Signal) {
-	var err error
-	switch signal.Type {
-	case SignalTypeOffer:
-		err = l.handleOffer(signal)
-	default:
-		err = l.handleSignal(signal)
-	}
-	if err != nil {
-		var s *signalError
-		if errors.As(err, &s) {
-			if err := l.signaling.Signal(&Signal{
-				Type:         SignalTypeError,
-				ConnectionID: signal.ConnectionID,
-				Data:         strconv.FormatUint(uint64(s.code), 10),
-				NetworkID:    signal.NetworkID,
-			}); err != nil {
-				l.conf.Log.Error("error signaling error", slog.Any("error", err))
+// listen receives incoming signals sent from remote networks in the channel.
+// It is called as a goroutine from [ListenConfig.Listen] and initiates all incoming
+// connections from offers. When either the listener is closed or the signaling context
+// is canceled, the goroutine will automatically break.
+func (l *Listener) listen(signals <-chan *Signal) {
+	for {
+		select {
+		case <-l.closed:
+			return
+		case <-l.signaling.Context().Done():
+			l.conf.Log.Warn("signaling context canceled",
+				slog.Any("error", context.Cause(l.signaling.Context())))
+			if err := l.Close(); err != nil {
+				l.conf.Log.Error("error closing listener due to cancellation of signaling context",
+					slog.Any("error", err))
+			}
+			return
+		case signal, ok := <-signals:
+			if !ok {
+				if err := l.Close(); err != nil {
+					l.conf.Log.Error("error closing listener", slog.Any("error", err))
+				}
+				return
+			}
+			var err error
+			switch signal.Type {
+			case SignalTypeOffer:
+				err = l.handleOffer(signal)
+			default:
+				err = l.handleSignal(signal)
+			}
+			if err != nil {
+				var s *signalError
+				if errors.As(err, &s) {
+					if err := l.signaling.Signal(l.Context(), &Signal{
+						Type:         SignalTypeError,
+						ConnectionID: signal.ConnectionID,
+						Data:         strconv.FormatUint(uint64(s.code), 10),
+						NetworkID:    signal.NetworkID,
+					}); err != nil {
+						l.conf.Log.Error("error signaling error", slog.Any("error", err))
+					}
+				}
+				l.conf.Log.Error("error handling signal", slog.Any("signal", signal), slog.Any("error", err))
 			}
 		}
-		l.conf.Log.Error("error handling signal", slog.Any("signal", signal), slog.Any("error", err))
 	}
-}
-
-// NotifyError notifies the Listener of an error that occurred in the Signaling implementation.
-// If the error is [ErrSignalingStopped], it will also close the Listener.
-func (l listenerNotifier) NotifyError(err error) {
-	if errors.Is(err, ErrSignalingStopped) {
-		_ = l.Close()
-		return
-	}
-	l.conf.Log.Error("notified error in signaling", slog.Any("error", err))
 }
 
 // handleOffer handles an incoming Signal of SignalTypeOffer. It parses the data of Signal into [sdp.SessionDescription]
@@ -218,7 +229,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 
 	var (
 		ctx    context.Context
-		parent = listenerContext{closed: l.closed}
+		parent = l.Context()
 	)
 	if l.conf.NegotiationContext != nil {
 		if ctx = l.conf.NegotiationContext(parent); ctx == nil {
@@ -257,7 +268,8 @@ func (l *Listener) handleOffer(signal *Signal) error {
 
 	select {
 	case <-ctx.Done():
-		return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeFailedToCreatePeerConnection)
+		_ = gatherer.Close()
+		return wrapSignalError(fmt.Errorf("gather local candidates: %w", ctx.Err()), ErrorCodeFailedToCreatePeerConnection)
 	case <-gatherFinished:
 		ice := l.conf.API.NewICETransport(gatherer)
 		dtls, err := l.conf.API.NewDTLSTransport(ice, nil)
@@ -289,7 +301,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			return wrapSignalError(fmt.Errorf("encode answer: %w", err), ErrorCodeFailedToCreateAnswer)
 		}
 
-		if err := l.signaling.Signal(&Signal{
+		if err := l.signaling.Signal(ctx, &Signal{
 			Type:         SignalTypeAnswer,
 			ConnectionID: signal.ConnectionID,
 			Data:         string(answer),
@@ -299,7 +311,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			return wrapSignalError(fmt.Errorf("signal answer: %w", err), ErrorCodeSignalingFailedToSend)
 		}
 		for i, candidate := range candidates {
-			if err := l.signaling.Signal(&Signal{
+			if err := l.signaling.Signal(ctx, &Signal{
 				Type:         SignalTypeCandidate,
 				ConnectionID: signal.ConnectionID,
 				Data:         formatICECandidate(i, candidate, iceParams),
@@ -354,13 +366,28 @@ func (l *Listener) log() *slog.Logger {
 // connection, it starts the transports of the Conn using the remote description and a context.Context]
 // returned from [ListenConfig.ConnContext].
 func (l *Listener) handleConn(conn *Conn, d *description) {
+	var (
+		ctx    context.Context
+		parent = l.Context()
+	)
+	if l.conf.ConnContext != nil {
+		ctx = l.conf.ConnContext(parent, conn)
+		if ctx == nil {
+			panic("nethernet: ConnContext returned nil")
+		}
+	} else {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(parent, time.Second*5)
+		defer cancel()
+	}
+
 	var err error
 	defer func() {
 		if err != nil {
 			_ = conn.Close() // Stop notifying for the Conn.
 
 			if errors.Is(err, context.DeadlineExceeded) {
-				if err := l.signaling.Signal(&Signal{
+				if err := l.signaling.Signal(ctx, &Signal{
 					Type:         SignalTypeError,
 					ConnectionID: conn.id,
 					Data:         strconv.Itoa(ErrorCodeNegotiationTimeoutWaitingForAccept),
@@ -375,21 +402,6 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 		}
 	}()
 
-	var (
-		ctx    context.Context
-		parent = listenerContext{closed: l.closed}
-	)
-	if l.conf.ConnContext != nil {
-		ctx = l.conf.ConnContext(parent, conn)
-		if ctx == nil {
-			panic("nethernet: ConnContext returned nil")
-		}
-	} else {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(parent, time.Second*5)
-		defer cancel()
-	}
-
 	select {
 	case <-ctx.Done():
 		err = ctx.Err()
@@ -399,6 +411,7 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 	case <-conn.candidateReceived:
 		conn.log.Debug("received first candidate")
 		if err = l.startTransports(ctx, conn, d); err != nil {
+			conn.log.Error("error starting transports", slog.Any("error", err))
 			return
 		}
 		conn.handleTransports()
@@ -427,18 +440,26 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 
 	conn.log.Debug("starting SCTP transport")
 	opened := make(chan struct{}, 1)
+	var cancel context.CancelCauseFunc
+	ctx, cancel = context.WithCancelCause(ctx)
 	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
-		switch channel.Label() {
-		case "ReliableDataChannel":
-			conn.reliable = channel
-		case "UnreliableDataChannel":
-			conn.unreliable = channel
-		default:
-			return
+		for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
+			if r.Valid(channel) {
+				if conn.channels[r] != nil {
+					cancel(fmt.Errorf("data channel opened for same reliability parameters: %q", r.Parameters().Label))
+					return
+				}
+				conn.channels[r] = wrapDataChannel(channel)
+				for rr := MessageReliability(0); rr < messageReliabilityCapacity; rr++ {
+					if conn.channels[rr] == nil {
+						return
+					}
+				}
+				close(opened)
+				return
+			}
 		}
-		if conn.reliable != nil && conn.unreliable != nil {
-			close(opened)
-		}
+		cancel(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
 	})
 	if err := withContext(ctx, func() error {
 		return conn.sctp.Start(d.sctp)
@@ -452,7 +473,7 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	case <-opened:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return context.Cause(ctx)
 	}
 }
 

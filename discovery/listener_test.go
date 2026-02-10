@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/df-mc/go-nethernet"
 )
@@ -58,5 +59,10 @@ func TestListen(t *testing.T) {
 			return
 		}
 		t.Logf("accepted: %s", conn.RemoteAddr())
+		time.AfterFunc(time.Second*5, func() {
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

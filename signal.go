@@ -3,7 +3,6 @@ package nethernet
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,13 +13,18 @@ import (
 // Signaling implements an interface for sending and receiving Signals over a network.
 type Signaling interface {
 	// Signal sends a Signal to a remote network referenced by [Signal.NetworkID].
-	Signal(signal *Signal) error
+	// The [context.Context] is used to cancel waiting for the acknowledgement from
+	// the signaling server as soon as possible.
+	Signal(ctx context.Context, signal *Signal) error
 
-	// Notify registers a Notifier to receive notifications for signals and errors. It returns
-	// a function to stop receiving notifications on Notifier. Once the stopping function is called,
-	// ErrSignalingStopped will be notified to the Notifier, and the underlying negotiator should
-	// handle the error by closing or returning.
-	Notify(n Notifier) (stop func())
+	// Notify registers a channel so that can be used to receive incoming signals from remote networks.
+	// It also returns a function to stop receiving signals on the channel.
+	Notify(ch chan<- *Signal) (stop func())
+
+	// Context returns a context for Signaling that is canceled optionally with a cause when a fatal
+	// error has occurred on the signaling server. It is used by both Dialer and Listener to notify
+	// a fatal error so they can no longer listen or dial for a connection that is no longer notified.
+	Context() context.Context
 
 	// Credentials blocks until Credentials are received by Signaling, and returns them. If Signaling
 	// does not support returning Credentials, it will return nil. Credentials are typically received
@@ -30,26 +34,10 @@ type Signaling interface {
 	// NetworkID returns the local network ID of Signaling. It is used by Listener to obtain its local
 	// network ID.
 	NetworkID() string
+
 	// PongData sets the server data in the format of a RakNet pong response. It is used by the Listener
 	// to respond to a ping request in the correct format.
 	PongData(b []byte)
-}
-
-// ErrSignalingStopped is notified to Notifier by Signaling through [Notifier.NotifyError] when the function
-// returned by [Signaling.Notify] has been called to stop receiving notifications. Once ErrSignalingStopped
-// is notified, the Notifier will no longer receive notifications, and the underlying Listener or Dialer should
-// be closed or returned.
-var ErrSignalingStopped = errors.New("nethernet: Notifier stopped")
-
-// Notifier receives notifications from Signaling.
-type Notifier interface {
-	// NotifySignal notifies the Signal to the Notifier. It is called by Signaling when a Signal
-	// has been signaled from the remote network denoted in [Signal.NetworkID].
-	NotifySignal(signal *Signal)
-
-	// NotifyError notifies the error to the Notifier. If the error is ErrSignalingStopped, the
-	// Dialer will return immediately, and the Listener will close itself.
-	NotifyError(err error)
 }
 
 const (
