@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net"
 	"slices"
@@ -24,7 +25,7 @@ import (
 //
 // A Conn represents a WebRTC peer connection using ICE, DTLS, and SCTP transports and encapsulates
 // two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel'. Most methods within
-// Conn utilize the 'ReliableDataChannel', as the functionality of the 'ReliableDataChannel' is less defined.
+// Conn utilize the 'ReliableDataChannel', as the functionality of the 'UnreliableDataChannel' is less defined.
 //
 // A Conn may be established by dialing a remote network ID using [Dialer.DialContext] (and other aliases),
 // or by accepting connections from a Listener that listens on a local network.
@@ -75,7 +76,11 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 	if err != nil {
 		return n, err
 	}
-	return copy(b, pk), nil
+	n = copy(b, pk)
+	if n < len(pk) {
+		return n, io.ErrShortBuffer
+	}
+	return n, nil
 }
 
 // Receive receives a packet in fully reconstructed state combined from multiple segments
@@ -123,34 +128,37 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err error) {
 	select {
 	case <-conn.closed:
-		return n, net.ErrClosed
+		return 0, net.ErrClosed
 	default:
 		if reliability == MessageReliabilityUnreliable && len(data) > maxMessageSize {
-			return n, fmt.Errorf("data larger than %d cannot be sent over UnreliableDataChannel", len(data))
+			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", maxMessageSize, len(data))
 		}
 		d := conn.channels[reliability]
 
-		// We need to hold a lock while sending multiple segments to this channel.
+		// Hold the lock for the entire segmented write to prevent interleaving.
 		d.write.Lock()
 		defer d.write.Unlock()
 
-		segments := uint8(len(data) / maxMessageSize)
-		if len(data)%maxMessageSize != 0 {
-			segments++ // If there's a remainder, we need an additional segment.
+		// Each segment is prefixed with a uint8 remaining-segment counter that starts
+		// at totalSegments-1 and decrements to 0 for the final segment. This limits
+		// the maximum number of segments to math.MaxUint8+1 (256).
+		const maxSegments = math.MaxUint8 + 1
+		totalSegments := (len(data) + maxMessageSize - 1) / maxMessageSize
+		if totalSegments > maxSegments {
+			return 0, fmt.Errorf("data too large: %d bytes requires %d segments (max %d)", len(data), totalSegments, maxSegments)
 		}
 
+		remaining := totalSegments - 1
 		for i := 0; i < len(data); i += maxMessageSize {
-			segments--
-
-			end := min(len(data), i+maxMessageSize)
-			frag := data[i:end]
-			if err := d.Send(append([]byte{segments}, frag...)); err != nil {
+			frag := data[i:min(len(data), i+maxMessageSize)]
+			if err := d.Send(append([]byte{uint8(remaining)}, frag...)); err != nil {
 				if errors.Is(err, io.ErrClosedPipe) {
 					err = net.ErrClosed
 				}
-				return n, fmt.Errorf("write segment #%d: %w", segments, err)
+				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, err)
 			}
 			n += len(frag)
+			remaining--
 		}
 		return n, nil
 	}
@@ -517,11 +525,11 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 		dtls: dtls,
 		sctp: sctp,
 
-		candidateReceived: make(chan struct{}, 1),
+		candidateReceived: make(chan struct{}),
 
 		negotiator: n,
 
-		closed: make(chan struct{}, 1),
+		closed: make(chan struct{}),
 
 		log: n.log().With(slog.Group("connection",
 			slog.Uint64("id", id),

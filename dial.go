@@ -23,7 +23,7 @@ type Dialer struct {
 
 	// Log is used for logging messages at various log levels. If nil, the default [slog.Logger] will be automatically
 	// set from [slog.Default]. Log will be extended when a Conn is being established by [Dialer] with additional attributes
-	// such as the connection ID and network ID, and will have a 'src' attribute set to 'listener' to mark that the Conn
+	// such as the connection ID and network ID, and will have a 'src' attribute set to 'dialer' to mark that the Conn
 	// has been negotiated by Dialer.
 	Log *slog.Logger
 
@@ -237,31 +237,37 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *description) error {
 	conn.log.Debug("starting ICE transport as controller")
 	iceRole := webrtc.ICERoleControlling
-	if err := withContext(ctx, func() error {
+	if err := withContextCancel(ctx, func() error {
 		return conn.ice.Start(nil, desc.ice, &iceRole)
+	}, func() {
+		_ = conn.ice.Stop()
 	}); err != nil {
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
 	conn.log.Debug("starting DTLS transport as client")
-	if err := withContext(ctx, func() error {
+	if err := withContextCancel(ctx, func() error {
 		return conn.dtls.Start(desc.dtls)
+	}, func() {
+		_ = conn.dtls.Stop()
 	}); err != nil {
 		return fmt.Errorf("start DTLS: %w", err)
 	}
 
 	conn.log.Debug("starting SCTP transport")
-	if err := withContext(ctx, func() error {
+	if err := withContextCancel(ctx, func() error {
 		return conn.sctp.Start(desc.sctp)
+	}, func() {
+		_ = conn.sctp.Stop()
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
-	for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
+	for r := range messageReliabilityCapacity {
 		c, err := d.API.NewDataChannel(conn.sctp, r.Parameters())
 		if err != nil {
 			return fmt.Errorf("create %s: %w", r.Parameters().Label, err)
 		}
-		conn.channels[r] = wrapDataChannel(c)
+		conn.channels[r] = wrapDataChannel(c, r)
 	}
 	return nil
 }

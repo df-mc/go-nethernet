@@ -87,6 +87,7 @@ type Listener struct {
 
 	stop   func()
 	closed chan struct{}
+	once   sync.Once
 }
 
 // Accept waits for and returns the next [Conn] to the Listener. An error may be
@@ -387,7 +388,10 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 			_ = conn.Close() // Stop notifying for the Conn.
 
 			if errors.Is(err, context.DeadlineExceeded) {
-				if err := l.signaling.Signal(ctx, &Signal{
+				// ctx is already expired: use a fresh context so the signal has a chance to be delivered.
+				sigCtx, cancel := context.WithTimeout(l.Context(), time.Second*2)
+				defer cancel()
+				if err := l.signaling.Signal(sigCtx, &Signal{
 					Type:         SignalTypeError,
 					ConnectionID: conn.id,
 					Data:         strconv.Itoa(ErrorCodeNegotiationTimeoutWaitingForAccept),
@@ -406,6 +410,7 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 	case <-ctx.Done():
 		err = ctx.Err()
 	case <-l.closed:
+		err = net.ErrClosed
 	case <-conn.closed:
 		return
 	case <-conn.candidateReceived:
@@ -415,7 +420,11 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 			return
 		}
 		conn.handleTransports()
-		l.incoming <- conn
+		select {
+		case <-l.closed:
+			_ = conn.Close()
+		case l.incoming <- conn:
+		}
 	}
 }
 
@@ -425,21 +434,25 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *description) error {
 	conn.log.Debug("starting ICE transport as controlled")
 	iceRole := webrtc.ICERoleControlled
-	if err := withContext(ctx, func() error {
+	if err := withContextCancel(ctx, func() error {
 		return conn.ice.Start(nil, d.ice, &iceRole)
+	}, func() {
+		_ = conn.ice.Stop()
 	}); err != nil {
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
 	conn.log.Debug("starting DTLS transport as server")
-	if err := withContext(ctx, func() error {
+	if err := withContextCancel(ctx, func() error {
 		return conn.dtls.Start(d.dtls)
+	}, func() {
+		_ = conn.dtls.Stop()
 	}); err != nil {
 		return fmt.Errorf("start DTLS: %w", err)
 	}
 
 	conn.log.Debug("starting SCTP transport")
-	opened := make(chan struct{}, 1)
+	opened := make(chan struct{})
 	var cancel context.CancelCauseFunc
 	ctx, cancel = context.WithCancelCause(ctx)
 	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
@@ -449,8 +462,8 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 					cancel(fmt.Errorf("data channel opened for same reliability parameters: %q", r.Parameters().Label))
 					return
 				}
-				conn.channels[r] = wrapDataChannel(channel)
-				for rr := MessageReliability(0); rr < messageReliabilityCapacity; rr++ {
+				conn.channels[r] = wrapDataChannel(channel, r)
+				for rr := range messageReliabilityCapacity {
 					if conn.channels[rr] == nil {
 						return
 					}
@@ -461,8 +474,10 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 		}
 		cancel(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
 	})
-	if err := withContext(ctx, func() error {
+	if err := withContextCancel(ctx, func() error {
 		return conn.sctp.Start(d.sctp)
+	}, func() {
+		_ = conn.sctp.Stop()
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
@@ -477,33 +492,37 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	}
 }
 
-// withContext calls the function with context-awareness (a little bit forcibly). It is useful for functions that
-// do not accept any [context.Context] as a parameter, such as the Start method of each transport of the Conn (that
-// will mostly hang if the remote connection does nothing).
-func withContext(ctx context.Context, f func() error) error {
-	err := make(chan error, 1)
+// withContextCancel calls f in a goroutine and returns early when ctx is done.
+// If cancel is non-nil, it is called when ctx is done to help unblock f.
+//
+// TODO: Remove when pion's transport Start methods accept a context.Context.
+func withContextCancel(ctx context.Context, f func() error, cancel func()) error {
+	errCh := make(chan error, 1)
 	go func() {
-		err <- f()
+		errCh <- f()
 	}()
 	select {
 	case <-ctx.Done():
+		if cancel != nil {
+			cancel()
+		}
+		// Ensure the goroutine can complete without blocking even if it returns later.
+		go func() { <-errCh }()
 		return ctx.Err()
-	case err := <-err:
+	case err := <-errCh:
 		return err
 	}
 }
 
 // Close closes the Listener, ensuring that any blocking methods will return [net.ErrClosed] as an error.
 func (l *Listener) Close() error {
-	select {
-	case <-l.closed:
-		return nil
-	default:
+	l.once.Do(func() {
 		close(l.closed)
-		close(l.incoming)
-		l.stop()
-		return nil
-	}
+		if l.stop != nil {
+			l.stop()
+		}
+	})
+	return nil
 }
 
 // A signalError may be returned by the methods of Listener to handle incoming Signals signaled from the
