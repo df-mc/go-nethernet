@@ -249,20 +249,21 @@ func (conn *Conn) Close() (err error) {
 // them are closed by the remote connection.
 func (conn *Conn) handleTransports() {
 	for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
-		conn.channels[r].OnMessage(func(msg webrtc.DataChannelMessage) {
-			if err := conn.channels[r].handleMessage(msg.Data); err != nil {
+		ch := conn.channels[r]
+		ch.OnMessage(func(msg webrtc.DataChannelMessage) {
+			if err := ch.handleMessage(msg.Data); err != nil {
 				if errors.Is(err, net.ErrClosed) {
 					conn.log.Debug("message dropped due to closure of data channel",
-						slog.String("label", conn.channels[r].Label()))
+						slog.String("label", ch.Label()))
 					return
 				}
 				conn.log.Error("error handling remote message",
-					slog.String("label", conn.channels[r].Label()),
+					slog.String("label", ch.Label()),
 					slog.Any("error", err),
 				)
 			}
 		})
-		conn.channels[r].OnClose(func() {
+		ch.OnClose(func() {
 			_ = conn.Close()
 		})
 	}
