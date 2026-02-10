@@ -94,6 +94,10 @@ func wrapDataChannel(channel *webrtc.DataChannel) *dataChannel {
 type dataChannel struct {
 	*webrtc.DataChannel
 
+	// An embedded message contains the buffer that holds the segments received
+	// to now and the count of the last segment count.
+	*message
+
 	// reliability is the reliability parameter for dataChannel.
 	// It controls how multiple segments received in the data channel is handled.
 	reliability MessageReliability
@@ -101,10 +105,6 @@ type dataChannel struct {
 	// When writing multiple segments to the dataChannel, it should be locked using
 	// its embedded [sync.Mutex] for guaranteeing ordered segment counts.
 	write sync.Mutex
-
-	// An embedded message contains the buffer that holds the segments received
-	// to now and the count of the last segment count.
-	*message
 
 	// packets can be used to receive packets that are fully-reconstructed from
 	// one or more segments received in the dataChannel.

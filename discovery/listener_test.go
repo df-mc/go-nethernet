@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/pion/logging"
-	"github.com/pion/webrtc/v4"
 )
 
 func TestListen(t *testing.T) {
@@ -41,13 +39,7 @@ func TestListen(t *testing.T) {
 		Level: slog.LevelDebug,
 	})))
 
-	factory := logging.NewDefaultLoggerFactory()
-	// factory.DefaultLogLevel = logging.LogLevelDebug
-	c := nethernet.ListenConfig{
-		API: webrtc.NewAPI(webrtc.WithSettingEngine(webrtc.SettingEngine{
-			LoggerFactory: factory,
-		})),
-	}
+	var c nethernet.ListenConfig
 	l, err := c.Listen(d)
 	if err != nil {
 		t.Fatalf("error listening: %s", err)
