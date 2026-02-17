@@ -125,6 +125,8 @@ type Listener struct {
 	once sync.Once
 }
 
+// notifier holds a buffered input channel and a caller-provided output
+// channel for relaying incoming signals to a [nethernet.Listener].
 type notifier struct {
 	in  chan *nethernet.Signal
 	out chan<- *nethernet.Signal

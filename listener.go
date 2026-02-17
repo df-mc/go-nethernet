@@ -52,11 +52,13 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 	if conf.API == nil {
 		conf.API = webrtc.NewAPI()
 	}
+
 	networkID := signaling.NetworkID()
 	id, err := strconv.ParseUint(networkID, 10, 64)
 	if err != nil {
 		id = rand.Uint64()
 	}
+
 	l := &Listener{
 		conf:      conf,
 		signaling: signaling,
@@ -67,9 +69,11 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 
 		closed: make(chan struct{}),
 	}
+
 	signals := make(chan *Signal)
 	l.stop = signaling.Notify(signals)
 	go l.listen(signals)
+
 	return l, nil
 }
 
@@ -518,9 +522,7 @@ func withContextCancel(ctx context.Context, f func() error, cancel func()) error
 func (l *Listener) Close() error {
 	l.once.Do(func() {
 		close(l.closed)
-		if l.stop != nil {
-			l.stop()
-		}
+		l.stop()
 	})
 	return nil
 }
