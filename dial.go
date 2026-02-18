@@ -133,65 +133,71 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			}
 		}
 
-		select {
-		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
-			}
-			return nil, ctx.Err()
-		case <-signaling.Context().Done():
-			return nil, context.Cause(signaling.Context())
-		case signal, ok := <-signals:
-			if !ok {
-				return nil, net.ErrClosed
-			}
-			if signal.Type != SignalTypeAnswer {
-				d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
-				return nil, fmt.Errorf("received signal for non-answer: %s", signal.String())
-			}
-
-			s := &sdp.SessionDescription{}
-			if err := s.UnmarshalString(signal.Data); err != nil {
-				d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
-				return nil, fmt.Errorf("decode answer: %w", err)
-			}
-			desc, err := parseDescription(s)
+		c := newConn(ice, dtls, sctp, d.ConnectionID, networkID, Addr{
+			NetworkID:    signaling.NetworkID(),
+			ConnectionID: d.ConnectionID,
+			Candidates:   candidates,
+		}, dialerConn{
+			Dialer: d,
+			stop:   stop,
+		})
+		defer func() {
 			if err != nil {
-				d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
-				return nil, fmt.Errorf("parse offer: %w", err)
+				_ = c.Close()
 			}
-
-			c := newConn(ice, dtls, sctp, d.ConnectionID, networkID, Addr{
-				NetworkID:    signaling.NetworkID(),
-				ConnectionID: d.ConnectionID,
-				Candidates:   candidates,
-			}, dialerConn{
-				Dialer: d,
-				stop:   stop,
-			})
-			defer func() {
-				if err != nil {
-					_ = c.Close()
-				}
-			}()
-			go d.handleConn(ctx, c, signals)
-
+		}()
+		for {
 			select {
 			case <-ctx.Done():
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+					d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 				}
 				return nil, ctx.Err()
-			case <-c.candidateReceived:
-				c.log.Debug("received first candidate")
-				if err := d.startTransports(ctx, c, desc); err != nil {
-					if errors.Is(err, context.DeadlineExceeded) {
-						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
-					}
-					return nil, fmt.Errorf("start transports: %w", err)
+			case <-signaling.Context().Done():
+				return nil, context.Cause(signaling.Context())
+			case signal, ok := <-signals:
+				if !ok {
+					return nil, net.ErrClosed
 				}
-				c.handleTransports()
-				return c, nil
+				switch signal.Type {
+				case SignalTypeAnswer:
+					s := &sdp.SessionDescription{}
+					if err := s.UnmarshalString(signal.Data); err != nil {
+						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
+						return nil, fmt.Errorf("decode answer: %w", err)
+					}
+					desc, err := parseDescription(s)
+					if err != nil {
+						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
+						return nil, fmt.Errorf("parse offer: %w", err)
+					}
+
+					go d.handleConn(ctx, c, signals)
+
+					select {
+					case <-ctx.Done():
+						if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+							d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+						}
+						return nil, ctx.Err()
+					case <-c.candidateReceived:
+						c.log.Debug("received first candidate")
+						if err := d.startTransports(ctx, c, desc); err != nil {
+							if errors.Is(err, context.DeadlineExceeded) {
+								d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+							}
+							return nil, fmt.Errorf("start transports: %w", err)
+						}
+						c.handleTransports()
+						return c, nil
+					}
+				default:
+					err = c.handleSignal(signal)
+					if err != nil {
+						d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
+						return nil, fmt.Errorf("handle signal: %w", err)
+					}
+				}
 			}
 		}
 	}
