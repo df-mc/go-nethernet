@@ -71,8 +71,8 @@ type Conn struct {
 
 	// ctx is the background context associated with the Conn.
 	ctx context.Context
-	// cancel is the function used to cancel the ctx. It is called
-	// by close
+	// cancel is the function used to cancel the ctx with a cause.
+	// It is called by close and must not be called elsewhere.
 	cancel context.CancelCauseFunc
 }
 
