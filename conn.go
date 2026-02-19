@@ -248,7 +248,7 @@ func (conn *Conn) remoteAddr() *Addr {
 func (conn *Conn) close(cause error) (err error) {
 	conn.once.Do(func() {
 		if cause != nil {
-			conn.log.Error("connection is closing with a cause", slog.Any("cause", err))
+			conn.log.Debug("connection is closing with a cause", slog.Any("cause", cause))
 		}
 		conn.cancel(cause)
 		conn.negotiator.handleClose(conn)
