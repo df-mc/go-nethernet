@@ -47,9 +47,10 @@ type Conn struct {
 	candidateReceived chan struct{}
 
 	// candidates includes all [webrtc.ICECandidate] signaled from the remote connection.
-	// New candidates are appended atomically to the slice.
-	candidates   []webrtc.ICECandidate
-	candidatesMu sync.Mutex // Guards candidates
+	// New candidates are appended atomically to the slice. It is guarded by candidatesMu.
+	candidates []webrtc.ICECandidate
+	// candidatesMu guards candidates from concurrent read-write access.
+	candidatesMu sync.Mutex
 
 	// negotiator is either Listener or Dialer that the Conn has been negotiated through.
 	negotiator negotiator
