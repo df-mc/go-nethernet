@@ -415,7 +415,7 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 		err = ctx.Err()
 	case <-l.closed:
 		err = net.ErrClosed
-	case <-conn.closed:
+	case <-conn.ctx.Done():
 		return
 	case <-conn.candidateReceived:
 		conn.log.Debug("received first candidate")

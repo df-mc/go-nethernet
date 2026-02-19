@@ -286,7 +286,7 @@ func (d Dialer) handleConn(ctx context.Context, conn *Conn, signals <-chan *Sign
 		select {
 		case <-ctx.Done():
 			return
-		case <-conn.closed:
+		case <-conn.ctx.Done():
 			return
 		case signal, ok := <-signals:
 			if !ok {
