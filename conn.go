@@ -323,8 +323,14 @@ func (conn *Conn) handleTransports() {
 		}
 	})
 	conn.sctp.OnClose(func(err error) {
+		var e error
+		if err != nil {
+			e = fmt.Errorf("nethernet: SCTP transport closed: %w", err)
+		} else {
+			e = errors.New("nethernet: SCTP transport closed")
+		}
 		// This handler function itself is holding the lock, call Close in a goroutine to avoid deadlock.
-		go conn.close(fmt.Errorf("nethernet: SCTP transport closed: %w", err))
+		go conn.close(e)
 	})
 }
 
