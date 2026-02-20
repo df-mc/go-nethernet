@@ -98,11 +98,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 
 		// Signals may be received very early when signaling an offer with local candidates.
 		signals, stop := d.notifySignals(networkID, signaling)
-		defer func() {
-			if err != nil {
-				stop()
-			}
-		}()
+		defer stop()
 
 		// Encode an offer using the local parameters!
 		dtlsParams.Role = webrtc.DTLSRoleServer
@@ -172,7 +168,9 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 						return nil, fmt.Errorf("parse offer: %w", err)
 					}
 
-					go d.handleConn(ctx, c, signals)
+					connCtx, cancel := context.WithCancel(ctx)
+					defer cancel()
+					go d.handleConn(connCtx, c, signals)
 
 					select {
 					case <-ctx.Done():
