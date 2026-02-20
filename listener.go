@@ -83,7 +83,8 @@ type Listener struct {
 
 	signaling Signaling
 	networkID string
-	id        uint64 // used for identifying Listener with an uint64.
+	// id is the numerical identifier for the Listener.
+	id uint64
 
 	connections sync.Map
 
@@ -415,7 +416,7 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 		err = ctx.Err()
 	case <-l.closed:
 		err = net.ErrClosed
-	case <-conn.closed:
+	case <-conn.ctx.Done():
 		return
 	case <-conn.candidateReceived:
 		conn.log.Debug("received first candidate")
