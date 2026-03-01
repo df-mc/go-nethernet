@@ -337,12 +337,12 @@ func (l *Listener) handleResponse(pk *ResponsePacket, senderID uint64) error {
 }
 
 // handleMessage handles a MessagePacket sent from the remote NetherNet network.
-// It discards the packet if the Data is "Ping", otherwise decodes them as a [nethernet.Signal].
+// It discards the packet if the Data is "Ping" or empty, otherwise decodes them as a [nethernet.Signal].
 func (l *Listener) handleMessage(pk *MessagePacket, senderID uint64) error {
 	if pk.RecipientID != l.conf.NetworkID {
 		return nil
 	}
-	if pk.Data == "Ping" {
+	if pk.Data == "Ping" || pk.Data == "" {
 		return nil
 	}
 
