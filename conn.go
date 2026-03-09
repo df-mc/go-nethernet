@@ -347,7 +347,6 @@ func (conn *Conn) handleSignal(signal *Signal) error {
 	case SignalTypeCandidate:
 		s := strings.TrimSpace(signal.Data)
 		s = strings.TrimPrefix(s, "a=")
-		s = strings.TrimPrefix(s, "candidate:")
 		candidate, err := ice.UnmarshalCandidate(s)
 
 		if err != nil {
