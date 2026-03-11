@@ -345,7 +345,10 @@ func (conn *Conn) handleTransports() {
 func (conn *Conn) handleSignal(signal *Signal) error {
 	switch signal.Type {
 	case SignalTypeCandidate:
-		candidate, err := ice.UnmarshalCandidate(signal.Data)
+		s := strings.TrimSpace(signal.Data)
+		s = strings.TrimPrefix(s, "a=")
+		candidate, err := ice.UnmarshalCandidate(s)
+
 		if err != nil {
 			return fmt.Errorf("decode candidate: %w", err)
 		}
@@ -416,7 +419,10 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 
 	attr, ok := m.Attribute("fingerprint")
 	if !ok {
-		return nil, errors.New("missing fingerprint attribute")
+		attr, ok = d.Attribute("fingerprint")
+		if !ok {
+			return nil, errors.New("missing fingerprint attribute")
+		}
 	}
 	fingerprint := strings.Split(attr, " ")
 	if len(fingerprint) != 2 {
