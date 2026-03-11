@@ -282,36 +282,10 @@ func (conn *Conn) Close() (err error) {
 // associated with the Conn. It also ensures that the Conn is closed if an unrecoverable
 // error has occurred in any of the underlying transports and data channels.
 func (conn *Conn) handleTransports() {
-	for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
-		ch := conn.channels[r]
-		ch.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if err := ch.handleMessage(msg.Data); err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					conn.log.Debug("message dropped due to closure of data channel",
-						slog.String("label", ch.Label()))
-					return
-				}
-				// Receiving an invalid or incomplete message is considered unrecoverable
-				// as segmented packets cannot be completed. Closing the connection also
-				// helps mitigate malformed or malicious input from a peer.
-				// The DataChannel invokes this callback while holding an internal lock,
-				// so the connection is closed in a goroutine to avoid deadlock.
-				go conn.close(fmt.Errorf("nethernet: handle message in %s: %w", ch.Label(), err))
-			}
-		})
-		ch.OnClose(func() {
-			_ = conn.close(fmt.Errorf("nethernet: data channel %q closed by remote peer", ch.Label()))
-		})
-	}
-
-	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
-		_ = conn.close(fmt.Errorf("nethernet: data channel %q was unexpectedly opened by remote peer after connection was established", channel.Label()))
-	})
-
 	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
 		switch state {
 		case webrtc.ICETransportStateClosed, webrtc.ICETransportStateDisconnected, webrtc.ICETransportStateFailed:
-			// This handler function itself is holding the lock, call Close in a goroutine to avoid deadlock.
+			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 			go conn.close(fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state))
 		default:
 		}
@@ -319,7 +293,7 @@ func (conn *Conn) handleTransports() {
 	conn.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
 		switch state {
 		case webrtc.DTLSTransportStateClosed, webrtc.DTLSTransportStateFailed:
-			// This handler function itself is holding the lock, call Close in a goroutine to avoid deadlock.
+			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 			go conn.close(fmt.Errorf("nethernet: DTLS transport entered unrecoverable state: %s", state))
 		default:
 		}
@@ -331,7 +305,7 @@ func (conn *Conn) handleTransports() {
 		} else {
 			e = errors.New("nethernet: SCTP transport closed")
 		}
-		// This handler function itself is holding the lock, call Close in a goroutine to avoid deadlock.
+		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 		go conn.close(e)
 	})
 }
@@ -578,6 +552,7 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 		networkID: networkID,
 	}
 	c.ctx, c.cancel = context.WithCancelCause(context.Background())
+	c.handleTransports()
 	return c
 }
 

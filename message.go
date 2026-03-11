@@ -1,8 +1,10 @@
 package nethernet
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"sync"
@@ -78,8 +80,8 @@ func (r MessageReliability) compareOptional(a, b *uint16) bool {
 // wrapDataChannel wraps a [webrtc.DataChannel] into the dataChannel for further use in Conn.
 // It also newly allocates a buffer in the message field of dataChannel sized for the maximum
 // number of segments supported by the on-wire format.
-func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability) *dataChannel {
-	return &dataChannel{
+func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability, conn *Conn) *dataChannel {
+	ch := &dataChannel{
 		DataChannel: channel,
 		reliability: reliability,
 		message: &message{
@@ -90,6 +92,26 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 		packets: make(chan []byte),
 		close:   make(chan struct{}),
 	}
+	ch.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if err := ch.handleMessage(msg.Data); err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				conn.log.Debug("message dropped due to closure of data channel",
+					slog.String("label", ch.Label()))
+				return
+			}
+			// Receiving an invalid or incomplete message is considered unrecoverable
+			// as segmented packets cannot be completed. Closing the connection also
+			// helps mitigate malformed or malicious input from a peer.
+			// The DataChannel invokes this callback while holding an internal lock,
+			// so the connection is closed in a goroutine to avoid deadlock.
+			go conn.close(fmt.Errorf("nethernet: handle message in %s: %w", ch.Label(), err))
+		}
+	})
+	ch.OnClose(func() {
+		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
+		go conn.close(fmt.Errorf("nethernet: data channel %q closed by remote peer", ch.Label()))
+	})
+	return ch
 }
 
 // dataChannel represents the data channel responsible for sending and receiving messages in MessageReliability
