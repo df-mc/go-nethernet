@@ -183,9 +183,14 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					go d.handleConn(c, signals)
 
 					select {
+					case <-c.ctx.Done():
+						return nil, context.Cause(c.ctx)
 					case <-ctx.Done():
 						if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 							d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+						}
+						if err := context.Cause(c.ctx); err != nil {
+							return nil, err
 						}
 						return nil, ctx.Err()
 					case <-c.candidateReceived:
