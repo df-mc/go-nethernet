@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/sdp/v3"
@@ -309,10 +310,8 @@ func (l *Listener) handleOffer(signal *Signal) error {
 
 		// Register a callback function immediately since the remote peer
 		// may open data channels at any time while ICE candidates are being signaled.
-		var (
-			channelsReady = make(chan struct{})
-			opened        int
-		)
+		channelsReady := make(chan struct{})
+		var opened atomic.Uint32
 		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
 			for r := range messageReliabilityCapacity {
 				if r.Valid(channel) {
@@ -323,7 +322,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 					c.channels[r] = wrapDataChannel(channel, r, c)
 					channel.OnOpen(sync.OnceFunc(func() {
 						// If all data channels have been opened by remote peer, we can signal that the connection is ready.
-						if opened++; opened == int(messageReliabilityCapacity) {
+						if opened.Add(1) == uint32(messageReliabilityCapacity) {
 							close(channelsReady)
 						}
 					}))
@@ -498,12 +497,21 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 		return fmt.Errorf("start SCTP: %w", err)
 	}
 
+	return l.waitForChannelsReady(ctx, conn, channelsReady)
+}
+
+func (l *Listener) waitForChannelsReady(ctx context.Context, conn *Conn, channelsReady <-chan struct{}) error {
 	select {
 	case <-l.closed:
 		return net.ErrClosed
 	case <-channelsReady:
 		return nil
+	case <-conn.ctx.Done():
+		return context.Cause(conn.ctx)
 	case <-ctx.Done():
+		if err := context.Cause(conn.ctx); err != nil {
+			return err
+		}
 		return context.Cause(ctx)
 	}
 }
