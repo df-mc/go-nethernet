@@ -7,8 +7,6 @@ import (
 )
 
 func TestListenerWaitForChannelsReadyReturnsConnCause(t *testing.T) {
-	t.Helper()
-
 	l := &Listener{closed: make(chan struct{})}
 	ctx := context.Background()
 	connCtx, cancel := context.WithCancelCause(context.Background())
@@ -24,8 +22,6 @@ func TestListenerWaitForChannelsReadyReturnsConnCause(t *testing.T) {
 }
 
 func TestListenerWaitForChannelsReadyReturnsNilWhenReady(t *testing.T) {
-	t.Helper()
-
 	l := &Listener{closed: make(chan struct{})}
 	conn := &Conn{ctx: context.Background()}
 	channelsReady := make(chan struct{})
