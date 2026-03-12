@@ -60,6 +60,8 @@ type Conn struct {
 	// There is currently two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel'
 	// that are expected to both open during negotiating a new Conn.
 	channels [messageReliabilityCapacity]*dataChannel
+	// channelsMu guards channels from concurrent read-write access during startup and closure.
+	channelsMu sync.RWMutex
 
 	// once ensures that the Conn is closed only once.
 	once sync.Once
@@ -101,7 +103,7 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	select {
 	case <-conn.ctx.Done():
 		return nil, context.Cause(conn.ctx)
-	case pk := <-conn.channels[r].packets:
+	case pk := <-conn.channel(r).packets:
 		return pk, nil
 	}
 }
@@ -154,7 +156,7 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		if reliability == MessageReliabilityUnreliable && len(data) > maxMessageSize {
 			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", maxMessageSize, len(data))
 		}
-		d := conn.channels[reliability]
+		d := conn.channel(reliability)
 
 		// Hold the lock for the entire segmented write to prevent interleaving.
 		d.write.Lock()
@@ -255,8 +257,8 @@ func (conn *Conn) close(cause error) (err error) {
 		conn.cancel(cause)
 		conn.negotiator.handleClose(conn)
 
-		for r := range messageReliabilityCapacity {
-			if ch := conn.channels[r]; ch != nil {
+		for _, ch := range conn.snapshotChannels() {
+			if ch != nil {
 				err = errors.Join(err, ch.Close())
 			}
 		}
@@ -271,6 +273,33 @@ func (conn *Conn) close(cause error) (err error) {
 	return err
 }
 
+// channel returns the dataChannel for the given MessageReliability.
+func (conn *Conn) channel(r MessageReliability) *dataChannel {
+	conn.channelsMu.RLock()
+	defer conn.channelsMu.RUnlock()
+	return conn.channels[r]
+}
+
+// storeChannel stores ch for the given MessageReliability if no channel has
+// been stored yet. It returns the previously stored channel, or nil on success.
+func (conn *Conn) storeChannel(r MessageReliability, ch *dataChannel) (existing *dataChannel) {
+	conn.channelsMu.Lock()
+	defer conn.channelsMu.Unlock()
+	existing = conn.channels[r]
+	if existing == nil {
+		conn.channels[r] = ch
+	}
+	return existing
+}
+
+// snapshotChannels returns a copy of the channels array for safe iteration
+// without holding the lock.
+func (conn *Conn) snapshotChannels() [messageReliabilityCapacity]*dataChannel {
+	conn.channelsMu.RLock()
+	defer conn.channelsMu.RUnlock()
+	return conn.channels
+}
+
 // Close closes the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,
 // and ICE transports of the Conn. An error may be returned using [errors.Join], which contains
 // non-nil errors encountered during closure.
@@ -282,36 +311,10 @@ func (conn *Conn) Close() (err error) {
 // associated with the Conn. It also ensures that the Conn is closed if an unrecoverable
 // error has occurred in any of the underlying transports and data channels.
 func (conn *Conn) handleTransports() {
-	for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
-		ch := conn.channels[r]
-		ch.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if err := ch.handleMessage(msg.Data); err != nil {
-				if errors.Is(err, net.ErrClosed) {
-					conn.log.Debug("message dropped due to closure of data channel",
-						slog.String("label", ch.Label()))
-					return
-				}
-				// Receiving an invalid or incomplete message is considered unrecoverable
-				// as segmented packets cannot be completed. Closing the connection also
-				// helps mitigate malformed or malicious input from a peer.
-				// The DataChannel invokes this callback while holding an internal lock,
-				// so the connection is closed in a goroutine to avoid deadlock.
-				go conn.close(fmt.Errorf("nethernet: handle message in %s: %w", ch.Label(), err))
-			}
-		})
-		ch.OnClose(func() {
-			_ = conn.close(fmt.Errorf("nethernet: data channel %q closed by remote peer", ch.Label()))
-		})
-	}
-
-	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
-		_ = conn.close(fmt.Errorf("nethernet: data channel %q was unexpectedly opened by remote peer after connection was established", channel.Label()))
-	})
-
 	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
 		switch state {
 		case webrtc.ICETransportStateClosed, webrtc.ICETransportStateDisconnected, webrtc.ICETransportStateFailed:
-			// This handler function itself is holding the lock, call Close in a goroutine to avoid deadlock.
+			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 			go conn.close(fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state))
 		default:
 		}
@@ -319,7 +322,7 @@ func (conn *Conn) handleTransports() {
 	conn.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
 		switch state {
 		case webrtc.DTLSTransportStateClosed, webrtc.DTLSTransportStateFailed:
-			// This handler function itself is holding the lock, call Close in a goroutine to avoid deadlock.
+			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 			go conn.close(fmt.Errorf("nethernet: DTLS transport entered unrecoverable state: %s", state))
 		default:
 		}
@@ -331,7 +334,7 @@ func (conn *Conn) handleTransports() {
 		} else {
 			e = errors.New("nethernet: SCTP transport closed")
 		}
-		// This handler function itself is holding the lock, call Close in a goroutine to avoid deadlock.
+		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 		go conn.close(e)
 	})
 }
@@ -345,7 +348,10 @@ func (conn *Conn) handleTransports() {
 func (conn *Conn) handleSignal(signal *Signal) error {
 	switch signal.Type {
 	case SignalTypeCandidate:
-		candidate, err := ice.UnmarshalCandidate(signal.Data)
+		s := strings.TrimSpace(signal.Data)
+		s = strings.TrimPrefix(s, "a=")
+		candidate, err := ice.UnmarshalCandidate(s)
+
 		if err != nil {
 			return fmt.Errorf("decode candidate: %w", err)
 		}
@@ -416,7 +422,10 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 
 	attr, ok := m.Attribute("fingerprint")
 	if !ok {
-		return nil, errors.New("missing fingerprint attribute")
+		attr, ok = d.Attribute("fingerprint")
+		if !ok {
+			return nil, errors.New("missing fingerprint attribute")
+		}
 	}
 	fingerprint := strings.Split(attr, " ")
 	if len(fingerprint) != 2 {
@@ -545,12 +554,12 @@ func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole 
 	}
 }
 
-// newConn creates a Conn from the ICE, DTLS and SCTP transport associated with the IDs.
-// The local Addr containing the local network ID will be used for returning local [net.Addr]
-// of the Conn from [Conn.LocalAddr]. The implementation of negotiator may be used to obtain
-// a [slog.Logger] of the Conn, and few other methods to handle events such as closures. The
-// negotiator (caller) must establish each transport after creating a Conn when a first ICE
-// candidate has been signaled from the remote connection.
+// newConn creates a peer Conn from the ICE, DTLS and SCTP transport.
+// It also attaches callback handlers to each transport so the Conn
+// is closed when any underling transport closes or enters an
+// unrecoverable state.
+// The caller must register [SCTPTransport.OnDataChannel] handler
+// immediately using the returned Conn.
 func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, id uint64, networkID string, local Addr, n negotiator) *Conn {
 	c := &Conn{
 		ice:  ice,
@@ -572,6 +581,7 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 		networkID: networkID,
 	}
 	c.ctx, c.cancel = context.WithCancelCause(context.Background())
+	c.handleTransports()
 	return c
 }
 

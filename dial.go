@@ -37,7 +37,7 @@ type Dialer struct {
 // an offer with local candidates, and also to notify incoming signals received from the remote network. The
 // [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
 // ready to receive and send packets.
-func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (conn *Conn, err error) {
+func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (_ *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
 	}
@@ -113,9 +113,15 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		})
 		defer func() {
 			if err != nil {
-				_ = c.Close()
+				_ = c.close(fmt.Errorf("dial failure: %w", err))
 			}
 		}()
+		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
+			// For client connections, the server should never open a data channel.
+			//
+			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
+			go c.close(fmt.Errorf("data channel %q was unexpectedly opened by remote peer", channel.Label()))
+		})
 
 		// Encode an offer using the local parameters!
 		dtlsParams.Role = webrtc.DTLSRoleServer
@@ -148,6 +154,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 
 		for {
 			select {
+			case <-c.ctx.Done():
+				return nil, context.Cause(c.ctx)
 			case <-ctx.Done():
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
@@ -175,9 +183,14 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					go d.handleConn(c, signals)
 
 					select {
+					case <-c.ctx.Done():
+						return nil, context.Cause(c.ctx)
 					case <-ctx.Done():
 						if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 							d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+						}
+						if err := context.Cause(c.ctx); err != nil {
+							return nil, err
 						}
 						return nil, ctx.Err()
 					case <-c.candidateReceived:
@@ -188,7 +201,6 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 							}
 							return nil, fmt.Errorf("start transports: %w", err)
 						}
-						c.handleTransports()
 						return c, nil
 					}
 				default:
@@ -273,7 +285,9 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 		if err != nil {
 			return fmt.Errorf("create %s: %w", r.Parameters().Label, err)
 		}
-		conn.channels[r] = wrapDataChannel(c, r)
+		if existing := conn.storeChannel(r, wrapDataChannel(c, r, conn)); existing != nil {
+			return fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label)
+		}
 	}
 	return nil
 }
