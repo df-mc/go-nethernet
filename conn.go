@@ -60,6 +60,8 @@ type Conn struct {
 	// There is currently two data channels labeled 'ReliableDataChannel' and 'UnreliableDataChannel'
 	// that are expected to both open during negotiating a new Conn.
 	channels [messageReliabilityCapacity]*dataChannel
+	// channelsMu guards channels from concurrent read-write access during startup and closure.
+	channelsMu sync.RWMutex
 
 	// once ensures that the Conn is closed only once.
 	once sync.Once
@@ -101,7 +103,7 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	select {
 	case <-conn.ctx.Done():
 		return nil, context.Cause(conn.ctx)
-	case pk := <-conn.channels[r].packets:
+	case pk := <-conn.channel(r).packets:
 		return pk, nil
 	}
 }
@@ -154,7 +156,7 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		if reliability == MessageReliabilityUnreliable && len(data) > maxMessageSize {
 			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", maxMessageSize, len(data))
 		}
-		d := conn.channels[reliability]
+		d := conn.channel(reliability)
 
 		// Hold the lock for the entire segmented write to prevent interleaving.
 		d.write.Lock()
@@ -255,8 +257,8 @@ func (conn *Conn) close(cause error) (err error) {
 		conn.cancel(cause)
 		conn.negotiator.handleClose(conn)
 
-		for r := range messageReliabilityCapacity {
-			if ch := conn.channels[r]; ch != nil {
+		for _, ch := range conn.snapshotChannels() {
+			if ch != nil {
 				err = errors.Join(err, ch.Close())
 			}
 		}
@@ -269,6 +271,28 @@ func (conn *Conn) close(cause error) (err error) {
 		)
 	})
 	return err
+}
+
+func (conn *Conn) channel(r MessageReliability) *dataChannel {
+	conn.channelsMu.RLock()
+	defer conn.channelsMu.RUnlock()
+	return conn.channels[r]
+}
+
+func (conn *Conn) storeChannel(r MessageReliability, ch *dataChannel) (existing *dataChannel) {
+	conn.channelsMu.Lock()
+	defer conn.channelsMu.Unlock()
+	existing = conn.channels[r]
+	if existing == nil {
+		conn.channels[r] = ch
+	}
+	return existing
+}
+
+func (conn *Conn) snapshotChannels() [messageReliabilityCapacity]*dataChannel {
+	conn.channelsMu.RLock()
+	defer conn.channelsMu.RUnlock()
+	return conn.channels
 }
 
 // Close closes the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,

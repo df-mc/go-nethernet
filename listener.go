@@ -315,11 +315,11 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
 			for r := range messageReliabilityCapacity {
 				if r.Valid(channel) {
-					if c.channels[r] != nil {
+					ch := wrapDataChannel(channel, r, c)
+					if existing := c.storeChannel(r, ch); existing != nil {
 						go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
 						return
 					}
-					c.channels[r] = wrapDataChannel(channel, r, c)
 					channel.OnOpen(sync.OnceFunc(func() {
 						// If all data channels have been opened by remote peer, we can signal that the connection is ready.
 						if opened.Add(1) == uint32(messageReliabilityCapacity) {
