@@ -429,18 +429,16 @@ func (conn *Conn) addRemoteCandidatesFromSDP(d *sdp.SessionDescription) error {
 	if len(d.MediaDescriptions) == 0 {
 		return nil
 	}
-	for _, attrs := range [][]sdp.Attribute{d.Attributes, d.MediaDescriptions[0].Attributes} {
-		for _, attr := range attrs {
-			if attr.Key != "candidate" {
-				continue
-			}
-			candidate, err := parseRemoteCandidate(attr.Value)
-			if err != nil {
-				return err
-			}
-			if err := conn.addRemoteCandidate(candidate); err != nil {
-				return err
-			}
+	for _, attr := range append(d.Attributes, d.MediaDescriptions[0].Attributes...) {
+		if !attr.IsICECandidate() {
+			continue
+		}
+		candidate, err := parseRemoteCandidate(attr.Value)
+		if err != nil {
+			return err
+		}
+		if err := conn.addRemoteCandidate(candidate); err != nil {
+			return err
 		}
 	}
 	return nil
