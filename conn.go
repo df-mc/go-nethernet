@@ -370,14 +370,11 @@ func (conn *Conn) handleSignal(signal *Signal) error {
 }
 
 // parseRemoteCandidate parses a raw ICE candidate string into a [webrtc.ICECandidate].
-// It accepts formats with or without an "a=" prefix and a "candidate:" prefix,
-// normalizing the input before unmarshalling.
+// It accepts formats with or without an "a=" prefix; [ice.UnmarshalCandidate] handles
+// the "candidate:" prefix.
 func parseRemoteCandidate(data string) (webrtc.ICECandidate, error) {
 	s := strings.TrimSpace(data)
 	s = strings.TrimPrefix(s, "a=")
-	if !strings.HasPrefix(s, "candidate:") {
-		s = "candidate:" + s
-	}
 
 	candidate, err := ice.UnmarshalCandidate(s)
 	if err != nil {
