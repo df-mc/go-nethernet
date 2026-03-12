@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/sdp/v3"
@@ -307,6 +308,30 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			}
 		}()
 
+		// Register a callback function immediately since the remote peer
+		// may open data channels at any time while ICE candidates are being signaled.
+		channelsReady := make(chan struct{})
+		var opened atomic.Uint32
+		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
+			for r := range messageReliabilityCapacity {
+				if r.Valid(channel) {
+					ch := wrapDataChannel(channel, r, c)
+					if existing := c.storeChannel(r, ch); existing != nil {
+						go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
+						return
+					}
+					channel.OnOpen(sync.OnceFunc(func() {
+						// If all data channels have been opened by remote peer, we can signal that the connection is ready.
+						if opened.Add(1) == uint32(messageReliabilityCapacity) {
+							close(channelsReady)
+						}
+					}))
+					return
+				}
+			}
+			go c.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
+		})
+
 		// Encode an answer using the local parameters!
 		sctpCapabilities := sctp.GetCapabilities()
 		answer, err := description{
@@ -340,7 +365,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		}
 
 		l.connections.Store(c.remoteAddr().String(), c)
-		go l.handleConn(c, desc)
+		go l.handleConn(c, desc, channelsReady)
 		established = true
 
 		return nil
@@ -378,7 +403,7 @@ func (l *Listener) log() *slog.Logger {
 // handleConn finalises the Conn. Once an ICE candidate for the Conn has been signaled from the remote
 // connection, it starts the transports of the Conn using the remote description and a context.Context]
 // returned from [ListenConfig.ConnContext].
-func (l *Listener) handleConn(conn *Conn, d *description) {
+func (l *Listener) handleConn(conn *Conn, d *description, channelsReady <-chan struct{}) {
 	var (
 		ctx    context.Context
 		parent = l.Context()
@@ -424,14 +449,14 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 	case <-l.closed:
 		err = net.ErrClosed
 	case <-conn.ctx.Done():
-		return
+		err = context.Cause(conn.ctx)
 	case <-conn.candidateReceived:
 		conn.log.Debug("received first candidate")
-		if err = l.startTransports(ctx, conn, d); err != nil {
+		if err = l.startTransports(ctx, conn, d, channelsReady); err != nil {
 			conn.log.Error("error starting transports", slog.Any("error", err))
 			return
 		}
-		conn.handleTransports()
+
 		select {
 		case <-l.closed:
 			_ = conn.Close()
@@ -443,7 +468,7 @@ func (l *Listener) handleConn(conn *Conn, d *description) {
 // startTransports establishes ICE transport as [webrtc.ICERoleControlled], DTLS transport as [webrtc.DTLSRoleServer]
 // and SCTP transport using the remote description. It will block until two data channels labeled 'ReliableDataChannel'
 // and 'UnreliableDataChannel' are created by the remote connection. The [context.Context] is used to cancel blocking.
-func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *description) error {
+func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *description, channelsReady <-chan struct{}) error {
 	conn.log.Debug("starting ICE transport as controlled")
 	iceRole := webrtc.ICERoleControlled
 	if err := withContextCancel(ctx, func() error {
@@ -464,28 +489,6 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	}
 
 	conn.log.Debug("starting SCTP transport")
-	opened := make(chan struct{})
-	var cancel context.CancelCauseFunc
-	ctx, cancel = context.WithCancelCause(ctx)
-	conn.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
-		for r := MessageReliability(0); r < messageReliabilityCapacity; r++ {
-			if r.Valid(channel) {
-				if conn.channels[r] != nil {
-					cancel(fmt.Errorf("data channel opened for same reliability parameters: %q", r.Parameters().Label))
-					return
-				}
-				conn.channels[r] = wrapDataChannel(channel, r)
-				for rr := range messageReliabilityCapacity {
-					if conn.channels[rr] == nil {
-						return
-					}
-				}
-				close(opened)
-				return
-			}
-		}
-		cancel(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
-	})
 	if err := withContextCancel(ctx, func() error {
 		return conn.sctp.Start(d.sctp)
 	}, func() {
@@ -494,12 +497,23 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 		return fmt.Errorf("start SCTP: %w", err)
 	}
 
+	return l.waitForChannelsReady(ctx, conn, channelsReady)
+}
+
+// waitForChannelsReady blocks until all data channels have been opened by the
+// remote peer, or until the Listener, Conn, or context is closed.
+func (l *Listener) waitForChannelsReady(ctx context.Context, conn *Conn, channelsReady <-chan struct{}) error {
 	select {
 	case <-l.closed:
 		return net.ErrClosed
-	case <-opened:
+	case <-channelsReady:
 		return nil
+	case <-conn.ctx.Done():
+		return context.Cause(conn.ctx)
 	case <-ctx.Done():
+		if err := context.Cause(conn.ctx); err != nil {
+			return err
+		}
 		return context.Cause(ctx)
 	}
 }
