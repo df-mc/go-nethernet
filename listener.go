@@ -500,6 +500,8 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	return l.waitForChannelsReady(ctx, conn, channelsReady)
 }
 
+// waitForChannelsReady blocks until all data channels have been opened by the
+// remote peer, or until the Listener, Conn, or context is closed.
 func (l *Listener) waitForChannelsReady(ctx context.Context, conn *Conn, channelsReady <-chan struct{}) error {
 	select {
 	case <-l.closed:

@@ -273,12 +273,15 @@ func (conn *Conn) close(cause error) (err error) {
 	return err
 }
 
+// channel returns the dataChannel for the given MessageReliability.
 func (conn *Conn) channel(r MessageReliability) *dataChannel {
 	conn.channelsMu.RLock()
 	defer conn.channelsMu.RUnlock()
 	return conn.channels[r]
 }
 
+// storeChannel stores ch for the given MessageReliability if no channel has
+// been stored yet. It returns the previously stored channel, or nil on success.
 func (conn *Conn) storeChannel(r MessageReliability, ch *dataChannel) (existing *dataChannel) {
 	conn.channelsMu.Lock()
 	defer conn.channelsMu.Unlock()
@@ -289,6 +292,8 @@ func (conn *Conn) storeChannel(r MessageReliability, ch *dataChannel) (existing 
 	return existing
 }
 
+// snapshotChannels returns a copy of the channels array for safe iteration
+// without holding the lock.
 func (conn *Conn) snapshotChannels() [messageReliabilityCapacity]*dataChannel {
 	conn.channelsMu.RLock()
 	defer conn.channelsMu.RUnlock()

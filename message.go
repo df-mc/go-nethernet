@@ -28,7 +28,8 @@ const (
 	// it is currently recommended to use only MessageReliabilityReliable.
 	MessageReliabilityUnreliable
 
-	messageReliabilityCapacity // Max value for MessageReliability, used as the capacity for array.
+	// messageReliabilityCapacity is the maximum value for MessageReliability, used as the capacity for array.
+	messageReliabilityCapacity
 )
 
 // Parameters returns a [webrtc.DataChannelParameters], which may be used for creating a data channel for
