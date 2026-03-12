@@ -423,7 +423,7 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 
 // addRemoteCandidatesFromSDP extracts ICE candidates bundled as a=candidate
 // lines in the [sdp.SessionDescription] and adds them to the connection. Some
-// signaling implementations (e.g. JSONRPC realms) batch candidates into the SDP
+// signaling implementations batch candidates into the SDP
 // offer or answer instead of sending separate CANDIDATEADD signals.
 func (conn *Conn) addRemoteCandidatesFromSDP(d *sdp.SessionDescription) error {
 	if len(d.MediaDescriptions) == 0 {
