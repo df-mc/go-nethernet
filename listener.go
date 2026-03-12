@@ -307,6 +307,9 @@ func (l *Listener) handleOffer(signal *Signal) error {
 				_ = c.Close()
 			}
 		}()
+		if err := c.addRemoteCandidatesFromSDP(d); err != nil {
+			return wrapSignalError(fmt.Errorf("add bundled offer candidate: %w", err), ErrorCodeCandidateAdd)
+		}
 
 		// Register a callback function immediately since the remote peer
 		// may open data channels at any time while ICE candidates are being signaled.

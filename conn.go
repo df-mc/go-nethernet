@@ -348,41 +348,13 @@ func (conn *Conn) handleTransports() {
 func (conn *Conn) handleSignal(signal *Signal) error {
 	switch signal.Type {
 	case SignalTypeCandidate:
-		s := strings.TrimSpace(signal.Data)
-		s = strings.TrimPrefix(s, "a=")
-		candidate, err := ice.UnmarshalCandidate(s)
-
+		candidate, err := parseRemoteCandidate(signal.Data)
 		if err != nil {
-			return fmt.Errorf("decode candidate: %w", err)
+			return err
 		}
-		protocol, err := webrtc.NewICEProtocol(candidate.NetworkType().NetworkShort())
-		if err != nil {
-			return fmt.Errorf("parse ICE protocol: %w", err)
+		if err := conn.addRemoteCandidate(candidate); err != nil {
+			return err
 		}
-		i := webrtc.ICECandidate{
-			Foundation: candidate.Foundation(),
-			Priority:   candidate.Priority(),
-			Address:    candidate.Address(),
-			Protocol:   protocol,
-			Port:       uint16(candidate.Port()),
-			Component:  candidate.Component(),
-			Typ:        webrtc.ICECandidateType(candidate.Type()),
-			TCPType:    candidate.TCPType().String(),
-		}
-		if r := candidate.RelatedAddress(); r != nil {
-			i.RelatedAddress, i.RelatedPort = r.Address, uint16(r.Port)
-		}
-
-		if err := conn.ice.AddRemoteCandidate(&i); err != nil {
-			return fmt.Errorf("add remote candidate: %w", err)
-		}
-
-		conn.candidatesMu.Lock()
-		if len(conn.candidates) == 0 {
-			close(conn.candidateReceived)
-		}
-		conn.candidates = append(conn.candidates, i)
-		conn.candidatesMu.Unlock()
 	case SignalTypeError:
 		code, err := strconv.ParseUint(signal.Data, 10, 32)
 		if err != nil {
@@ -393,6 +365,78 @@ func (conn *Conn) handleSignal(signal *Signal) error {
 		}
 	default:
 		return fmt.Errorf("unknown signal type: %s", signal.Type)
+	}
+	return nil
+}
+
+// parseRemoteCandidate parses a raw ICE candidate string into a [webrtc.ICECandidate].
+// It accepts formats with or without an "a=" prefix; [ice.UnmarshalCandidate] handles
+// the "candidate:" prefix.
+func parseRemoteCandidate(data string) (webrtc.ICECandidate, error) {
+	s := strings.TrimSpace(data)
+	s = strings.TrimPrefix(s, "a=")
+
+	candidate, err := ice.UnmarshalCandidate(s)
+	if err != nil {
+		return webrtc.ICECandidate{}, fmt.Errorf("decode candidate: %w", err)
+	}
+	protocol, err := webrtc.NewICEProtocol(candidate.NetworkType().NetworkShort())
+	if err != nil {
+		return webrtc.ICECandidate{}, fmt.Errorf("parse ICE protocol: %w", err)
+	}
+	i := webrtc.ICECandidate{
+		Foundation: candidate.Foundation(),
+		Priority:   candidate.Priority(),
+		Address:    candidate.Address(),
+		Protocol:   protocol,
+		Port:       uint16(candidate.Port()),
+		Component:  candidate.Component(),
+		Typ:        webrtc.ICECandidateType(candidate.Type()),
+		TCPType:    candidate.TCPType().String(),
+	}
+	if r := candidate.RelatedAddress(); r != nil {
+		i.RelatedAddress, i.RelatedPort = r.Address, uint16(r.Port)
+	}
+	return i, nil
+}
+
+// addRemoteCandidate adds an ICE candidate to the connection's ICE transport and
+// tracks it in the candidates slice. It closes candidateReceived on the first
+// candidate to signal that ICE gathering may proceed.
+func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
+	if err := conn.ice.AddRemoteCandidate(&candidate); err != nil {
+		return fmt.Errorf("add remote candidate: %w", err)
+	}
+
+	conn.candidatesMu.Lock()
+	defer conn.candidatesMu.Unlock()
+
+	if len(conn.candidates) == 0 {
+		close(conn.candidateReceived)
+	}
+	conn.candidates = append(conn.candidates, candidate)
+	return nil
+}
+
+// addRemoteCandidatesFromSDP extracts ICE candidates bundled as a=candidate
+// lines in the [sdp.SessionDescription] and adds them to the connection. Some
+// signaling implementations batch candidates into the SDP
+// offer or answer instead of sending separate CANDIDATEADD signals.
+func (conn *Conn) addRemoteCandidatesFromSDP(d *sdp.SessionDescription) error {
+	if len(d.MediaDescriptions) == 0 {
+		return nil
+	}
+	for _, attr := range append(d.Attributes, d.MediaDescriptions[0].Attributes...) {
+		if !attr.IsICECandidate() {
+			continue
+		}
+		candidate, err := parseRemoteCandidate(attr.Value)
+		if err != nil {
+			return err
+		}
+		if err := conn.addRemoteCandidate(candidate); err != nil {
+			return err
+		}
 	}
 	return nil
 }

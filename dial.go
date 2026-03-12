@@ -177,7 +177,11 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					desc, err := parseDescription(s)
 					if err != nil {
 						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
-						return nil, fmt.Errorf("parse offer: %w", err)
+						return nil, fmt.Errorf("parse answer: %w", err)
+					}
+					if err := c.addRemoteCandidatesFromSDP(s); err != nil {
+						d.signalError(signaling, networkID, ErrorCodeCandidateAdd)
+						return nil, fmt.Errorf("add bundled answer candidate: %w", err)
 					}
 
 					go d.handleConn(c, signals)
