@@ -525,12 +525,12 @@ func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole 
 	}
 }
 
-// newConn creates a Conn from the ICE, DTLS and SCTP transport associated with the IDs.
-// The local Addr containing the local network ID will be used for returning local [net.Addr]
-// of the Conn from [Conn.LocalAddr]. The implementation of negotiator may be used to obtain
-// a [slog.Logger] of the Conn, and few other methods to handle events such as closures. The
-// negotiator (caller) must establish each transport after creating a Conn when a first ICE
-// candidate has been signaled from the remote connection.
+// newConn creates a peer Conn from the ICE, DTLS and SCTP transport.
+// It also attaches callback handlers to each transport so the Conn
+// is closed when any underling transport closes or enters an
+// unrecoverable state.
+// The caller must register [SCTPTransport.OnDataChannel] handler
+// immediately using the returned Conn.
 func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, id uint64, networkID string, local Addr, n negotiator) *Conn {
 	c := &Conn{
 		ice:  ice,

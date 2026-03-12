@@ -18,12 +18,14 @@ import (
 type MessageReliability uint8
 
 const (
-	// MessageReliabilityReliable guarantees the ordering of messages.
+	// MessageReliabilityReliable guarantees the ordering of messages. Currently, this is the
+	// only reliability parameter used in the game.
 	MessageReliabilityReliable MessageReliability = iota
-	// MessageReliabilityUnreliable seems to be unused, and it is unsure how it correctly works
-	// with multiple segments as packet drops could leave the message data in unconstructed state.
-	// As such, it is highly recommended to use MessageReliabilityReliable for now, and receiving
-	// messages in the data channel for this MessageReliability will instantly disconnect the Conn.
+	// MessageReliabilityUnreliable seems to be unused, and it is unclear how it
+	// works with multiple segments as packet drops could leave the message data
+	// in unconstructed state.
+	// While it is technically possible to send or receive packets in this channel,
+	// it is currently recommended to use only MessageReliabilityReliable.
 	MessageReliabilityUnreliable
 
 	messageReliabilityCapacity // Max value for MessageReliability, used as the capacity for array.
@@ -49,9 +51,9 @@ func (r MessageReliability) Parameters() *webrtc.DataChannelParameters {
 	}
 }
 
-// Valid determines whether the [webrtc.DataChannel] can be safe to use in Conn with handling
-// remote messages received in the [webrtc.DataChannel]. If the data channel does not have the
-// exact same parameters returned by [MessageReliability.Parameters], it will return false.
+// Valid determines whether the [webrtc.DataChannel] can be safe to use in Conn.
+// If the data channel does not have the exact same parameters returned by [MessageReliability.Parameters],
+// it will return false.
 func (r MessageReliability) Valid(channel *webrtc.DataChannel) bool {
 	params := r.Parameters()
 	// Compare non-pointer values
