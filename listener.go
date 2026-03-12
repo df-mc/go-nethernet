@@ -309,22 +309,24 @@ func (l *Listener) handleOffer(signal *Signal) error {
 
 		// Register a callback function immediately since the remote peer
 		// may open data channels at any time while ICE candidates are being signaled.
-		channelsReady := make(chan struct{})
-		c.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
+		var (
+			channelsReady = make(chan struct{})
+			opened        int
+		)
+		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
 			for r := range messageReliabilityCapacity {
 				if r.Valid(channel) {
 					if c.channels[r] != nil {
-						go c.close(fmt.Errorf("data channel opened for same reliability parameters: %q", r.Parameters().Label))
+						go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
 						return
 					}
 					c.channels[r] = wrapDataChannel(channel, r, c)
-					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
-					for rr := range messageReliabilityCapacity {
-						if c.channels[rr] == nil {
-							return
+					channel.OnOpen(sync.OnceFunc(func() {
+						// If all data channels have been opened by remote peer, we can signal that the connection is ready.
+						if opened++; opened == int(messageReliabilityCapacity) {
+							close(channelsReady)
 						}
-					}
-					close(channelsReady)
+					}))
 					return
 				}
 			}

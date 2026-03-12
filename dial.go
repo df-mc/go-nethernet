@@ -116,7 +116,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 				_ = c.close(fmt.Errorf("dial failure: %w", err))
 			}
 		}()
-		c.sctp.OnDataChannelOpened(func(channel *webrtc.DataChannel) {
+		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
 			// For client connections, the server should never open a data channel.
 			//
 			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
