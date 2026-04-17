@@ -545,7 +545,6 @@ func (conn *Conn) gatherCandidates(signaling Signaling) error {
 			Data:         formatICECandidate(int(candidateIndex.Add(1)), *candidate, conn.description.ice),
 			NetworkID:    conn.networkID,
 		}); err != nil {
-			conn.log.Error("error signaling candidate", slog.Any("error", err))
 			if err := signaling.Signal(conn.Context(), &Signal{
 				Type:         SignalTypeError,
 				ConnectionID: conn.id,
@@ -555,6 +554,8 @@ func (conn *Conn) gatherCandidates(signaling Signaling) error {
 				// I don't think the error code will be signaled back to the remote connection, but just in case.
 				conn.log.Error("error signaling error", slog.Any("error", err))
 			}
+			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
+			go conn.close(fmt.Errorf("signal candidate: %w", err))
 		}
 	})
 	return conn.gatherer.Gather()
