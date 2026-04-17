@@ -268,7 +268,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			return wrapSignalError(fmt.Errorf("add inline candidate: %w", err), ErrorCodeFailedToSetRemoteDescription)
 		}
 	}
-	c.description.dtls.Role = l.answererRole(desc.dtls.Role, c.ice)
+	c.description.dtls.Role = l.answererRole(desc.dtls.Role)
 
 	// Register a callback function immediately since the remote peer
 	// may open data channels at any time while ICE candidates are being signaled.
@@ -325,17 +325,15 @@ func (l *Listener) handleOffer(signal *Signal) error {
 
 // answererRole returns the local [webrtc.DTLSRole] for an answer based on the
 // role signaled by the remote peer. If the remote peer uses
-// [webrtc.DTLSRoleAuto], the role is chosen from the ICE transport role.
-func (l *Listener) answererRole(role webrtc.DTLSRole, iceTransport *webrtc.ICETransport) webrtc.DTLSRole {
+// [webrtc.DTLSRoleAuto], it will be [webrtc.DTLSRoleClient] since the ICE
+// transport will always start as controlled.
+func (l *Listener) answererRole(role webrtc.DTLSRole) webrtc.DTLSRole {
 	switch role {
 	case webrtc.DTLSRoleServer:
 		return webrtc.DTLSRoleClient
 	case webrtc.DTLSRoleClient:
 		return webrtc.DTLSRoleServer
 	default:
-		if iceTransport.Role() == webrtc.ICERoleControlling {
-			return webrtc.DTLSRoleServer
-		}
 		return webrtc.DTLSRoleClient
 	}
 }
