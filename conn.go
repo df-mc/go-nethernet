@@ -545,13 +545,16 @@ func (conn *Conn) gatherCandidates(signaling Signaling) error {
 			Data:         formatICECandidate(int(candidateIndex.Add(1)), *candidate, conn.description.ice),
 			NetworkID:    conn.networkID,
 		}); err != nil {
-			if err := signaling.Signal(conn.Context(), &Signal{
+			errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
+			defer cancel()
+
+			// I don't think the error code will be signaled back to the remote connection, but just in case.
+			if err := signaling.Signal(errCtx, &Signal{
 				Type:         SignalTypeError,
 				ConnectionID: conn.id,
 				Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
 				NetworkID:    conn.networkID,
 			}); err != nil {
-				// I don't think the error code will be signaled back to the remote connection, but just in case.
 				conn.log.Error("error signaling error", slog.Any("error", err))
 			}
 			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
