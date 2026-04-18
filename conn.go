@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/ice/v4"
@@ -31,16 +32,21 @@ import (
 // A Conn may be established by dialing a remote network ID using [Dialer.DialContext] (and other aliases),
 // or by accepting connections from a Listener that listens on a local network.
 //
-// The Conn do not utilize [webrtc.PeerConnection] as it does not allow creating a [sdp.SessionDescription]
-// with custom.
+// Conn does not use [webrtc.PeerConnection], because it needs to build custom
+// [sdp.SessionDescription] values during negotiation.
 //
 // Once established and negotiated through either Dialer or Listener, Conn handles messages sent
 // over the 'ReliableDataChannel' (which may be read using Read or ReadPacket), and ensures closure
 // of its WebRTC transports to confirm that all transports within Conn are closed.
 type Conn struct {
-	ice  *webrtc.ICETransport
-	dtls *webrtc.DTLSTransport
-	sctp *webrtc.SCTPTransport
+	ice      *webrtc.ICETransport
+	dtls     *webrtc.DTLSTransport
+	sctp     *webrtc.SCTPTransport
+	gatherer *webrtc.ICEGatherer
+
+	// description is the local session description for the Conn.
+	// newConn builds it from the local parameters of each underlying transport.
+	description *description
 
 	// candidateReceived notifies that the first candidate is received from the other
 	// end, indicating that the Conn is ready to start its transports.
@@ -68,9 +74,11 @@ type Conn struct {
 
 	log *slog.Logger
 
-	local     Addr
-	id        uint64
-	networkID string
+	// id is the random ID assigned to this connection.
+	// It will appear in [Signal.ConnectionID].
+	id uint64
+	// networkID and localNetworkID are the IDs of the remote and local NetherNet networks.
+	networkID, localNetworkID string
 
 	// ctx is the background context associated with the Conn.
 	ctx context.Context
@@ -211,13 +219,19 @@ func (*Conn) SetWriteDeadline(time.Time) error {
 // LocalAddr returns an Addr that includes the local network ID of the Conn with locally-gathered
 // ICE candidates.
 func (conn *Conn) LocalAddr() net.Addr {
-	addr := conn.local
-	addr.ConnectionID = conn.id
+	addr := &Addr{
+		NetworkID:    conn.localNetworkID,
+		ConnectionID: conn.id,
+	}
 	pair, _ := conn.ice.GetSelectedCandidatePair()
 	if pair != nil {
 		addr.SelectedCandidate = pair.Local
 	}
-	return &addr
+	candidates, err := conn.gatherer.GetLocalCandidates()
+	if err == nil {
+		addr.Candidates = candidates
+	}
+	return addr
 }
 
 // RemoteAddr returns an Addr that includes the remote network ID of the Conn with remotely-signaled
@@ -268,6 +282,7 @@ func (conn *Conn) close(cause error) (err error) {
 			conn.sctp.Stop(),
 			conn.dtls.Stop(),
 			conn.ice.Stop(),
+			conn.gatherer.Close(),
 		)
 	})
 	return err
@@ -418,29 +433,6 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 	return nil
 }
 
-// addRemoteCandidatesFromSDP extracts ICE candidates bundled as a=candidate
-// lines in the [sdp.SessionDescription] and adds them to the connection. Some
-// signaling implementations batch candidates into the SDP
-// offer or answer instead of sending separate CANDIDATEADD signals.
-func (conn *Conn) addRemoteCandidatesFromSDP(d *sdp.SessionDescription) error {
-	if len(d.MediaDescriptions) == 0 {
-		return nil
-	}
-	for _, attr := range append(d.Attributes, d.MediaDescriptions[0].Attributes...) {
-		if !attr.IsICECandidate() {
-			continue
-		}
-		candidate, err := parseRemoteCandidate(attr.Value)
-		if err != nil {
-			return err
-		}
-		if err := conn.addRemoteCandidate(candidate); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 const maxMessageSize = 10000
 
 // parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
@@ -485,8 +477,10 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	switch attr {
 	case sdp.ConnectionRoleActive.String():
 		role = webrtc.DTLSRoleClient
-	case sdp.ConnectionRoleActpass.String():
+	case sdp.ConnectionRolePassive.String():
 		role = webrtc.DTLSRoleServer
+	case sdp.ConnectionRoleActpass.String():
+		role = webrtc.DTLSRoleAuto
 	default:
 		return nil, fmt.Errorf("invalid setup attribute: %s", attr)
 	}
@@ -498,6 +492,18 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	maxMessageSize, err := strconv.ParseUint(attr, 10, 32)
 	if err != nil {
 		return nil, fmt.Errorf("parse max-message-size attribute as uint32: %w", err)
+	}
+
+	var candidates []webrtc.ICECandidate
+	for _, attr := range append(d.Attributes, m.Attributes...) {
+		if !attr.IsICECandidate() {
+			continue
+		}
+		candidate, err := parseRemoteCandidate(attr.Value)
+		if err != nil {
+			return nil, fmt.Errorf("parse remote candidate: %w", err)
+		}
+		candidates = append(candidates, candidate)
 	}
 
 	return &description{
@@ -517,20 +523,61 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 		sctp: webrtc.SCTPCapabilities{
 			MaxMessageSize: uint32(maxMessageSize),
 		},
+		candidates: candidates,
 	}, nil
+}
+
+// gatherCandidates starts gathering local candidates and signaling them to the
+// remote peer using the provided [Signaling] implementation.
+func (conn *Conn) gatherCandidates(signaling Signaling) error {
+	var candidateIndex atomic.Uint32
+	conn.gatherer.OnLocalCandidate(func(candidate *webrtc.ICECandidate) {
+		// ICEGatherer already tracks its internal state, so we don't need to check if the connection is closed.
+		if candidate == nil {
+			conn.log.Debug("completed gathering local candidates")
+			return
+		}
+		ctx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
+		defer cancel()
+		if err := signaling.Signal(ctx, &Signal{
+			Type:         SignalTypeCandidate,
+			ConnectionID: conn.id,
+			Data:         formatICECandidate(int(candidateIndex.Add(1)), *candidate, conn.description.ice),
+			NetworkID:    conn.networkID,
+		}); err != nil {
+			errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
+			defer cancel()
+
+			// I don't think the error code will be signaled back to the remote connection, but just in case.
+			if err := signaling.Signal(errCtx, &Signal{
+				Type:         SignalTypeError,
+				ConnectionID: conn.id,
+				Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
+				NetworkID:    conn.networkID,
+			}); err != nil {
+				conn.log.Error("error signaling error", slog.Any("error", err))
+			}
+			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
+			go conn.close(fmt.Errorf("signal candidate: %w", err))
+		}
+	})
+	return conn.gatherer.Gather()
 }
 
 // description contains parameters necessary for starting ICE, DTLS, and SCTP transport within a Conn.
 //
-// It may be created by parsing a [sdp.SessionDescription] signaled from a remote connection or filed
-// in to encode a local description.
+// It can be created either by parsing a remote [sdp.SessionDescription] or by
+// filling it with local transport parameters before encoding.
 //
-// A description may be parsed by a negotiator (Listener r Dialer) using parseDescription with a [sdp.SessionDescription]
-// parsed from a Signal of SignalTypeOffer or SignalTypeAnswer.
+// A negotiator (Listener or Dialer) uses parseDescription after decoding a
+// SignalTypeOffer or SignalTypeAnswer payload into an [sdp.SessionDescription].
 type description struct {
 	ice  webrtc.ICEParameters
 	dtls webrtc.DTLSParameters
 	sctp webrtc.SCTPCapabilities
+
+	// candidates are inline ICE candidates included as SDP attributes.
+	candidates []webrtc.ICECandidate
 }
 
 // encode transforms the description into a [sdp.SessionDescription] and encodes them using the [sdp.SessionDescription.Marshal]
@@ -583,6 +630,14 @@ func (desc description) encode() ([]byte, error) {
 	media.WithValueAttribute("sctp-port", "5000")
 	media.WithValueAttribute("max-message-size", strconv.FormatUint(uint64(desc.sctp.MaxMessageSize), 10))
 
+	// We don't populate ICE candidates in the SDP but just in case.
+	for _, candidate := range desc.candidates {
+		d.Attributes = append(d.Attributes, sdp.Attribute{
+			Key:   sdp.AttrKeyCandidate,
+			Value: candidate.String(),
+		})
+	}
+
 	return d.WithMedia(media).Marshal()
 }
 
@@ -591,24 +646,61 @@ func (desc description) encode() ([]byte, error) {
 // as a [sdp.Attribute] of 'setup'.
 func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole {
 	switch role {
-	case webrtc.DTLSRoleServer:
-		return sdp.ConnectionRoleActpass
-	default:
+	case webrtc.DTLSRoleClient:
+		// The server will send ClientHello to the client.
 		return sdp.ConnectionRoleActive
+	case webrtc.DTLSRoleServer:
+		// The client will send ClientHello to the server.
+		return sdp.ConnectionRolePassive
+	default:
+		// The client asks the server to choose which role to initiate DTLS.
+		return sdp.ConnectionRoleActpass
 	}
 }
 
-// newConn creates a peer Conn from the ICE, DTLS and SCTP transport.
-// It also attaches callback handlers to each transport so the Conn
-// is closed when any underling transport closes or enters an
-// unrecoverable state.
-// The caller must register [SCTPTransport.OnDataChannel] handler
-// immediately using the returned Conn.
-func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.SCTPTransport, id uint64, networkID string, local Addr, n negotiator) *Conn {
+// newConn creates a peer Conn using the provided [webrtc.API].
+// It initiates the ICE, DTLS, and SCTP transports, and attaches callback
+// handlers so the Conn closes if any transport enters an unrecoverable state.
+//
+// The caller must register [SCTPTransport.OnDataChannel] immediately on
+// the returned Conn, then use [Conn.description] to signal an offer or
+// answer to the remote peer.
+func newConn(api *webrtc.API, credentials *Credentials, id uint64, networkID, localNetworkID string, n negotiator) (*Conn, error) {
+	gatherer, err := api.NewICEGatherer(gatherOptions(credentials))
+	if err != nil {
+		return nil, wrapSignalError(fmt.Errorf("create ICE gatherer: %w", err), ErrorCodeFailedToCreatePeerConnection)
+	}
+	iceTransport := api.NewICETransport(gatherer)
+	dtlsTransport, err := api.NewDTLSTransport(iceTransport, nil)
+	if err != nil {
+		return nil, wrapSignalError(fmt.Errorf("create DTLS transport: %w", err), ErrorCodeFailedToCreatePeerConnection)
+	}
+	sctpTransport := api.NewSCTPTransport(dtlsTransport)
+
+	iceParams, err := iceTransport.GetLocalParameters()
+	if err != nil {
+		return nil, wrapSignalError(fmt.Errorf("obtain local ICE parameters: %w", err), ErrorCodeFailedToCreateAnswer)
+	}
+	dtlsParams, err := dtlsTransport.GetLocalParameters()
+	if err != nil {
+		return nil, wrapSignalError(fmt.Errorf("obtain local DTLS parameters: %w", err), ErrorCodeFailedToCreateAnswer)
+	}
+	if len(dtlsParams.Fingerprints) == 0 {
+		return nil, wrapSignalError(errors.New("local DTLS parameters has no fingerprints"), ErrorCodeFailedToCreateAnswer)
+	}
+	sctpCapabilities := sctpTransport.GetCapabilities()
+
 	c := &Conn{
-		ice:  ice,
-		dtls: dtls,
-		sctp: sctp,
+		ice:      iceTransport,
+		dtls:     dtlsTransport,
+		sctp:     sctpTransport,
+		gatherer: gatherer,
+
+		description: &description{
+			ice:  iceParams,
+			dtls: dtlsParams,
+			sctp: sctpCapabilities,
+		},
 
 		candidateReceived: make(chan struct{}),
 
@@ -619,14 +711,13 @@ func newConn(ice *webrtc.ICETransport, dtls *webrtc.DTLSTransport, sctp *webrtc.
 			slog.String("networkID", networkID),
 		)),
 
-		local: local,
-
-		id:        id,
-		networkID: networkID,
+		id:             id,
+		networkID:      networkID,
+		localNetworkID: localNetworkID,
 	}
 	c.ctx, c.cancel = context.WithCancelCause(context.Background())
 	c.handleTransports()
-	return c
+	return c, nil
 }
 
 type negotiator interface {

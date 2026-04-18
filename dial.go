@@ -52,167 +52,114 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	if err != nil {
 		return nil, fmt.Errorf("obtain credentials: %w", err)
 	}
-	gatherer, err := d.API.NewICEGatherer(gatherOptions(credentials))
-	if err != nil {
-		return nil, fmt.Errorf("create ICE gatherer: %w", err)
-	}
 
-	var (
-		candidates     []webrtc.ICECandidate
-		gatherFinished = make(chan struct{})
-	)
-	gatherer.OnLocalCandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil {
-			close(gatherFinished)
-			return
+	// Signals may be received very early when signaling an offer with local candidates.
+	signals, stop := d.notifySignals(networkID, signaling)
+	defer func() {
+		if err != nil {
+			stop()
 		}
-		candidates = append(candidates, *candidate)
+	}()
+	c, err := newConn(d.API, credentials, d.ConnectionID, networkID, signaling.NetworkID(), dialerConn{
+		Dialer: d,
+		stop:   stop,
 	})
-	if err := gatherer.Gather(); err != nil {
-		return nil, fmt.Errorf("gather local candidates: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("create conn: %w", err)
 	}
-	select {
-	case <-ctx.Done():
-		_ = gatherer.Close()
-		return nil, ctx.Err()
-	case <-gatherFinished:
-		ice := d.API.NewICETransport(gatherer)
-		dtls, err := d.API.NewDTLSTransport(ice, nil)
+	defer func() {
 		if err != nil {
-			return nil, fmt.Errorf("create DTLS transport: %w", err)
+			_ = c.close(fmt.Errorf("dial failure: %w", err))
 		}
-		sctp := d.API.NewSCTPTransport(dtls)
+	}()
+	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
+		// For client connections, the server should never open a data channel.
+		//
+		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
+		go c.close(fmt.Errorf("data channel %q was unexpectedly opened by remote peer", channel.Label()))
+	})
 
-		iceParams, err := ice.GetLocalParameters()
-		if err != nil {
-			return nil, fmt.Errorf("obtain local ICE parameters: %w", err)
-		}
-		dtlsParams, err := dtls.GetLocalParameters()
-		if err != nil {
-			return nil, fmt.Errorf("obtain local DTLS parameters: %w", err)
-		}
-		if len(dtlsParams.Fingerprints) == 0 {
-			return nil, errors.New("local DTLS parameters has no fingerprints")
-		}
-		sctpCapabilities := sctp.GetCapabilities()
+	// Encode an offer using the local parameters!
+	offer, err := c.description.encode()
+	if err != nil {
+		return nil, fmt.Errorf("encode offer: %w", err)
+	}
+	if err := signaling.Signal(ctx, &Signal{
+		Type:         SignalTypeOffer,
+		Data:         string(offer),
+		ConnectionID: d.ConnectionID,
+		NetworkID:    networkID,
+	}); err != nil {
+		return nil, fmt.Errorf("signal offer: %w", err)
+	}
 
-		// Signals may be received very early when signaling an offer with local candidates.
-		signals, stop := d.notifySignals(networkID, signaling)
-		defer func() {
-			if err != nil {
-				stop()
+	if err := c.gatherCandidates(signaling); err != nil {
+		return nil, fmt.Errorf("gather candidates: %w", err)
+	}
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return nil, context.Cause(c.ctx)
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
-		}()
-		c := newConn(ice, dtls, sctp, d.ConnectionID, networkID, Addr{
-			NetworkID:    signaling.NetworkID(),
-			ConnectionID: d.ConnectionID,
-			Candidates:   candidates,
-		}, dialerConn{
-			Dialer: d,
-			stop:   stop,
-		})
-		defer func() {
-			if err != nil {
-				_ = c.close(fmt.Errorf("dial failure: %w", err))
+			return nil, ctx.Err()
+		case <-signaling.Context().Done():
+			return nil, context.Cause(signaling.Context())
+		case signal, ok := <-signals:
+			if !ok {
+				return nil, net.ErrClosed
 			}
-		}()
-		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
-			// For client connections, the server should never open a data channel.
-			//
-			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
-			go c.close(fmt.Errorf("data channel %q was unexpectedly opened by remote peer", channel.Label()))
-		})
-
-		// Encode an offer using the local parameters!
-		dtlsParams.Role = webrtc.DTLSRoleServer
-		offer, err := description{
-			ice:  iceParams,
-			dtls: dtlsParams,
-			sctp: sctpCapabilities,
-		}.encode()
-		if err != nil {
-			return nil, fmt.Errorf("encode offer: %w", err)
-		}
-		if err := signaling.Signal(ctx, &Signal{
-			Type:         SignalTypeOffer,
-			Data:         string(offer),
-			ConnectionID: d.ConnectionID,
-			NetworkID:    networkID,
-		}); err != nil {
-			return nil, fmt.Errorf("signal offer: %w", err)
-		}
-		for i, candidate := range candidates {
-			if err := signaling.Signal(ctx, &Signal{
-				Type:         SignalTypeCandidate,
-				Data:         formatICECandidate(i, candidate, iceParams),
-				ConnectionID: d.ConnectionID,
-				NetworkID:    networkID,
-			}); err != nil {
-				return nil, fmt.Errorf("signal candidate: %w", err)
-			}
-		}
-
-		for {
-			select {
-			case <-c.ctx.Done():
-				return nil, context.Cause(c.ctx)
-			case <-ctx.Done():
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
+			switch signal.Type {
+			case SignalTypeAnswer:
+				s := &sdp.SessionDescription{}
+				if err := s.UnmarshalString(signal.Data); err != nil {
+					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
+					return nil, fmt.Errorf("decode answer: %w", err)
 				}
-				return nil, ctx.Err()
-			case <-signaling.Context().Done():
-				return nil, context.Cause(signaling.Context())
-			case signal, ok := <-signals:
-				if !ok {
-					return nil, net.ErrClosed
+				desc, err := parseDescription(s)
+				if err != nil {
+					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
+					return nil, fmt.Errorf("parse answer: %w", err)
 				}
-				switch signal.Type {
-				case SignalTypeAnswer:
-					s := &sdp.SessionDescription{}
-					if err := s.UnmarshalString(signal.Data); err != nil {
+				for _, candidate := range desc.candidates {
+					// Non-trickle ICE connection such as Realms may include candidates in a single SDP.
+					if err := c.addRemoteCandidate(candidate); err != nil {
 						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
-						return nil, fmt.Errorf("decode answer: %w", err)
-					}
-					desc, err := parseDescription(s)
-					if err != nil {
-						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
-						return nil, fmt.Errorf("parse answer: %w", err)
-					}
-					if err := c.addRemoteCandidatesFromSDP(s); err != nil {
-						d.signalError(signaling, networkID, ErrorCodeCandidateAdd)
 						return nil, fmt.Errorf("add bundled answer candidate: %w", err)
 					}
+				}
 
-					go d.handleConn(c, signals)
+				go d.handleConn(c, signals)
 
-					select {
-					case <-c.ctx.Done():
-						return nil, context.Cause(c.ctx)
-					case <-ctx.Done():
-						if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				select {
+				case <-c.ctx.Done():
+					return nil, context.Cause(c.ctx)
+				case <-ctx.Done():
+					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+					}
+					if err := context.Cause(c.ctx); err != nil {
+						return nil, err
+					}
+					return nil, ctx.Err()
+				case <-c.candidateReceived:
+					c.log.Debug("received first candidate")
+					if err := d.startTransports(ctx, c, desc); err != nil {
+						if errors.Is(err, context.DeadlineExceeded) {
 							d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
 						}
-						if err := context.Cause(c.ctx); err != nil {
-							return nil, err
-						}
-						return nil, ctx.Err()
-					case <-c.candidateReceived:
-						c.log.Debug("received first candidate")
-						if err := d.startTransports(ctx, c, desc); err != nil {
-							if errors.Is(err, context.DeadlineExceeded) {
-								d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
-							}
-							return nil, fmt.Errorf("start transports: %w", err)
-						}
-						return c, nil
+						return nil, fmt.Errorf("start transports: %w", err)
 					}
-				default:
-					err = c.handleSignal(signal)
-					if err != nil {
-						d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
-						return nil, fmt.Errorf("handle signal: %w", err)
-					}
+					return c, nil
+				}
+			default:
+				err = c.handleSignal(signal)
+				if err != nil {
+					d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
+					return nil, fmt.Errorf("handle signal: %w", err)
 				}
 			}
 		}
@@ -240,9 +187,8 @@ func (d dialerConn) log() *slog.Logger {
 	return d.Log.With(slog.String("src", "dialer"))
 }
 
-// signalError signals a Signal of SignalTypeError into the remote connection using the
-// [Signaling] implementation with the remote network ID and the code of the error
-// occurred.
+// signalError sends a SignalTypeError to the remote connection using the
+// provided [Signaling] implementation, remote network ID, and error code.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	_ = signaling.Signal(context.Background(), &Signal{
 		Type:         SignalTypeError,
@@ -252,10 +198,10 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	})
 }
 
-// startTransports establishes ICE transport as [webrtc.ICERoleControlling], DTLS transport as
-// [webrtc.DTLSRoleClient], and SCTP transport using the parameters included in the remote description.
-// Once SCTP transport has established, it will create two data channels labeled 'ReliableDataChannel'
-// and 'UnreliableDataChannel'. All methods are called with awareness of the [context.Context].
+// startTransports starts the ICE transport as [webrtc.ICERoleControlling],
+// then starts DTLS and SCTP using the parameters from the remote description.
+// After SCTP is established, it creates the 'ReliableDataChannel' and
+// 'UnreliableDataChannel'. All operations respect the provided [context.Context].
 func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *description) error {
 	conn.log.Debug("starting ICE transport as controller")
 	iceRole := webrtc.ICERoleControlling
@@ -267,7 +213,7 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
-	conn.log.Debug("starting DTLS transport as client")
+	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", desc.dtls.Role.String()))
 	if err := withContextCancel(ctx, func() error {
 		return conn.dtls.Start(desc.dtls)
 	}, func() {

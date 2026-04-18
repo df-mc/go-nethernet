@@ -251,127 +251,90 @@ func (l *Listener) handleOffer(signal *Signal) error {
 	if err != nil {
 		return wrapSignalError(fmt.Errorf("obtain credentials: %w", err), ErrorCodeSignalingTurnAuthFailed)
 	}
-	gatherer, err := l.conf.API.NewICEGatherer(gatherOptions(credentials))
+
+	c, err := newConn(l.conf.API, credentials, signal.ConnectionID, signal.NetworkID, l.networkID, l)
 	if err != nil {
-		return wrapSignalError(fmt.Errorf("create ICE gatherer: %w", err), ErrorCodeFailedToCreatePeerConnection)
+		return wrapSignalError(fmt.Errorf("create peer connection: %w", err), ErrorCodeFailedToCreatePeerConnection)
 	}
+	established := false
+	defer func() {
+		if !established {
+			_ = c.Close()
+		}
+	}()
+	for _, candidate := range desc.candidates {
+		// Non-trickle ICE connection may include candidates in a single SDP.
+		if err := c.addRemoteCandidate(candidate); err != nil {
+			return wrapSignalError(fmt.Errorf("add inline candidate: %w", err), ErrorCodeFailedToSetRemoteDescription)
+		}
+	}
+	c.description.dtls.Role = l.answererRole(desc.dtls.Role)
 
+	// Register a callback function immediately since the remote peer
+	// may open data channels at any time while ICE candidates are being signaled.
 	var (
-		// Local candidates gathered by webrtc.ICEGatherer
-		candidates []webrtc.ICECandidate
-		// Notifies that gathering for local candidates has finished.
-		gatherFinished = make(chan struct{})
+		opened        atomic.Uint32
+		channelsReady = make(chan struct{})
 	)
-	gatherer.OnLocalCandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil {
-			close(gatherFinished)
-			return
-		}
-		candidates = append(candidates, *candidate)
-	})
-	if err := gatherer.Gather(); err != nil {
-		return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeFailedToCreatePeerConnection)
-	}
-
-	select {
-	case <-ctx.Done():
-		_ = gatherer.Close()
-		return wrapSignalError(fmt.Errorf("gather local candidates: %w", ctx.Err()), ErrorCodeFailedToCreatePeerConnection)
-	case <-gatherFinished:
-		ice := l.conf.API.NewICETransport(gatherer)
-		dtls, err := l.conf.API.NewDTLSTransport(ice, nil)
-		if err != nil {
-			return wrapSignalError(fmt.Errorf("create DTLS transport: %w", err), ErrorCodeFailedToCreatePeerConnection)
-		}
-		sctp := l.conf.API.NewSCTPTransport(dtls)
-
-		iceParams, err := ice.GetLocalParameters()
-		if err != nil {
-			return wrapSignalError(fmt.Errorf("obtain local ICE parameters: %w", err), ErrorCodeFailedToCreateAnswer)
-		}
-		dtlsParams, err := dtls.GetLocalParameters()
-		if err != nil {
-			return wrapSignalError(fmt.Errorf("obtain local DTLS parameters: %w", err), ErrorCodeFailedToCreateAnswer)
-		}
-		if len(dtlsParams.Fingerprints) == 0 {
-			return wrapSignalError(errors.New("local DTLS parameters has no fingerprints"), ErrorCodeFailedToCreateAnswer)
-		}
-
-		c := newConn(ice, dtls, sctp, signal.ConnectionID, signal.NetworkID, Addr{
-			NetworkID:  l.networkID,
-			Candidates: candidates,
-		}, l)
-		established := false
-		defer func() {
-			if !established {
-				_ = c.Close()
-			}
-		}()
-		if err := c.addRemoteCandidatesFromSDP(d); err != nil {
-			return wrapSignalError(fmt.Errorf("add bundled offer candidate: %w", err), ErrorCodeCandidateAdd)
-		}
-
-		// Register a callback function immediately since the remote peer
-		// may open data channels at any time while ICE candidates are being signaled.
-		channelsReady := make(chan struct{})
-		var opened atomic.Uint32
-		c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
-			for r := range messageReliabilityCapacity {
-				if r.Valid(channel) {
-					ch := wrapDataChannel(channel, r, c)
-					if existing := c.storeChannel(r, ch); existing != nil {
-						go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
-						return
-					}
-					channel.OnOpen(sync.OnceFunc(func() {
-						// If all data channels have been opened by remote peer, we can signal that the connection is ready.
-						if opened.Add(1) == uint32(messageReliabilityCapacity) {
-							close(channelsReady)
-						}
-					}))
+	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
+		for r := range messageReliabilityCapacity {
+			if r.Valid(channel) {
+				ch := wrapDataChannel(channel, r, c)
+				if existing := c.storeChannel(r, ch); existing != nil {
+					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
 					return
 				}
-			}
-			go c.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
-		})
-
-		// Encode an answer using the local parameters!
-		sctpCapabilities := sctp.GetCapabilities()
-		answer, err := description{
-			ice:  iceParams,
-			dtls: dtlsParams,
-			sctp: sctpCapabilities,
-		}.encode()
-		if err != nil {
-			return wrapSignalError(fmt.Errorf("encode answer: %w", err), ErrorCodeFailedToCreateAnswer)
-		}
-
-		if err := l.signaling.Signal(ctx, &Signal{
-			Type:         SignalTypeAnswer,
-			ConnectionID: signal.ConnectionID,
-			Data:         string(answer),
-			NetworkID:    signal.NetworkID,
-		}); err != nil {
-			// I don't think the error code will be signaled back to the remote connection, but just in case.
-			return wrapSignalError(fmt.Errorf("signal answer: %w", err), ErrorCodeSignalingFailedToSend)
-		}
-		for i, candidate := range candidates {
-			if err := l.signaling.Signal(ctx, &Signal{
-				Type:         SignalTypeCandidate,
-				ConnectionID: signal.ConnectionID,
-				Data:         formatICECandidate(i, candidate, iceParams),
-				NetworkID:    signal.NetworkID,
-			}); err != nil {
-				// I don't think the error code will be signaled back to the remote connection, but just in case.
-				return wrapSignalError(fmt.Errorf("signal candidate: %w", err), ErrorCodeSignalingFailedToSend)
+				channel.OnOpen(sync.OnceFunc(func() {
+					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
+					if opened.Add(1) == uint32(messageReliabilityCapacity) {
+						close(channelsReady)
+					}
+				}))
+				return
 			}
 		}
+		go c.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
+	})
 
-		l.connections.Store(c.remoteAddr().String(), c)
-		go l.handleConn(c, desc, channelsReady)
-		established = true
+	// Encode an answer using the local parameters!
+	answer, err := c.description.encode()
+	if err != nil {
+		return wrapSignalError(fmt.Errorf("encode answer: %w", err), ErrorCodeFailedToCreateAnswer)
+	}
 
-		return nil
+	if err := l.signaling.Signal(ctx, &Signal{
+		Type:         SignalTypeAnswer,
+		ConnectionID: signal.ConnectionID,
+		Data:         string(answer),
+		NetworkID:    signal.NetworkID,
+	}); err != nil {
+		// I don't think the error code will be signaled back to the remote connection, but just in case.
+		return wrapSignalError(fmt.Errorf("signal answer: %w", err), ErrorCodeSignalingFailedToSend)
+	}
+
+	if err := c.gatherCandidates(l.signaling); err != nil {
+		// I don't think the error code will be signaled back to the remote connection, but just in case.
+		return wrapSignalError(fmt.Errorf("gather candidates: %w", err), ErrorCodeFailedToCreatePeerConnection)
+	}
+
+	l.connections.Store(c.remoteAddr().String(), c)
+	go l.handleConn(c, desc, channelsReady)
+	established = true
+	return nil
+}
+
+// answererRole returns the local [webrtc.DTLSRole] for an answer based on the
+// role signaled by the remote peer. If the remote peer uses
+// [webrtc.DTLSRoleAuto], it will be [webrtc.DTLSRoleClient] since the ICE
+// transport will always start as controlled.
+func (l *Listener) answererRole(role webrtc.DTLSRole) webrtc.DTLSRole {
+	switch role {
+	case webrtc.DTLSRoleServer:
+		return webrtc.DTLSRoleClient
+	case webrtc.DTLSRoleClient:
+		return webrtc.DTLSRoleServer
+	default:
+		return webrtc.DTLSRoleClient
 	}
 }
 
@@ -468,9 +431,10 @@ func (l *Listener) handleConn(conn *Conn, d *description, channelsReady <-chan s
 	}
 }
 
-// startTransports establishes ICE transport as [webrtc.ICERoleControlled], DTLS transport as [webrtc.DTLSRoleServer]
-// and SCTP transport using the remote description. It will block until two data channels labeled 'ReliableDataChannel'
-// and 'UnreliableDataChannel' are created by the remote connection. The [context.Context] is used to cancel blocking.
+// startTransports starts ICE as [webrtc.ICERoleControlled], then starts DTLS
+// and SCTP using the remote description. It blocks until the remote peer has
+// created both 'ReliableDataChannel' and 'UnreliableDataChannel'. The provided
+// [context.Context] is used to control the deadline.
 func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *description, channelsReady <-chan struct{}) error {
 	conn.log.Debug("starting ICE transport as controlled")
 	iceRole := webrtc.ICERoleControlled
@@ -482,7 +446,7 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
-	conn.log.Debug("starting DTLS transport as server")
+	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", d.dtls.Role.String()))
 	if err := withContextCancel(ctx, func() error {
 		return conn.dtls.Start(d.dtls)
 	}, func() {
