@@ -537,29 +537,32 @@ func (conn *Conn) gatherCandidates(signaling Signaling) error {
 			conn.log.Debug("completed gathering local candidates")
 			return
 		}
-		ctx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
-		defer cancel()
-		if err := signaling.Signal(ctx, &Signal{
-			Type:         SignalTypeCandidate,
-			ConnectionID: conn.id,
-			Data:         formatICECandidate(int(candidateIndex.Add(1)), *candidate, conn.description.ice),
-			NetworkID:    conn.networkID,
-		}); err != nil {
-			errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
-			defer cancel()
 
-			// I don't think the error code will be signaled back to the remote connection, but just in case.
-			if err := signaling.Signal(errCtx, &Signal{
-				Type:         SignalTypeError,
+		// Signal the local candidate in a goroutine so candidate gathering is never blocked by signaling.
+		go func() {
+			ctx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
+			defer cancel()
+			if err := signaling.Signal(ctx, &Signal{
+				Type:         SignalTypeCandidate,
 				ConnectionID: conn.id,
-				Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
+				Data:         formatICECandidate(int(candidateIndex.Add(1)-1), *candidate, conn.description.ice),
 				NetworkID:    conn.networkID,
 			}); err != nil {
-				conn.log.Error("error signaling error", slog.Any("error", err))
+				errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
+				defer cancel()
+
+				// I don't think the error code will be signaled back to the remote connection, but just in case.
+				if err := signaling.Signal(errCtx, &Signal{
+					Type:         SignalTypeError,
+					ConnectionID: conn.id,
+					Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
+					NetworkID:    conn.networkID,
+				}); err != nil {
+					conn.log.Error("error signaling error", slog.Any("error", err))
+				}
+				_ = conn.close(fmt.Errorf("signal candidate: %w", err))
 			}
-			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
-			go conn.close(fmt.Errorf("signal candidate: %w", err))
-		}
+		}()
 	})
 	return conn.gatherer.Gather()
 }
