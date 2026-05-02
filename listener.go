@@ -41,6 +41,22 @@ type ListenConfig struct {
 	// to be returned (likely using [context.WithCancel] or [context.WithTimeout]). If the deadline of the context
 	// is exceeded, a Signal of SignalTypeError with ErrorCodeNegotiationTimeoutWaitingForAccept will be signaled back.
 	NegotiationContext func(parent context.Context) context.Context
+
+	// ICEGatherPolicy limits which local ICE candidates are gathered for
+	// accepted connections.
+	//
+	// It may be used to restrict connectivity to specific candidate types, such
+	// as relayed candidates from TURN servers only.
+	ICEGatherPolicy webrtc.ICEGatherPolicy
+
+	// DisableTrickleICE disables trickle ICE for connection negotiation.
+	//
+	// When set, the listener waits for ICE gathering to complete and includes
+	// all local candidates in the answer SDP. Otherwise, candidates are sent
+	// incrementally as separate [SignalTypeCandidate] signals after the answer
+	// is signaled. This may slow down connection establishment because the
+	// answer cannot be sent until candidate gathering completes.
+	DisableTrickleICE bool
 }
 
 // Listen listens on the local network ID specified by the Signaling implementation. It returns a Listener
@@ -252,7 +268,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		return wrapSignalError(fmt.Errorf("obtain credentials: %w", err), ErrorCodeSignalingTurnAuthFailed)
 	}
 
-	c, err := newConn(l.conf.API, credentials, signal.ConnectionID, signal.NetworkID, l.networkID, l)
+	c, err := newConn(l.conf.API, gatherOptions(credentials, l.conf.ICEGatherPolicy), signal.ConnectionID, signal.NetworkID, l.networkID, l)
 	if err != nil {
 		return wrapSignalError(fmt.Errorf("create peer connection: %w", err), ErrorCodeFailedToCreatePeerConnection)
 	}
@@ -262,6 +278,12 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			_ = c.Close()
 		}
 	}()
+	if l.conf.DisableTrickleICE {
+		c.description.candidates, err = c.gatherCandidates(ctx)
+		if err != nil {
+			return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeICE)
+		}
+	}
 	for _, candidate := range desc.candidates {
 		// Non-trickle ICE connection may include candidates in a single SDP.
 		if err := c.addRemoteCandidate(candidate); err != nil {
@@ -312,9 +334,10 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		return wrapSignalError(fmt.Errorf("signal answer: %w", err), ErrorCodeSignalingFailedToSend)
 	}
 
-	if err := c.gatherCandidates(l.signaling); err != nil {
-		// I don't think the error code will be signaled back to the remote connection, but just in case.
-		return wrapSignalError(fmt.Errorf("gather candidates: %w", err), ErrorCodeFailedToCreatePeerConnection)
+	if !l.conf.DisableTrickleICE {
+		if err := c.trickleCandidates(l.signaling); err != nil {
+			return wrapSignalError(fmt.Errorf("start gathering local candidates: %w", err), ErrorCodeFailedToCreatePeerConnection)
+		}
 	}
 
 	l.connections.Store(c.remoteAddr().String(), c)
