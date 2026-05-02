@@ -39,13 +39,18 @@ type Dialer struct {
 	// as relayed candidates from TURN servers only.
 	ICEGatherPolicy webrtc.ICEGatherPolicy
 
-	// DisableTrickleICE disables trickle ICE for the connection negotiation.
+	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
-	// When set, the dialer waits for ICE gathering to complete and includes all
-	// local candidates in the initial offer SDP. Otherwise, candidates are sent
-	// incrementally as separate [SignalTypeCandidate] signals after the offer is
-	// signaled. This may slow down connection establishment because the initial
-	// offer cannot be sent until candidate gathering completes.
+	// When set to true, the dialer waits for ICE gathering to complete and embeds
+	// all local candidates in the initial offer SDP. Otherwise, candidates are
+	// signaled incrementally as separate [SignalTypeCandidate] signals after the
+	// offer is sent.
+	//
+	// This may slow connection establishment because the initial offer cannot be
+	// sent until candidate gathering completes.
+	//
+	// This behavior can be seen when connecting to dedicated servers with the
+	// 'nethernet-disable-trickle-ice' setting property set to 'true'.
 	DisableTrickleICE bool
 }
 

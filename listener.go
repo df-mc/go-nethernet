@@ -51,11 +51,16 @@ type ListenConfig struct {
 
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
-	// When set, the listener waits for ICE gathering to complete and includes
-	// all local candidates in the answer SDP. Otherwise, candidates are sent
-	// incrementally as separate [SignalTypeCandidate] signals after the answer
-	// is signaled. This may slow down connection establishment because the
-	// answer cannot be sent until candidate gathering completes.
+	// When set to true, the listener waits for ICE gathering to complete and embeds
+	// all local candidates in the answer SDP. Otherwise, candidates are signaled
+	// incrementally as separate [SignalTypeCandidate] signals after the answer is
+	// sent.
+	//
+	// This may slow connection establishment because the answer cannot be sent
+	// until candidate gathering completes.
+	//
+	// This behavior can be seen on dedicated servers with the
+	// 'nethernet-disable-trickle-ice' setting property set to 'true'.
 	DisableTrickleICE bool
 }
 
