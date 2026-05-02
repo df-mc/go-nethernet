@@ -19,7 +19,8 @@ type ICEServer struct {
 // gatherOptions transforms the given Credentials into a [webrtc.ICEGatherOptions] for gathering
 // local ICE candidates with [webrtc.ICEGatherer]. If the given credentials are nil or contain no ICE
 // servers, it will return a zero value.
-func gatherOptions(credentials *Credentials) (opts webrtc.ICEGatherOptions) {
+func gatherOptions(credentials *Credentials, policy webrtc.ICEGatherPolicy) webrtc.ICEGatherOptions {
+	opts := webrtc.ICEGatherOptions{ICEGatherPolicy: policy}
 	if credentials != nil && len(credentials.ICEServers) > 0 {
 		opts.ICEServers = make([]webrtc.ICEServer, len(credentials.ICEServers))
 		for i, server := range credentials.ICEServers {

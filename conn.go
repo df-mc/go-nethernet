@@ -527,44 +527,87 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	}, nil
 }
 
-// gatherCandidates starts gathering local candidates and signaling them to the
-// remote peer using the provided [Signaling] implementation.
-func (conn *Conn) gatherCandidates(signaling Signaling) error {
-	var candidateIndex atomic.Uint32
+// gatherCandidates blocks until local ICE gathering completes and returns every
+// candidate produced by the gatherer.
+//
+// It is used for non-trickle ICE, where all local candidates must be known
+// before the offer or answer is encoded so they can be embedded into the SDP.
+//
+// The gather is aborted if ctx is canceled or if conn is closed.
+func (conn *Conn) gatherCandidates(ctx context.Context) (candidates []webrtc.ICECandidate, _ error) {
+	complete := make(chan struct{})
+	conn.gatherer.OnLocalCandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
+			conn.log.Debug("end of candidate")
+			close(complete)
+			return
+		}
+		candidates = append(candidates, *candidate)
+	})
+	if err := conn.gatherer.Gather(); err != nil {
+		return nil, fmt.Errorf("start gathering local candidates: %w", err)
+	}
+	select {
+	case <-complete:
+		return candidates, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-conn.ctx.Done():
+		return nil, context.Cause(conn.ctx)
+	}
+}
+
+// trickleCandidates starts local ICE gathering for trickle ICE and signals each
+// discovered candidate to the remote peer through signaling.
+//
+// It must be called after the local offer or answer has been signaled, because
+// candidates are sent as separate [SignalTypeCandidate] messages instead of
+// being embedded in the SDP.
+func (conn *Conn) trickleCandidates(signaling Signaling) error {
+	var candidateIndex atomic.Uint32 // incremented when allocating 'network-id' for each candidate
 	conn.gatherer.OnLocalCandidate(func(candidate *webrtc.ICECandidate) {
 		// ICEGatherer already tracks its internal state, so we don't need to check if the connection is closed.
 		if candidate == nil {
-			conn.log.Debug("completed gathering local candidates")
+			conn.log.Debug("end of candidate")
 			return
 		}
-
 		// Signal the local candidate in a goroutine so candidate gathering is never blocked by signaling.
-		go func() {
-			ctx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
-			defer cancel()
-			if err := signaling.Signal(ctx, &Signal{
-				Type:         SignalTypeCandidate,
-				ConnectionID: conn.id,
-				Data:         formatICECandidate(int(candidateIndex.Add(1)-1), *candidate, conn.description.ice),
-				NetworkID:    conn.networkID,
-			}); err != nil {
-				errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
-				defer cancel()
-
-				// I don't think the error code will be signaled back to the remote connection, but just in case.
-				if err := signaling.Signal(errCtx, &Signal{
-					Type:         SignalTypeError,
-					ConnectionID: conn.id,
-					Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
-					NetworkID:    conn.networkID,
-				}); err != nil {
-					conn.log.Error("error signaling error", slog.Any("error", err))
-				}
-				_ = conn.close(fmt.Errorf("signal candidate: %w", err))
-			}
-		}()
+		// It uses [Conn.Context] as the parent context so signaling stops once the connection is closed.
+		go conn.trickleCandidate(signaling, formatICECandidate(int(candidateIndex.Add(1)-1), *candidate, conn.description.ice))
 	})
 	return conn.gatherer.Gather()
+}
+
+// trickleCandidate sends one gathered candidate to the remote peer as a
+// [SignalTypeCandidate] signal.
+//
+// It should run in its own goroutine to prevent blocking the ICE gatherer,
+// which could otherwise cause the ICE transport to enter the failed state.
+func (conn *Conn) trickleCandidate(signaling Signaling, data string) {
+	// Use [Conn.Context] as the parent context so signaling stops once the
+	// connection is closed.
+	ctx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
+	defer cancel()
+	if err := signaling.Signal(ctx, &Signal{
+		Type:         SignalTypeCandidate,
+		ConnectionID: conn.id,
+		Data:         data,
+		NetworkID:    conn.networkID,
+	}); err != nil {
+		errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
+		defer cancel()
+
+		// I don't think the error code will be signaled back to the remote connection, but just in case.
+		if err := signaling.Signal(errCtx, &Signal{
+			Type:         SignalTypeError,
+			ConnectionID: conn.id,
+			Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
+			NetworkID:    conn.networkID,
+		}); err != nil {
+			conn.log.Error("error signaling error", slog.Any("error", err))
+		}
+		_ = conn.close(fmt.Errorf("signal candidate: %w", err))
+	}
 }
 
 // description contains parameters necessary for starting ICE, DTLS, and SCTP transport within a Conn.
@@ -623,8 +666,21 @@ func (desc description) encode() ([]byte, error) {
 			},
 		},
 	}
+
+	// When Trickle ICE is disabled, local ICE candidates are embedded directly in
+	// the SDP instead of being sent later as separate candidate signals.
+	//
+	// This behavior can be only seen on dedicated servers with the
+	// 'nethernet-disable-trickle-ice' setting property set to 'true' (including Realms).
+	for i, candidate := range desc.candidates {
+		media.Attributes = append(media.Attributes, sdp.Attribute{
+			Key:   sdp.AttrKeyCandidate,
+			Value: formatICECandidate(i, candidate, desc.ice),
+		})
+	}
+
 	media.WithICECredentials(desc.ice.UsernameFragment, desc.ice.Password)
-	media.WithValueAttribute("ice-options", "trickle")
+	media.WithValueAttribute(sdp.AttrKeyICEOptions, "trickle") // ice-options:trickle is always present even if the connection is non-trickle
 	for _, fingerprint := range desc.dtls.Fingerprints {
 		media.WithFingerprint(fingerprint.Algorithm, fingerprint.Value)
 	}
@@ -632,14 +688,6 @@ func (desc description) encode() ([]byte, error) {
 	media.WithValueAttribute(sdp.AttrKeyMID, "0")
 	media.WithValueAttribute("sctp-port", "5000")
 	media.WithValueAttribute("max-message-size", strconv.FormatUint(uint64(desc.sctp.MaxMessageSize), 10))
-
-	// We don't populate ICE candidates in the SDP but just in case.
-	for _, candidate := range desc.candidates {
-		d.Attributes = append(d.Attributes, sdp.Attribute{
-			Key:   sdp.AttrKeyCandidate,
-			Value: candidate.String(),
-		})
-	}
 
 	return d.WithMedia(media).Marshal()
 }
@@ -668,8 +716,8 @@ func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole 
 // The caller must register [SCTPTransport.OnDataChannel] immediately on
 // the returned Conn, then use [Conn.description] to signal an offer or
 // answer to the remote peer.
-func newConn(api *webrtc.API, credentials *Credentials, id uint64, networkID, localNetworkID string, n negotiator) (*Conn, error) {
-	gatherer, err := api.NewICEGatherer(gatherOptions(credentials))
+func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, networkID, localNetworkID string, n negotiator) (*Conn, error) {
+	gatherer, err := api.NewICEGatherer(gathererOpts)
 	if err != nil {
 		return nil, wrapSignalError(fmt.Errorf("create ICE gatherer: %w", err), ErrorCodeFailedToCreatePeerConnection)
 	}

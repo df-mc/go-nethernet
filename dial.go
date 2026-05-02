@@ -31,6 +31,27 @@ type Dialer struct {
 	// set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires
 	// additional steps on the Conn (which cannot be determined by the Conn).
 	API *webrtc.API
+
+	// ICEGatherPolicy limits which local ICE candidates are gathered for the
+	// connection.
+	//
+	// It may be used to restrict connectivity to specific candidate types, such
+	// as relayed candidates from TURN servers only.
+	ICEGatherPolicy webrtc.ICEGatherPolicy
+
+	// DisableTrickleICE disables trickle ICE for connection negotiation.
+	//
+	// When set to true, the dialer waits for ICE gathering to complete and embeds
+	// all local candidates in the initial offer SDP. Otherwise, candidates are
+	// signaled incrementally as separate [SignalTypeCandidate] signals after the
+	// offer is sent.
+	//
+	// This may slow connection establishment because the initial offer cannot be
+	// sent until candidate gathering completes.
+	//
+	// This behavior can be seen when connecting to dedicated servers with the
+	// 'nethernet-disable-trickle-ice' setting property set to 'true'.
+	DisableTrickleICE bool
 }
 
 // DialContext establishes a Conn with a remote network referenced by the ID. The Signaling is used to signal
@@ -60,7 +81,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			stop()
 		}
 	}()
-	c, err := newConn(d.API, credentials, d.ConnectionID, networkID, signaling.NetworkID(), dialerConn{
+	c, err := newConn(d.API, gatherOptions(credentials, d.ICEGatherPolicy), d.ConnectionID, networkID, signaling.NetworkID(), dialerConn{
 		Dialer: d,
 		stop:   stop,
 	})
@@ -79,6 +100,13 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		go c.close(fmt.Errorf("data channel %q was unexpectedly opened by remote peer", channel.Label()))
 	})
 
+	if d.DisableTrickleICE {
+		c.description.candidates, err = c.gatherCandidates(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("gather local candidates (non-trickle ICE): %w", err)
+		}
+	}
+
 	// Encode an offer using the local parameters!
 	offer, err := c.description.encode()
 	if err != nil {
@@ -93,8 +121,10 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		return nil, fmt.Errorf("signal offer: %w", err)
 	}
 
-	if err := c.gatherCandidates(signaling); err != nil {
-		return nil, fmt.Errorf("gather candidates: %w", err)
+	if !d.DisableTrickleICE {
+		if err := c.trickleCandidates(signaling); err != nil {
+			return nil, fmt.Errorf("start gathering local candidates: %w", err)
+		}
 	}
 
 	for {
