@@ -84,7 +84,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	c, err := newConn(d.API, gatherOptions(credentials, d.ICEGatherPolicy), d.ConnectionID, networkID, signaling.NetworkID(), dialerConn{
 		Dialer: d,
 		stop:   stop,
-	})
+	}, ErrorCodeFailedToCreateOffer)
 	if err != nil {
 		return nil, fmt.Errorf("create conn: %w", err)
 	}

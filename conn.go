@@ -716,7 +716,7 @@ func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole 
 // The caller must register [SCTPTransport.OnDataChannel] immediately on
 // the returned Conn, then use [Conn.description] to signal an offer or
 // answer to the remote peer.
-func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, networkID, localNetworkID string, n negotiator) (*Conn, error) {
+func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, networkID, localNetworkID string, n negotiator, localDescriptionErrorCode int) (*Conn, error) {
 	gatherer, err := api.NewICEGatherer(gathererOpts)
 	if err != nil {
 		return nil, wrapSignalError(fmt.Errorf("create ICE gatherer: %w", err), ErrorCodeFailedToCreatePeerConnection)
@@ -730,14 +730,14 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 
 	iceParams, err := iceTransport.GetLocalParameters()
 	if err != nil {
-		return nil, wrapSignalError(fmt.Errorf("obtain local ICE parameters: %w", err), ErrorCodeFailedToCreateAnswer)
+		return nil, wrapSignalError(fmt.Errorf("obtain local ICE parameters: %w", err), localDescriptionErrorCode)
 	}
 	dtlsParams, err := dtlsTransport.GetLocalParameters()
 	if err != nil {
-		return nil, wrapSignalError(fmt.Errorf("obtain local DTLS parameters: %w", err), ErrorCodeFailedToCreateAnswer)
+		return nil, wrapSignalError(fmt.Errorf("obtain local DTLS parameters: %w", err), localDescriptionErrorCode)
 	}
 	if len(dtlsParams.Fingerprints) == 0 {
-		return nil, wrapSignalError(errors.New("local DTLS parameters has no fingerprints"), ErrorCodeFailedToCreateAnswer)
+		return nil, wrapSignalError(errors.New("local DTLS parameters has no fingerprints"), localDescriptionErrorCode)
 	}
 	sctpCapabilities := sctpTransport.GetCapabilities()
 
