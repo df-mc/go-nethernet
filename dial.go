@@ -302,12 +302,13 @@ func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal) {
 // receiving notifications will be returned.
 func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Signal, func()) {
 	var (
-		signals     = make(chan *Signal)
-		filtered    = make(chan *Signal)
+		signals     = make(chan *Signal, 64)
+		filtered    = make(chan *Signal, 16)
 		ctx, cancel = context.WithCancel(context.Background())
+
+		once sync.Once
 	)
 	stop := signaling.Notify(signals)
-	var once sync.Once
 
 	go func() {
 		defer close(filtered)

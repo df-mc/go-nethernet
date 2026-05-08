@@ -92,7 +92,7 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		closed: make(chan struct{}),
 	}
 
-	signals := make(chan *Signal)
+	signals := make(chan *Signal, 64)
 	l.stop = signaling.Notify(signals)
 	go l.listen(signals)
 
