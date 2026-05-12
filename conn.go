@@ -192,11 +192,15 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 	}
 }
 
+// closedWriteError wraps the given cause with [net.ErrClosed] so callers
+// can detect connection closure by using [errors.Is](err, net.ErrClosed).
+// If cause is already [net.ErrClosed], it is returned as-is to preserve
+// the original error.
 func closedWriteError(cause error) error {
 	if errors.Is(cause, net.ErrClosed) {
-		return net.ErrClosed
+		return cause
 	}
-	return fmt.Errorf("%w: %w", net.ErrClosed, cause)
+	return errors.Join(net.ErrClosed, cause)
 }
 
 // Latency returns the current latency to the remote connection as half the Smoothed Round Trip Time (SRTT)
