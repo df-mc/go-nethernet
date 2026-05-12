@@ -156,7 +156,7 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err error) {
 	select {
 	case <-conn.ctx.Done():
-		return 0, context.Cause(conn.ctx)
+		return 0, closedWriteError(context.Cause(conn.ctx))
 	default:
 		if reliability >= messageReliabilityCapacity {
 			return 0, fmt.Errorf("invalid message reliability: %d", reliability)
@@ -183,16 +183,20 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		for i := 0; i < len(data); i += maxMessageSize {
 			frag := data[i:min(len(data), i+maxMessageSize)]
 			if err := d.Send(append([]byte{uint8(remaining)}, frag...)); err != nil {
-				if errors.Is(err, io.ErrClosedPipe) {
-					err = net.ErrClosed
-				}
-				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, err)
+				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, closedWriteError(err))
 			}
 			n += len(frag)
 			remaining--
 		}
 		return n, nil
 	}
+}
+
+func closedWriteError(cause error) error {
+	if errors.Is(cause, net.ErrClosed) {
+		return net.ErrClosed
+	}
+	return fmt.Errorf("%w: %w", net.ErrClosed, cause)
 }
 
 // Latency returns the current latency to the remote connection as half the Smoothed Round Trip Time (SRTT)
