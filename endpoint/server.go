@@ -39,7 +39,8 @@ func (conf ServerConfig) New() *Server {
 		pending:   make(map[connectionKey]chan<- *nethernet.Signal),
 		notifiers: make(map[uint32]chan<- *nethernet.Signal),
 
-		mux: http.NewServeMux(),
+		mux:  http.NewServeMux(),
+		conf: conf,
 	}
 	srv.mux.HandleFunc("GET /v1/join", func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusOK)
