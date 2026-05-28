@@ -40,6 +40,27 @@ type Signaling interface {
 	PongData(b []byte)
 }
 
+// trickleICEDisabler is implemented by Signaling when they're not capable
+// of gradually signaling ICE candidates to the remote peer connections.
+type trickleICEDisabler interface {
+	// DisableTrickleICE returns a boolean indicating whether Trickle ICE
+	// should be disabled for establishing peer connections with remote network.
+	DisableTrickleICE() bool
+}
+
+// shouldDisableTrickleICE determines whether Trickle ICE should be disabled
+// for negotiating a WebRTC peer connections with the remote network.
+// The config value must be specified from [ListenConfig.DisableTrickleICE]
+// or [Dialer.DisableTrickleICE].
+// If the given [Signaling] implementation also implements [trickleICEDisabler],
+// it takes priority over the user-provided configuration value.
+func shouldDisableTrickleICE(configValue bool, signaling Signaling) bool {
+	if d, ok := signaling.(trickleICEDisabler); ok {
+		return configValue || d.DisableTrickleICE()
+	}
+	return configValue
+}
+
 const (
 	// SignalTypeOffer is signaled by a client to request a connection to the remote host.
 	// Signals of SignalTypeOffer typically contain a data for a local description of the connection.

@@ -93,12 +93,27 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	case nethernet.SignalTypeError:
 		return nil
 	case nethernet.SignalTypeCandidate:
-		return errors.New("nethernet/endpoint: disable trickle ICE in Dialer.DisableTrickleICE")
+		// This happens when either Dialer or Listener didn't respect the value
+		// returned from [Client.DisableTrickleICE], or the user is simply manually
+		// sending an ICE candidate for testing or whatever reason.
+		return errors.New("nethernet/endpoint: trickle ICE is not supported")
 	default:
 		return fmt.Errorf("nethernet/endpoint: unknown signal type: %s", signal.Type)
 	}
 }
 
+// DisableTrickleICE always returns true as it is not supported because the HTTP
+// request-response model requires the full SDP exchange to complete within a single round trip.
+// A peer connection should wait for all local ICE candidates to be gathered and
+// include them as SDP attributes in the initial offer.
+func (c *Client) DisableTrickleICE() bool {
+	return true
+}
+
+// Notify registers a channel to receive incoming NetherNet signals.
+//
+// The returned stop function unregisters the channel and closes it. Callers must not close
+// the channel themselves.
 func (c *Client) Notify(ch chan<- *nethernet.Signal) (stop func()) {
 	c.notifiersMu.Lock()
 	i := c.notifyCount
@@ -114,6 +129,10 @@ func (c *Client) Notify(ch chan<- *nethernet.Signal) (stop func()) {
 	}
 }
 
+// Context always returns [context.Background].
+// It would be nicer if we returned the context for the underlying HTTP server,
+// but neither [http.Server] nor [net.Listener] exposes a way to determine whether
+// it is closed, so client closure is currently not notified.
 func (c *Client) Context() context.Context {
 	return context.Background()
 }
@@ -130,7 +149,7 @@ func (c *Client) NetworkID() string {
 }
 
 func (c *Client) PongData([]byte) {
-	panic("nethernet/endpoint: should not happen")
+	panic("nethernet/endpoint: Client.PongData: unsupported")
 }
 
 func (c *Client) notifySignal(signal *nethernet.Signal) {

@@ -34,13 +34,13 @@ type ListenConfig struct {
 	// ConnContext provides a [context.Context] for starting the ICE, DTLS, and SCTP transports of the Conn. If nil,
 	// a default [context.Context] with 5 seconds timeout will be used. The parent [context.Context] may be used to
 	// create a [context.Context] to be returned (likely using [context.WithCancel] or [context.WithTimeout]).
-	ConnContext func(parent context.Context, conn *Conn) context.Context
+	ConnContext func(parent context.Context, conn *Conn) (context.Context, context.CancelFunc)
 
 	// NegotiationContext provides a [context.Context] for the negotiation. If nil, a default [context.Context]
 	// with 5 seconds timeout will be used. The parent [context.Context] may be used to create a [context.Context]
 	// to be returned (likely using [context.WithCancel] or [context.WithTimeout]). If the deadline of the context
 	// is exceeded, a Signal of SignalTypeError with ErrorCodeNegotiationTimeoutWaitingForAccept will be signaled back.
-	NegotiationContext func(parent context.Context) context.Context
+	NegotiationContext func(parent context.Context) (context.Context, context.CancelFunc)
 
 	// ICEGatherPolicy limits which local ICE candidates are gathered for
 	// accepted connections.
@@ -260,9 +260,12 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		parent = l.Context()
 	)
 	if l.conf.NegotiationContext != nil {
-		if ctx = l.conf.NegotiationContext(parent); ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = l.conf.NegotiationContext(parent)
+		if ctx == nil {
 			panic("nethernet: Listener: NegotiationContext returned nil")
 		}
+		defer cancel()
 	} else {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(parent, time.Second*15)
@@ -291,7 +294,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			_ = c.Close()
 		}
 	}()
-	if l.conf.DisableTrickleICE {
+	if shouldDisableTrickleICE(l.conf.DisableTrickleICE, l.signaling) {
 		c.description.candidates, err = c.gatherCandidates(ctx)
 		if err != nil {
 			return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeICE)
@@ -411,10 +414,12 @@ func (l *Listener) handleConn(conn *Conn, d *description, channelsReady <-chan s
 		parent = l.Context()
 	)
 	if l.conf.ConnContext != nil {
-		ctx = l.conf.ConnContext(parent, conn)
+		var cancel context.CancelFunc
+		ctx, cancel = l.conf.ConnContext(parent, conn)
 		if ctx == nil {
 			panic("nethernet: ConnContext returned nil")
 		}
+		defer cancel()
 	} else {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(parent, time.Second*5)

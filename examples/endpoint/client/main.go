@@ -14,10 +14,13 @@ import (
 	"github.com/df-mc/go-nethernet/endpoint"
 )
 
+// init parses the flags given by the user in the command line.
 func init() {
 	flag.Parse()
 }
 
+// main is a program that demonstrates a client connecting to
+// the server over NetherNet via HTTP signaling.
 func main() {
 	address := flag.Arg(0)
 	if address == "" {

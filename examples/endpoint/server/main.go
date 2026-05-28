@@ -15,8 +15,10 @@ import (
 	"github.com/df-mc/go-nethernet/endpoint"
 )
 
+// debug indicates whether to show debug log in the output.
 var debug = flag.Bool("debug", true, "Show debug log")
 
+// init parses the flags given by the user in the command line.
 func init() {
 	flag.Parse()
 
@@ -29,6 +31,7 @@ func init() {
 	}
 }
 
+// main is a program demonstrates a server connecting to a client.
 func main() {
 	var (
 		address  = flag.Arg(0)
@@ -46,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := endpoint.NewServer()
+	server := endpoint.NewHandler()
 	l, err := nethernet.ListenConfig{DisableTrickleICE: true}.Listen(server)
 	if err != nil {
 		panic(fmt.Sprintf("error listening on NetherNet: %s", err))
