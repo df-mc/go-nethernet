@@ -55,18 +55,18 @@ func (conf HandlerConfig) New() *Handler {
 		conf.NetworkID = strconv.FormatUint(rand.Uint64(), 10)
 	}
 
-	srv := &Handler{
+	h := &Handler{
 		pending:   make(map[connectionKey]chan<- *nethernet.Signal),
 		notifiers: make(map[uint32]chan<- *nethernet.Signal),
 
 		mux:  http.NewServeMux(),
 		conf: conf,
 	}
-	srv.mux.HandleFunc("GET /v1/join", func(writer http.ResponseWriter, request *http.Request) {
+	h.mux.HandleFunc("GET /v1/join", func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 	})
-	srv.mux.HandleFunc("POST /v1/join/{networkID}", srv.handleOffer)
-	return srv
+	h.mux.HandleFunc("POST /v1/join/{networkID}", h.handleOffer)
+	return h
 }
 
 // NewHandler creates a new [Handler] with default HandlerConfig values and returns it.

@@ -35,11 +35,11 @@ func ExampleClient() {
 // ExampleServer demonstrates how to expose a NetherNet listener using HTTP/TLS server
 // for signaling.
 func ExampleServer() {
-	server := NewHandler()
+	handler := NewHandler()
 
 	// Set up a NetherNet listener.
 	var cfg nethernet.ListenConfig
-	l, err := cfg.Listen(server)
+	l, err := cfg.Listen(handler)
 	if err != nil {
 		panic(fmt.Sprintf("error listening on NetherNet: %s", err))
 	}
@@ -62,5 +62,5 @@ func ExampleServer() {
 
 	// Start listening on HTTP/TLS. This will block until the server stops.
 	// In production, it is recommended to create an [http.Server] and call its Close() method when it's done.
-	_ = http.ListenAndServeTLS(":19132", "/path/to/cert-file", "/path/to/key-file", server)
+	_ = http.ListenAndServeTLS(":19132", "/path/to/cert-file", "/path/to/key-file", handler)
 }

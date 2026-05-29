@@ -100,7 +100,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		go c.close(fmt.Errorf("data channel %q was unexpectedly opened by remote peer", channel.Label()))
 	})
 
-	if shouldDisableTrickleICE(d.DisableTrickleICE, signaling) {
+	disableTrickleICE := shouldDisableTrickleICE(d.DisableTrickleICE, signaling)
+	if disableTrickleICE {
 		c.description.candidates, err = c.gatherCandidates(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("gather local candidates (non-trickle ICE): %w", err)
@@ -121,7 +122,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		return nil, fmt.Errorf("signal offer: %w", err)
 	}
 
-	if !d.DisableTrickleICE {
+	if !disableTrickleICE {
 		if err := c.trickleCandidates(signaling); err != nil {
 			return nil, fmt.Errorf("start gathering local candidates: %w", err)
 		}

@@ -294,7 +294,8 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			_ = c.Close()
 		}
 	}()
-	if shouldDisableTrickleICE(l.conf.DisableTrickleICE, l.signaling) {
+	disableTrickleICE := shouldDisableTrickleICE(l.conf.DisableTrickleICE, l.signaling)
+	if disableTrickleICE {
 		c.description.candidates, err = c.gatherCandidates(ctx)
 		if err != nil {
 			return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeICE)
@@ -350,7 +351,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		return wrapSignalError(fmt.Errorf("signal answer: %w", err), ErrorCodeSignalingFailedToSend)
 	}
 
-	if !l.conf.DisableTrickleICE {
+	if !disableTrickleICE {
 		if err := c.trickleCandidates(l.signaling); err != nil {
 			return wrapSignalError(fmt.Errorf("start gathering local candidates: %w", err), ErrorCodeFailedToCreatePeerConnection)
 		}
