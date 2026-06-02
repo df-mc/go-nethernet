@@ -92,7 +92,7 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		closed: make(chan struct{}),
 	}
 
-	signals := make(chan *Signal)
+	signals := make(chan *Signal, 64)
 	l.stop = signaling.Notify(signals)
 	go l.listen(signals)
 
@@ -273,9 +273,17 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		return wrapSignalError(fmt.Errorf("obtain credentials: %w", err), ErrorCodeSignalingTurnAuthFailed)
 	}
 
-	c, err := newConn(l.conf.API, gatherOptions(credentials, l.conf.ICEGatherPolicy), signal.ConnectionID, signal.NetworkID, l.networkID, l)
+	c, err := newConn(
+		l.conf.API,
+		gatherOptions(credentials, l.conf.ICEGatherPolicy),
+		signal.ConnectionID,
+		signal.NetworkID,
+		l.networkID,
+		l,
+		ErrorCodeFailedToCreateAnswer,
+	)
 	if err != nil {
-		return wrapSignalError(fmt.Errorf("create peer connection: %w", err), ErrorCodeFailedToCreatePeerConnection)
+		return fmt.Errorf("create peer connection: %w", err)
 	}
 	established := false
 	defer func() {

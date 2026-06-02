@@ -16,9 +16,10 @@ type ICEServer struct {
 	URLs     []string `json:"Urls"`
 }
 
-// gatherOptions transforms the given Credentials into a [webrtc.ICEGatherOptions] for gathering
-// local ICE candidates with [webrtc.ICEGatherer]. If the given credentials are nil or contain no ICE
-// servers, it will return a zero value.
+// gatherOptions transforms the given Credentials and gather policy into a
+// [webrtc.ICEGatherOptions] for gathering local ICE candidates with
+// [webrtc.ICEGatherer]. If the given credentials are nil or contain no ICE
+// servers, only the gather policy is populated.
 func gatherOptions(credentials *Credentials, policy webrtc.ICEGatherPolicy) webrtc.ICEGatherOptions {
 	opts := webrtc.ICEGatherOptions{ICEGatherPolicy: policy}
 	if credentials != nil && len(credentials.ICEServers) > 0 {

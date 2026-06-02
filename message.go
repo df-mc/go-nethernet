@@ -125,6 +125,9 @@ type dataChannel struct {
 	// An embedded message contains the buffer that holds the segments received
 	// to now and the count of the last segment count.
 	*message
+	// messageMu guards message because Pion may invoke OnMessage concurrently
+	// with Conn/data channel closure.
+	messageMu sync.Mutex
 
 	// reliability is the reliability parameter for dataChannel.
 	// It controls how multiple segments received in the data channel is handled.
@@ -183,6 +186,9 @@ func (c *dataChannel) handleMessage(b []byte) error {
 		return fmt.Errorf("unexpected segment count on UnreliableDataChannel: %d", msg.segments)
 	}
 
+	c.messageMu.Lock()
+	defer c.messageMu.Unlock()
+
 	if c.segments > 0 && c.segments-1 != msg.segments {
 		return fmt.Errorf("invalid promised segments: expected %d, got %d", c.segments-1, msg.segments)
 	}
@@ -208,7 +214,9 @@ func (c *dataChannel) handleMessage(b []byte) error {
 func (c *dataChannel) Close() (err error) {
 	c.once.Do(func() {
 		close(c.close)
+		c.messageMu.Lock()
 		clear(c.data)
+		c.messageMu.Unlock()
 		err = c.DataChannel.Close()
 	})
 	return err
