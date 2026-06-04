@@ -460,6 +460,10 @@ func (l *Listener) handleConn(conn *Conn, d *description, channelsReady <-chan s
 		}
 
 		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-conn.ctx.Done():
+			err = context.Cause(conn.ctx)
 		case <-l.closed:
 			_ = conn.Close()
 		case l.incoming <- conn:
