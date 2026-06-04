@@ -3,7 +3,6 @@ package nethernet
 import (
 	"context"
 	"errors"
-	"net"
 	"sync"
 	"testing"
 	"time"
@@ -85,7 +84,3 @@ func (s *blockingErrorSignaling) NetworkID() string {
 }
 
 func (*blockingErrorSignaling) PongData([]byte) {}
-
-func (s *blockingErrorSignaling) close() {
-	s.cancel(net.ErrClosed)
-}
