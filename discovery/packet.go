@@ -67,6 +67,9 @@ func Unmarshal(b []byte) (Packet, uint64, error) {
 	if err := binary.Read(buf, binary.LittleEndian, &length); err != nil {
 		return nil, 0, fmt.Errorf("read length: %w", err)
 	}
+	if remaining := buf.Len(); int(length) != remaining {
+		return nil, 0, fmt.Errorf("invalid packet length: %d, remaining %d", length, remaining)
+	}
 	h := &Header{}
 	if err := h.Read(buf); err != nil {
 		return nil, 0, fmt.Errorf("read header: %w", err)
@@ -98,11 +101,16 @@ func readBytes[L ~uint32 | ~uint8](r io.Reader) ([]byte, error) {
 	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 		return nil, fmt.Errorf("read length: %w", err)
 	}
-	b := make([]byte, length)
-	if n, err := r.Read(b); err != nil {
+	n := uint32(length)
+	if n > maxPacketPayloadLength {
+		return nil, fmt.Errorf("invalid length: %d, max %d", n, maxPacketPayloadLength)
+	}
+	if l, ok := r.(interface{ Len() int }); ok && n > uint32(l.Len()) {
+		return nil, fmt.Errorf("invalid length: %d, remaining %d", n, l.Len())
+	}
+	b := make([]byte, n)
+	if _, err := io.ReadFull(r, b); err != nil {
 		return nil, err
-	} else if n != int(length) {
-		return nil, fmt.Errorf("invalid length: %d, expected %d", n, length)
 	}
 	return b, nil
 }
@@ -114,6 +122,9 @@ func writeBytes[L ~uint32 | ~uint8](w io.Writer, b []byte) {
 }
 
 const (
+	// maxPacketPayloadLength is 65,535 bytes, matching the uint16 length prefix.
+	maxPacketPayloadLength = 1<<16 - 1
+
 	IDRequestPacket uint16 = iota
 	IDResponsePacket
 	IDMessagePacket
