@@ -222,11 +222,7 @@ func (d dialerConn) log() *slog.Logger {
 // provided [Signaling] implementation, remote network ID, and error code.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	go func() {
-		parent := signaling.Context()
-		if parent == nil {
-			parent = context.Background()
-		}
-		ctx, cancel := context.WithTimeout(parent, signalErrorTimeout)
+		ctx, cancel := context.WithTimeout(signaling.Context(), signalErrorTimeout)
 		defer cancel()
 		_ = signaling.Signal(ctx, &Signal{
 			Type:         SignalTypeError,
