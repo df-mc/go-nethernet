@@ -270,7 +270,7 @@ func (l *Listener) listen() {
 }
 
 // maxUDPPacketSize is 65,535 bytes, the maximum UDP payload size.
-const maxUDPPacketSize = 1<<16 - 1
+const maxUDPPacketSize = 65535
 
 // write writes the packet to the destination address using the network ID of Listener.
 func (l *Listener) write(pk Packet, addr net.Addr) error {
