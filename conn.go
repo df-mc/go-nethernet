@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -69,6 +68,9 @@ type Conn struct {
 	// channelsMu guards channels from concurrent read-write access during startup and closure.
 	channelsMu sync.RWMutex
 
+	readMu  sync.Mutex
+	readBuf []byte
+
 	// once ensures that the Conn is closed only once.
 	once sync.Once
 
@@ -90,13 +92,20 @@ type Conn struct {
 // Read receives a message from the 'ReliableDataChannel'. The bytes of the message data are copied to
 // the given data. An error may be returned if the Conn has been closed by [Conn.Close].
 func (conn *Conn) Read(b []byte) (n int, err error) {
-	pk, err := conn.Receive(MessageReliabilityReliable)
-	if err != nil {
-		return n, err
+	conn.readMu.Lock()
+	defer conn.readMu.Unlock()
+
+	if len(conn.readBuf) == 0 {
+		pk, err := conn.Receive(MessageReliabilityReliable)
+		if err != nil {
+			return n, err
+		}
+		conn.readBuf = pk
 	}
-	n = copy(b, pk)
-	if n < len(pk) {
-		return n, io.ErrShortBuffer
+	n = copy(b, conn.readBuf)
+	conn.readBuf = conn.readBuf[n:]
+	if len(conn.readBuf) == 0 {
+		conn.readBuf = nil
 	}
 	return n, nil
 }

@@ -44,10 +44,18 @@ type ServerData struct {
 // MarshalBinary ...
 func (d *ServerData) MarshalBinary() ([]byte, error) {
 	buf := &bytes.Buffer{}
+	serverName := []byte(d.ServerName)
+	if len(serverName) > maxServerDataNameLength {
+		return nil, fmt.Errorf("server name length %d exceeds %d byte limit", len(serverName), maxServerDataNameLength)
+	}
+	levelName := []byte(d.LevelName)
+	if len(levelName) > maxServerDataNameLength {
+		return nil, fmt.Errorf("level name length %d exceeds %d byte limit", len(levelName), maxServerDataNameLength)
+	}
 
 	_ = binary.Write(buf, binary.LittleEndian, version)
-	writeBytes[uint8](buf, []byte(d.ServerName))
-	writeBytes[uint8](buf, []byte(d.LevelName))
+	writeBytes[uint8](buf, serverName)
+	writeBytes[uint8](buf, levelName)
 	_ = binary.Write(buf, binary.LittleEndian, d.GameType<<1)
 	_ = binary.Write(buf, binary.LittleEndian, d.PlayerCount)
 	_ = binary.Write(buf, binary.LittleEndian, d.MaxPlayerCount)
@@ -116,3 +124,6 @@ func (d *ServerData) UnmarshalBinary(data []byte) error {
 
 // version is the current version of ServerData as supported by the `discovery` package.
 const version uint8 = 4
+
+// maxServerDataNameLength is 255 bytes, matching the uint8 string length prefix.
+const maxServerDataNameLength = 1<<8 - 1

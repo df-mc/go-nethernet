@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -220,13 +221,23 @@ func (d dialerConn) log() *slog.Logger {
 // signalError sends a SignalTypeError to the remote connection using the
 // provided [Signaling] implementation, remote network ID, and error code.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
-	_ = signaling.Signal(context.Background(), &Signal{
-		Type:         SignalTypeError,
-		Data:         strconv.Itoa(code),
-		ConnectionID: d.ConnectionID,
-		NetworkID:    networkID,
-	})
+	go func() {
+		parent := signaling.Context()
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, signalErrorTimeout)
+		defer cancel()
+		_ = signaling.Signal(ctx, &Signal{
+			Type:         SignalTypeError,
+			Data:         strconv.Itoa(code),
+			ConnectionID: d.ConnectionID,
+			NetworkID:    networkID,
+		})
+	}()
 }
+
+const signalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
 // then starts DTLS and SCTP using the parameters from the remote description.
