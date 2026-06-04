@@ -1,32 +1,26 @@
-//go:build manual
-
 package discovery
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"net"
 	"os"
-	"testing"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
 )
 
-func TestListen(t *testing.T) {
+func ExampleListen() {
 	cfg := ListenConfig{
 		NetworkID: rand.Uint64(),
 	}
 	d, err := cfg.Listen("0.0.0.0:7551")
 	if err != nil {
-		t.Fatalf("error listening on discovery: %s", err)
+		panic(fmt.Sprintf("error listening on discovery: %s", err))
 	}
-	t.Cleanup(func() {
-		if err := d.Close(); err != nil {
-			t.Errorf("error closing discovery: %s", err)
-		}
-	})
+	defer d.Close()
 	d.ServerData(&ServerData{
 		ServerName:     "df-mc/go-nethernet",
 		LevelName:      "Bedrock World",
@@ -44,26 +38,26 @@ func TestListen(t *testing.T) {
 	var c nethernet.ListenConfig
 	l, err := c.Listen(d)
 	if err != nil {
-		t.Fatalf("error listening: %s", err)
+		panic(fmt.Sprintf("error listening on NetherNet: %s", err))
 	}
-	t.Cleanup(func() {
-		if err := l.Close(); err != nil {
-			t.Fatalf("error closing: %s", err)
-		}
-	})
+	defer l.Close()
 
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				t.Fatalf("error accepting connection: %s", err)
+				panic(fmt.Sprintf("error accepting connection: %s", err))
 			}
 			return
 		}
-		t.Logf("accepted: %s", conn.RemoteAddr())
+		slog.Info("connected",
+			"localAddr", conn.LocalAddr(),
+			"remoteAddr", conn.RemoteAddr(),
+			"latency", conn.(*nethernet.Conn).Latency(),
+		)
 		time.AfterFunc(time.Second*5, func() {
 			if err := conn.Close(); err != nil {
-				t.Fatal(err)
+				panic(err)
 			}
 		})
 	}
