@@ -101,14 +101,14 @@ func readBytes[L ~uint32 | ~uint8](r io.Reader) ([]byte, error) {
 	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 		return nil, fmt.Errorf("read length: %w", err)
 	}
-	length64 := uint64(length)
-	if length64 > maxPacketPayloadLength {
-		return nil, fmt.Errorf("invalid length: %d, max %d", length, maxPacketPayloadLength)
+	n := uint32(length)
+	if n > maxPacketPayloadLength {
+		return nil, fmt.Errorf("invalid length: %d, max %d", n, maxPacketPayloadLength)
 	}
-	if l, ok := r.(interface{ Len() int }); ok && length64 > uint64(l.Len()) {
-		return nil, fmt.Errorf("invalid length: %d, remaining %d", length, l.Len())
+	if l, ok := r.(interface{ Len() int }); ok && n > uint32(l.Len()) {
+		return nil, fmt.Errorf("invalid length: %d, remaining %d", n, l.Len())
 	}
-	b := make([]byte, int(length64))
+	b := make([]byte, n)
 	if _, err := io.ReadFull(r, b); err != nil {
 		return nil, err
 	}
