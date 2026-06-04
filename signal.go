@@ -145,12 +145,6 @@ func formatICECandidate(id int, candidate webrtc.ICECandidate, iceParams webrtc.
 		b.WriteString(strconv.FormatUint(uint64(candidate.RelatedPort), 10))
 		b.WriteByte(' ')
 	}
-	if candidate.Protocol == webrtc.ICEProtocolTCP && candidate.TCPType != "" {
-		b.WriteString("tcptype")
-		b.WriteByte(' ')
-		b.WriteString(candidate.TCPType)
-		b.WriteByte(' ')
-	}
 	b.WriteString("generation")
 	b.WriteByte(' ')
 	b.WriteByte('0')
