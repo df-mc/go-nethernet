@@ -253,8 +253,8 @@ func (l *Listener) Responses() map[uint64][]byte {
 
 // listen continuously reads packets received in the conn and calls handlePacket.
 func (l *Listener) listen() {
+	b := make([]byte, maxUDPPacketSize)
 	for {
-		b := make([]byte, 1024)
 		n, addr, err := l.conn.ReadFrom(b)
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
@@ -268,6 +268,9 @@ func (l *Listener) listen() {
 		}
 	}
 }
+
+// maxUDPPacketSize is 65,535 bytes, the maximum UDP payload size.
+const maxUDPPacketSize = 65535
 
 // write writes the packet to the destination address using the network ID of Listener.
 func (l *Listener) write(pk Packet, addr net.Addr) error {
