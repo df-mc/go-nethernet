@@ -450,7 +450,10 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 	return nil
 }
 
-const maxMessageSize = 10000
+// maxMessageSize is the maximum payload size for a single message segment.
+// This is 256KB (262144 bytes) minus 1 byte for the segment counter,
+// matching the 'a=max-message-size' value in the SDP sent by vanilla peer connections.
+const maxMessageSize = 262143
 
 // parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
 // It transforms the fields of the [sdp.SessionDescription] into a description, which can be
@@ -704,7 +707,7 @@ func (desc description) encode() ([]byte, error) {
 	media.WithValueAttribute(sdp.AttrKeyConnectionSetup, desc.connectionRole(desc.dtls.Role).String())
 	media.WithValueAttribute(sdp.AttrKeyMID, "0")
 	media.WithValueAttribute("sctp-port", "5000")
-	media.WithValueAttribute("max-message-size", strconv.FormatUint(uint64(desc.sctp.MaxMessageSize), 10))
+	media.WithValueAttribute("max-message-size", strconv.FormatUint(maxMessageSize+1, 10))
 
 	return d.WithMedia(media).Marshal()
 }

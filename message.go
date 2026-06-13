@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"sync"
 
@@ -80,18 +79,17 @@ func (r MessageReliability) compareOptional(a, b *uint16) bool {
 	return a == nil && b == nil
 }
 
-// wrapDataChannel wraps a [webrtc.DataChannel] into the dataChannel for further use in Conn.
-// It also newly allocates a buffer in the message field of dataChannel sized for the maximum
-// number of segments supported by the on-wire format.
+// wrapDataChannel wraps a [webrtc.DataChannel] and sets up handlers to reconstruct
+// fragmented messages. Received message segments are reassembled and sent to packets
+// when all segments have arrived.
 func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability, conn *Conn) *dataChannel {
 	ch := &dataChannel{
 		DataChannel: channel,
 		reliability: reliability,
-		message: &message{
-			// max remaining-segment count (first byte in the message) is MaxUint8, meaning the total number
-			// of segments is MaxUint8+1.
-			data: make([]byte, 0, (int(math.MaxUint8)+1)*maxMessageSize),
-		},
+		// Previously, message.data was pre-allocated for all possible segments.
+		// Since most messages are smaller than 256KB and don't require fragmentation,
+		// we no longer need to pre-allocate a large buffer.
+		message: &message{},
 		packets: make(chan []byte),
 		close:   make(chan struct{}),
 	}
