@@ -82,6 +82,9 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		if len(b) == 0 {
 			return errors.New("missing SDP answer in response body")
 		}
+		if errorCode, err := strconv.ParseUint(string(b), 10, 32); err != nil {
+			return fmt.Errorf("negotiation failed with error code: %d", errorCode)
+		}
 
 		go c.notifySignal(&nethernet.Signal{
 			Type:         nethernet.SignalTypeAnswer,
