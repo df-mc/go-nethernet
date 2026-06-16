@@ -24,7 +24,7 @@ func testDialListener(t *testing.T, disableTrickle bool) {
 	defer client.close()
 	defer server.close()
 
-	l, err := (ListenConfig{DisableTrickleICE: disableTrickle}).Listen(server)
+	l, err := (ListenConfig{DisableTrickleICE: disableTrickle, AllowAnonymous: true}).Listen(server)
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
