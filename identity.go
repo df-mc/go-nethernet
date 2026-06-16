@@ -72,7 +72,12 @@ func (i Identity) sign(desc *description) error {
 // If selfSigned is true, it verifies that the token is self-signed with the corresponding private key.
 // It also validates standard JWT claims such as expiration time.
 func claimPublicKey(token string, selfSigned bool) (*ecdsa.PublicKey, error) {
-	t, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.ES384})
+	t, err := jwt.ParseSigned(token, []jose.SignatureAlgorithm{
+		// Server identity tokens are self-signed using ES384
+		jose.ES384,
+		// Client identity tokens are issued by Minecraft's authorization service and are signed using RS256
+		jose.RS256,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("parse JWT token: %w", err)
 	}
@@ -225,7 +230,7 @@ type (
 // Valid reports whether the identityData is valid.
 func (d identityData) Valid() bool {
 	validJWS := func(s string) bool {
-		return s != "" && strings.Count(s, ".") == 3
+		return s != "" && strings.Count(s, ".") == 2
 	}
 	return validJWS(d.Assertion.Token) && validJWS(d.Assertion.Fingerprints) &&
 		d.IdentityProvider.Protocol == "default" && d.IdentityProvider.Domain != ""
@@ -266,7 +271,7 @@ func (a *identityAssertion) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	type Alias identityAssertion
-	return json.Unmarshal(b, (*Alias)(a))
+	return json.Unmarshal([]byte(s), (*Alias)(a))
 }
 
 // encodePublicKey encodes an ECDSA public key given by the user to a base64-encoded string.

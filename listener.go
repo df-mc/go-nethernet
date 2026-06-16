@@ -395,6 +395,13 @@ func (l *Listener) handleOffer(signal *Signal) error {
 	} else if !l.conf.AllowAnonymous {
 		return wrapSignalError(errors.New("nethernet: anonymous identity not allowed"), 37)
 	}
+	identity, err := l.conf.IssueServerIdentity(ctx)
+	if err != nil {
+		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), 37)
+	}
+	if err := identity.sign(c.description); err != nil {
+		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), 37)
+	}
 
 	// Register a callback function immediately since the remote peer
 	// may open data channels at any time while ICE candidates are being signaled.
