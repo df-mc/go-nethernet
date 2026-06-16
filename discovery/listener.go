@@ -8,7 +8,6 @@ import (
 	"maps"
 	"math/rand"
 	"net"
-	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,9 +41,8 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	if conf.NetworkID == 0 {
 		conf.NetworkID = rand.Uint64()
 	}
-	addrPort, err := netip.ParseAddrPort(addr)
-	if err != nil {
-		return nil, fmt.Errorf("parse address: %w", err)
+	if addr == "" {
+		addr = ":0"
 	}
 	// We hardcode network protocol for "udp" as it always expects UDP packets to be received.
 	conn, err := net.ListenPacket("udp", addr)
@@ -52,7 +50,13 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 		return nil, err
 	}
 
-	if conf.BroadcastAddress == nil && addrPort.Port() != DefaultPort {
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		_ = conn.Close()
+		return nil, fmt.Errorf("unexpected local address type %T", conn.LocalAddr())
+	}
+
+	if conf.BroadcastAddress == nil && localAddr.Port != DefaultPort {
 		// If the port for the address is 7551, it means no applications are listening on this network
 		// and server discovery using limited broadcast on net.IPv4bcast is not meaningful.
 		conf.BroadcastAddress = &net.UDPAddr{
@@ -249,8 +253,8 @@ func (l *Listener) Responses() map[uint64][]byte {
 
 // listen continuously reads packets received in the conn and calls handlePacket.
 func (l *Listener) listen() {
+	b := make([]byte, maxUDPPacketSize)
 	for {
-		b := make([]byte, 1024)
 		n, addr, err := l.conn.ReadFrom(b)
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
@@ -264,6 +268,9 @@ func (l *Listener) listen() {
 		}
 	}
 }
+
+// maxUDPPacketSize is 65,535 bytes, the maximum UDP payload size.
+const maxUDPPacketSize = 65535
 
 // write writes the packet to the destination address using the network ID of Listener.
 func (l *Listener) write(pk Packet, addr net.Addr) error {
@@ -289,10 +296,10 @@ func (l *Listener) handlePacket(data []byte, addr net.Addr) error {
 	if !ok {
 		a = address{
 			networkID: senderID,
-			addr:      addr,
 		}
 	}
-	// Update or set the timestamp for expiring them in deleteInactiveAddresses.
+	// Update or set the address and timestamp for expiring them in deleteInactiveAddresses.
+	a.addr = addr
 	a.t = time.Now()
 	l.addresses[senderID] = a
 	l.addressesMu.Unlock()
@@ -369,7 +376,13 @@ func (l *Listener) handleMessage(pk *MessagePacket, senderID uint64) error {
 // ServerData stores the ServerData for responding to the clients broadcasting
 // RequestPacket with a ResponsePacket containing the binary representation.
 func (l *Listener) ServerData(d *ServerData) {
-	b, _ := d.MarshalBinary()
+	b, err := d.MarshalBinary()
+	if err != nil {
+		if l.conf.Log != nil {
+			l.conf.Log.Error("error marshaling server data", slog.Any("error", err))
+		}
+		return
+	}
 	l.pongData.Store(&b)
 }
 

@@ -2,6 +2,7 @@ package nethernet
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -31,6 +33,36 @@ type Dialer struct {
 	// set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires
 	// additional steps on the Conn (which cannot be determined by the Conn).
 	API *webrtc.API
+
+	// Identity specifies the identity presented to the remote peer during
+	// connection negotiation.
+	//
+	// When set to non-nil, an 'a=identity' attribute is attached to the SDP offer
+	// and used to authenticate the client and bind its identity to the WebRTC peer
+	// connection.
+	//
+	// When set to nil, no identity assertion is included in the offer.
+	Identity *Identity
+	// VerifyServerToken verifies the token contained in a server's identity
+	// assertion and returns the public key populated in its 'cpk' claim.
+	//
+	// The returned public key is used to verify the fingerprint assertion
+	// carried in the server answer's 'a=identity' attribute.
+	//
+	// When [Dialer.AllowIdentitylessServer] is set to true, VerifyServerToken may never be called.
+	//
+	// By default, this is set to a function that only extracts the public key
+	// from the token's 'cpk' claim and trusts it unconditionally.
+	VerifyServerToken func(ctx context.Context, token, domain string) (*ecdsa.PublicKey, error)
+
+	// AllowIdentitylessServer specifies whether to allow answer SDPs without an
+	// 'a=identity' attribute.
+	//
+	// When set to false, the server must present a valid identity assertion.
+	// When set to true, unauthenticated servers are allowed to establish connections.
+	//
+	// This may be useful when connecting to legacy or custom implementations.
+	AllowIdentitylessServer bool
 
 	// ICEGatherPolicy limits which local ICE candidates are gathered for the
 	// connection.
@@ -68,6 +100,16 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
+	if d.VerifyServerToken == nil {
+		d.VerifyServerToken = func(ctx context.Context, token, domain string) (*ecdsa.PublicKey, error) {
+			publicKey, err := claimPublicKey(token, true)
+			if err != nil {
+				return nil, err
+			}
+			d.Log.Debug("trusting server identity", "domain", domain)
+			return publicKey, nil
+		}
+	}
 
 	credentials, err := signaling.Credentials(ctx)
 	if err != nil {
@@ -93,6 +135,12 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			_ = c.close(fmt.Errorf("dial failure: %w", err))
 		}
 	}()
+	if d.Identity != nil {
+		if err := d.Identity.sign(c.description); err != nil {
+			return nil, fmt.Errorf("generate identity assertion: %w", err)
+		}
+	}
+
 	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
 		// For client connections, the server should never open a data channel.
 		//
@@ -154,6 +202,21 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 				if err != nil {
 					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("parse answer: %w", err)
+				}
+				if desc.identity != nil {
+					publicKey, err := d.VerifyServerToken(ctx, desc.identity.Assertion.Token, desc.identity.IdentityProvider.Domain)
+					if err != nil {
+						d.signalError(signaling, networkID, 37)
+						return nil, fmt.Errorf("verify server identity token: %w", err)
+					}
+					if err := desc.identity.verify(desc, publicKey); err != nil {
+						d.signalError(signaling, networkID, 37)
+						return nil, fmt.Errorf("verify server identity: %w", err)
+					}
+					c.publicKey = publicKey
+				} else if !d.AllowIdentitylessServer {
+					d.signalError(signaling, networkID, 37)
+					return nil, errors.New("identityless answer SDP not allowed")
 				}
 				for _, candidate := range desc.candidates {
 					// Non-trickle ICE connection such as Realms may include candidates in a single SDP.
@@ -221,13 +284,19 @@ func (d dialerConn) log() *slog.Logger {
 // signalError sends a SignalTypeError to the remote connection using the
 // provided [Signaling] implementation, remote network ID, and error code.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
-	_ = signaling.Signal(context.Background(), &Signal{
-		Type:         SignalTypeError,
-		Data:         strconv.Itoa(code),
-		ConnectionID: d.ConnectionID,
-		NetworkID:    networkID,
-	})
+	go func() {
+		ctx, cancel := context.WithTimeout(signaling.Context(), signalErrorTimeout)
+		defer cancel()
+		_ = signaling.Signal(ctx, &Signal{
+			Type:         SignalTypeError,
+			Data:         strconv.Itoa(code),
+			ConnectionID: d.ConnectionID,
+			NetworkID:    networkID,
+		})
+	}()
 }
+
+const signalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
 // then starts DTLS and SCTP using the parameters from the remote description.

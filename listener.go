@@ -2,6 +2,9 @@ package nethernet
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
+	"golang.org/x/crypto/ssh"
 )
 
 // ListenConfig encapsulates options for creating a new Listener through [ListenConfig.Listen].
@@ -41,6 +45,54 @@ type ListenConfig struct {
 	// to be returned (likely using [context.WithCancel] or [context.WithTimeout]). If the deadline of the context
 	// is exceeded, a Signal of SignalTypeError with ErrorCodeNegotiationTimeoutWaitingForAccept will be signaled back.
 	NegotiationContext func(parent context.Context) (context.Context, context.CancelFunc)
+
+	// IssueServerIdentity issues the identity presented to clients in SDP answers.
+	// The returned identity is used to produce the server-side 'a=identity' attribute.
+	// The token must contain the public key corresponding the [Identity.PrivateKey] in
+	// its 'cpk' claim.
+	//
+	// If set to nil, it is replaced to a function that automatically generates a
+	// temporary identity. Because the generated key is not saved, clients using
+	// Trust On First Use (TOFU) may treat each server restart as a different identity.
+	IssueServerIdentity func(ctx context.Context) (*Identity, error)
+
+	// VerifyClientToken verifies the token contained in a client's identity
+	// assertion and returns the public key populated in its 'cpk' claim.
+	// The returned public key is used to verify the fingerprint assertion
+	// carried in the client offer's 'a=identity' attribute.
+	//
+	// Unlike identity tokens issued by servers, client tokens are issued by
+	// Minecraft's authorization service and include additional information
+	// such as gamertag and XUID.
+	//
+	// These claims may be used to implement allowlists or blocklists.
+	// However, the same checks should also be enforced by the Minecraft protocol
+	// layer, since a malicious client may present a different token that
+	// is bound to the same public key.
+	//
+	// By default, this is set to a function that only extracts the public key
+	// from the 'cpk' claim in the JWT token. It does not perform cryptographic
+	// verification using the public keys exposed by Minecraft's authorization service,
+	// as this library does not provide access to that endpoint.
+	//
+	// This is still safe because the Minecraft protocol layer verifies the same
+	// token present in the Login packet's connection request and checks that the
+	// same public key was used in the 'cpk' claim. Even if an attacker replayed
+	// a token, they could not replace the 'cpk' claim without invalidating the JWT
+	// signature, and therefore would be unable to produce a valid signature for the DTLS
+	// fingerprint assertion.
+	VerifyClientToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)
+
+	// AllowAnonymous determines whether SDP offers without an 'a=identity'
+	// attribute are accepted.
+	// When set to false, all incoming connections must provide a valid identity
+	// assertion. When set to true, unauthenticated peers are allowed to connect.
+	//
+	// This may be useful for implementing offline-mode servers, but it removes
+	// the identity binding normally provided by NetherNet and may allow replay
+	// attacks against upstream protocols. It should therefore only be enabled
+	// in trusted environments.
+	AllowAnonymous bool
 
 	// ICEGatherPolicy limits which local ICE candidates are gathered for
 	// accepted connections.
@@ -73,6 +125,32 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 	}
 	if conf.API == nil {
 		conf.API = webrtc.NewAPI()
+	}
+	if conf.IssueServerIdentity == nil {
+		conf.Log.Warn("generating a new private key for this listener. a TOFU (Trust on First Use) prompt may be surfaced to players on first join")
+		privateKey, err := ecdsa.GenerateKey(elliptic.P384(), cryptorand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("generate private key: %w", err)
+		}
+		if conf.Log.Enabled(context.Background(), slog.LevelDebug) {
+			pub, err := ssh.NewPublicKey(privateKey.Public())
+			if err != nil {
+				return nil, fmt.Errorf("convert public key to SSH: %s", err)
+			}
+			conf.Log.Debug("newly generated a private key for this listener", "fingerprint", ssh.FingerprintSHA256(pub))
+		}
+		conf.IssueServerIdentity = func(ctx context.Context) (*Identity, error) {
+			return GenerateServerIdentity(privateKey, "self")
+		}
+	}
+	if conf.VerifyClientToken == nil {
+		conf.VerifyClientToken = func(ctx context.Context, token string) (*ecdsa.PublicKey, error) {
+			// We intentionally do not verify the JWT signature here and instead
+			// delegate that to the Minecraft protocol layer. Bedrock listeners should
+			// verify the GameServerToken included in the Login packet and ensure that
+			// its 'cpk' claim contains the same public key.
+			return claimPublicKey(token, false)
+		}
 	}
 
 	networkID := signaling.NetworkID()
@@ -309,6 +387,26 @@ func (l *Listener) handleOffer(signal *Signal) error {
 	}
 	c.description.dtls.Role = l.answererRole(desc.dtls.Role)
 
+	if desc.identity != nil {
+		publicKey, err := l.conf.VerifyClientToken(ctx, desc.identity.Assertion.Token)
+		if err != nil {
+			return wrapSignalError(fmt.Errorf("verify client token: %s", err), 37)
+		}
+		if err := desc.identity.verify(desc, publicKey); err != nil {
+			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), 37)
+		}
+		c.publicKey = publicKey
+	} else if !l.conf.AllowAnonymous {
+		return wrapSignalError(errors.New("nethernet: anonymous identity not allowed"), 37)
+	}
+	identity, err := l.conf.IssueServerIdentity(ctx)
+	if err != nil {
+		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), 37)
+	}
+	if err := identity.sign(c.description); err != nil {
+		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), 37)
+	}
+
 	// Register a callback function immediately since the remote peer
 	// may open data channels at any time while ICE candidates are being signaled.
 	var (
@@ -466,6 +564,10 @@ func (l *Listener) handleConn(conn *Conn, d *description, channelsReady <-chan s
 		}
 
 		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-conn.ctx.Done():
+			err = context.Cause(conn.ctx)
 		case <-l.closed:
 			_ = conn.Close()
 		case l.incoming <- conn:

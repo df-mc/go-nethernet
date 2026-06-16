@@ -69,3 +69,5 @@ fabric.properties
 .idea/httpRequests
 
 .vscode
+
+.clawpatch

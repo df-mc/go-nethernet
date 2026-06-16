@@ -2,9 +2,11 @@ package nethernet
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -48,6 +50,9 @@ type Conn struct {
 	// newConn builds it from the local parameters of each underlying transport.
 	description *description
 
+	// publicKey is the public key which identifies the remote entity behind this Conn.
+	publicKey *ecdsa.PublicKey
+
 	// candidateReceived notifies that the first candidate is received from the other
 	// end, indicating that the Conn is ready to start its transports.
 	candidateReceived chan struct{}
@@ -68,6 +73,9 @@ type Conn struct {
 	channels [messageReliabilityCapacity]*dataChannel
 	// channelsMu guards channels from concurrent read-write access during startup and closure.
 	channelsMu sync.RWMutex
+
+	readMu  sync.Mutex
+	readBuf []byte
 
 	// once ensures that the Conn is closed only once.
 	once sync.Once
@@ -90,13 +98,20 @@ type Conn struct {
 // Read receives a message from the 'ReliableDataChannel'. The bytes of the message data are copied to
 // the given data. An error may be returned if the Conn has been closed by [Conn.Close].
 func (conn *Conn) Read(b []byte) (n int, err error) {
-	pk, err := conn.Receive(MessageReliabilityReliable)
-	if err != nil {
-		return n, err
+	conn.readMu.Lock()
+	defer conn.readMu.Unlock()
+
+	if len(conn.readBuf) == 0 {
+		pk, err := conn.Receive(MessageReliabilityReliable)
+		if err != nil {
+			return n, err
+		}
+		conn.readBuf = pk
 	}
-	n = copy(b, pk)
-	if n < len(pk) {
-		return n, io.ErrShortBuffer
+	n = copy(b, conn.readBuf)
+	conn.readBuf = conn.readBuf[n:]
+	if len(conn.readBuf) == 0 {
+		conn.readBuf = nil
 	}
 	return n, nil
 }
@@ -135,6 +150,18 @@ func (conn *Conn) BatchHeader() []byte {
 // authenticated.
 func (conn *Conn) DisableEncryption() bool {
 	return true
+}
+
+// PublicKey returns the authenticated public key of the remote peer.
+//
+// The peer has proven possession of the corresponding private key
+// by signing the SDP fingerprint assertion used to bind its identity
+// to the DTLS certificates of this WebRTC peer connection.
+//
+// If the connection was established without identity assertion, nil
+// is returned.
+func (conn *Conn) PublicKey() *ecdsa.PublicKey {
+	return conn.publicKey
 }
 
 // Context returns the background context associated with the Conn.
@@ -441,7 +468,10 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 	return nil
 }
 
-const maxMessageSize = 10000
+// maxMessageSize is the maximum payload size for a single message segment.
+// This is 256KB (262144 bytes) minus 1 byte for the segment counter,
+// matching the 'a=max-message-size' value in the SDP sent by vanilla peer connections.
+const maxMessageSize = 262143
 
 // parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
 // It transforms the fields of the [sdp.SessionDescription] into a description, which can be
@@ -476,6 +506,20 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 		return nil, fmt.Errorf("invalid fingerprint: %s", attr)
 	}
 	fingerprintAlgorithm, fingerprintValue := fingerprint[0], fingerprint[1]
+
+	var identity *identityData
+	if attr, ok := d.Attribute("identity"); ok {
+		b, err := base64.StdEncoding.DecodeString(attr)
+		if err != nil {
+			return nil, fmt.Errorf("decode identity assertion in base64: %w", err)
+		}
+		if err := json.Unmarshal(b, &identity); err != nil {
+			return nil, fmt.Errorf("decode identity assertion: %w", err)
+		}
+		if identity == nil || !identity.Valid() {
+			return nil, fmt.Errorf("malformed identity attribute: %s", b)
+		}
+	}
 
 	attr, ok = m.Attribute("setup")
 	if !ok {
@@ -531,6 +575,7 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 		sctp: webrtc.SCTPCapabilities{
 			MaxMessageSize: uint32(maxMessageSize),
 		},
+		identity:   identity,
 		candidates: candidates,
 	}, nil
 }
@@ -630,6 +675,8 @@ type description struct {
 	dtls webrtc.DTLSParameters
 	sctp webrtc.SCTPCapabilities
 
+	identity *identityData
+
 	// candidates are inline ICE candidates included as SDP attributes.
 	candidates []webrtc.ICECandidate
 }
@@ -657,6 +704,13 @@ func (desc description) encode() ([]byte, error) {
 			sdp.NewPropertyAttribute(sdp.AttrKeyExtMapAllowMixed),
 			{Key: sdp.AttrKeyMsidSemantic, Value: " WMS"},
 		},
+	}
+	if desc.identity != nil {
+		b, err := json.Marshal(desc.identity)
+		if err != nil {
+			return nil, fmt.Errorf("encode identity assertion: %w", err)
+		}
+		d.WithValueAttribute("identity", base64.StdEncoding.EncodeToString(b))
 	}
 
 	media := &sdp.MediaDescription{
@@ -695,7 +749,7 @@ func (desc description) encode() ([]byte, error) {
 	media.WithValueAttribute(sdp.AttrKeyConnectionSetup, desc.connectionRole(desc.dtls.Role).String())
 	media.WithValueAttribute(sdp.AttrKeyMID, "0")
 	media.WithValueAttribute("sctp-port", "5000")
-	media.WithValueAttribute("max-message-size", strconv.FormatUint(uint64(desc.sctp.MaxMessageSize), 10))
+	media.WithValueAttribute("max-message-size", strconv.FormatUint(maxMessageSize+1, 10))
 
 	return d.WithMedia(media).Marshal()
 }
