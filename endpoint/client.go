@@ -16,13 +16,30 @@ import (
 	"github.com/df-mc/go-nethernet"
 )
 
+// ClientConfig represents a configuration for creating a Client.
 type ClientConfig struct {
-	HTTPClient  *http.Client
+	// HTTPClient is the HTTP client used for making HTTP requests to the remote servers.
+	// If nil, [http.DefaultClient] will be used instead.
+	HTTPClient *http.Client
+
+	// Credentials is an optional function that supplies ICE credentials
+	// to the ICE gatherer used by the peer connection.
+	// When nil, [Handler.Credentials] returns an empty [nethernet.Credentials]
+	// with no STUN/TURN servers, which may reduce NAT traversal reliability.
 	Credentials func(ctx context.Context) (*nethernet.Credentials, error)
-	Logger      *slog.Logger
-	NetworkID   string
+
+	// Logger is used to log messages produced when handling requests.
+	// If nil, it will be set from [slog.Default].
+	Logger *slog.Logger
+
+	// NetworkID is the identifier assigned to this Handler.
+	// It is used only for identifying Client and is never transmitted to clients.
+	// If empty, a random uint64 is generated and used.
+	NetworkID string
 }
 
+// New returns a new [Client] from the configuration.
+// The resulting [Client] can be passed to [nethernet.Dialer.DialContext].
 func (conf ClientConfig) New(u *url.URL) *Client {
 	if conf.HTTPClient == nil {
 		conf.HTTPClient = http.DefaultClient
@@ -41,11 +58,14 @@ func (conf ClientConfig) New(u *url.URL) *Client {
 	}
 }
 
+// NewClient creates a new [Client] with the default ClientConfig.
+// It is equivalent to calling ClientConfig{}.New().
 func NewClient(u *url.URL) *Client {
 	var conf ClientConfig
 	return conf.New(u)
 }
 
+// Client implements [nethernet.Signaling] using the HTTP endpoints exposed by a NetherNet server.
 type Client struct {
 	url  *url.URL
 	conf ClientConfig
@@ -55,6 +75,10 @@ type Client struct {
 	notifiersMu sync.RWMutex
 }
 
+// Signal sends a Signal to the remote endpoint.
+//
+// Only [nethernet.SignalTypeOffer] is supported. The returned SDP answer is delivered
+// to the Dialers registered to this Client.
 func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	switch signal.Type {
 	case nethernet.SignalTypeOffer:
@@ -140,6 +164,10 @@ func (c *Client) Context() context.Context {
 	return context.Background()
 }
 
+// Credentials returns a [nethernet.Credentials] using the [ClientConfig.Credentials]
+// if possible. Otherwise, it returns an empty [nethernet.Credentials].
+// It is optimal for the caller to provide [ClientConfig.Credentials] containing STUN/TURN
+// servers in order to stabilize WebRTC peer negotiations.
 func (c *Client) Credentials(ctx context.Context) (*nethernet.Credentials, error) {
 	if f := c.conf.Credentials; f != nil {
 		return f(ctx)
@@ -147,14 +175,20 @@ func (c *Client) Credentials(ctx context.Context) (*nethernet.Credentials, error
 	return &nethernet.Credentials{}, nil
 }
 
+// NetworkID returns a network ID assigned for this Client.
+// This is never transmitted to clients and is currently only
+// used for locally identifying this Client.
 func (c *Client) NetworkID() string {
 	return c.conf.NetworkID
 }
 
+// PongData is a no-op implementation of [nethernet.Signaling.PongData].
 func (c *Client) PongData([]byte) {
 	panic("nethernet/endpoint: Client.PongData: unsupported")
 }
 
+// notifySignal broadcasts a signal to Dialers registered to this Client.
+// Signals are dropped for notifiers whose channels are full to avoid deadlock.
 func (c *Client) notifySignal(signal *nethernet.Signal) {
 	c.notifiersMu.RLock()
 	for _, n := range c.notifiers {
