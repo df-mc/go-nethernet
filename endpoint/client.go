@@ -157,9 +157,6 @@ func (c *Client) Notify(ch chan<- *nethernet.Signal) (stop func()) {
 }
 
 // Context always returns [context.Background].
-// It would be nicer if we returned the context for the underlying HTTP server,
-// but neither [http.Server] nor [net.Listener] exposes a way to determine whether
-// it is closed, so client closure is currently not notified.
 func (c *Client) Context() context.Context {
 	return context.Background()
 }
