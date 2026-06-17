@@ -17,9 +17,13 @@ type Signaling interface {
 	// the signaling server as soon as possible.
 	Signal(ctx context.Context, signal *Signal) error
 
-	// Notify registers a channel so that can be used to receive incoming signals from remote networks.
-	// It also returns a function to stop receiving signals on the channel.
-	Notify(ch chan<- *Signal) (stop func())
+	// Notify registers and returns a channel for receiving incoming signals from
+	// remote networks. Each call creates an independent subscription; incoming
+	// signals are broadcast to all active subscriptions, not load-balanced
+	// between them. The returned stop function unregisters the channel and closes
+	// it after any in-flight delivery has finished. The stop function must be
+	// safe to call multiple times.
+	Notify() (signals <-chan *Signal, stop func())
 
 	// Context returns a context for Signaling that is canceled optionally with a cause when a fatal
 	// error has occurred on the signaling server. It is used by both Dialer and Listener to notify
