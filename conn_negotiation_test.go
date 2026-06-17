@@ -17,6 +17,111 @@ func TestDialListenerNonTrickleICE(t *testing.T) {
 	testDialListener(t, true)
 }
 
+func TestConcurrentDialersShareSignaling(t *testing.T) {
+	client, server := newMemorySignalingPair("1", "2")
+	defer client.close()
+	defer server.close()
+
+	l, err := (ListenConfig{}).Listen(server)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer l.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	accepted := make(chan net.Conn, 2)
+	acceptErr := make(chan error, 1)
+	go func() {
+		for range 2 {
+			conn, err := l.Accept()
+			if err != nil {
+				acceptErr <- err
+				return
+			}
+			accepted <- conn
+		}
+	}()
+
+	type dialResult struct {
+		conn *Conn
+		err  error
+	}
+	dialed := make(chan dialResult, 2)
+	for i := range 2 {
+		go func(connectionID uint64) {
+			conn, err := (Dialer{ConnectionID: connectionID}).DialContext(ctx, server.NetworkID(), client)
+			dialed <- dialResult{conn: conn, err: err}
+		}(uint64(i + 1))
+	}
+
+	clientConns := make([]*Conn, 0, 2)
+	for range 2 {
+		select {
+		case result := <-dialed:
+			if result.err != nil {
+				t.Fatalf("DialContext() error = %v", result.err)
+			}
+			clientConns = append(clientConns, result.conn)
+			defer result.conn.Close()
+		case <-ctx.Done():
+			t.Fatalf("DialContext() timed out: %v", ctx.Err())
+		}
+	}
+
+	serverConns := make([]net.Conn, 0, 2)
+	for range 2 {
+		select {
+		case conn := <-accepted:
+			serverConns = append(serverConns, conn)
+			defer conn.Close()
+		case err := <-acceptErr:
+			t.Fatalf("Accept() error = %v", err)
+		case <-ctx.Done():
+			t.Fatalf("Accept() timed out: %v", ctx.Err())
+		}
+	}
+
+	read := make(chan string, 2)
+	readErr := make(chan error, 2)
+	for _, conn := range serverConns {
+		go func(conn net.Conn) {
+			b := make([]byte, 32)
+			n, err := conn.Read(b)
+			if err != nil {
+				readErr <- err
+				return
+			}
+			read <- string(b[:n])
+		}(conn)
+	}
+
+	payloads := []string{"first", "second"}
+	for i, conn := range clientConns {
+		if _, err := conn.Write([]byte(payloads[i])); err != nil {
+			t.Fatalf("Write(%q) error = %v", payloads[i], err)
+		}
+	}
+
+	got := make(map[string]int)
+	for range 2 {
+		select {
+		case payload := <-read:
+			got[payload]++
+		case err := <-readErr:
+			t.Fatalf("Read() error = %v", err)
+		case <-ctx.Done():
+			t.Fatalf("Read() timed out: %v", ctx.Err())
+		}
+	}
+	for _, payload := range payloads {
+		if got[payload] != 1 {
+			t.Fatalf("received %q %d times, want once; all payloads: %#v", payload, got[payload], got)
+		}
+	}
+}
+
 func testDialListener(t *testing.T, disableTrickle bool) {
 	t.Helper()
 
