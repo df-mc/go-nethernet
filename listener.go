@@ -135,7 +135,7 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		if conf.Log.Enabled(context.Background(), slog.LevelDebug) {
 			pub, err := ssh.NewPublicKey(privateKey.Public())
 			if err != nil {
-				return nil, fmt.Errorf("convert public key to SSH: %s", err)
+				return nil, fmt.Errorf("convert public key to SSH: %w", err)
 			}
 			conf.Log.Debug("newly generated a private key for this listener", "fingerprint", ssh.FingerprintSHA256(pub))
 		}
@@ -390,7 +390,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 	if desc.identity != nil {
 		publicKey, err := l.conf.VerifyClientToken(ctx, desc.identity.Assertion.Token)
 		if err != nil {
-			return wrapSignalError(fmt.Errorf("verify client token: %s", err), 37)
+			return wrapSignalError(fmt.Errorf("verify client token: %w", err), 37)
 		}
 		if err := desc.identity.verify(desc, publicKey); err != nil {
 			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), 37)
