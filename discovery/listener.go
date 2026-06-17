@@ -72,7 +72,7 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		addresses: make(map[uint64]address),
 
-		notifiers: make(map[uint32]notifier),
+		notifiers: make(map[uint32]chan *nethernet.Signal),
 		responses: make(map[uint64][]byte),
 
 		closed: make(chan struct{}),
@@ -115,7 +115,7 @@ type Listener struct {
 	// It is used as the ID for notifier channels and should not be decreased at all.
 	// notifyCount should be atomically accessed by holding a lock on notifiersMu.
 	notifyCount uint32
-	notifiers   map[uint32]notifier
+	notifiers   map[uint32]chan *nethernet.Signal
 	notifiersMu sync.RWMutex
 
 	// responses stores a map whose keys are NetherNet network IDs which value is an
@@ -127,12 +127,6 @@ type Listener struct {
 	closed chan struct{}
 	// once ensures the Listener is closed only once.
 	once sync.Once
-}
-
-// notifier holds a buffered channel for relaying incoming signals to a
-// [nethernet.Listener].
-type notifier struct {
-	ch chan *nethernet.Signal
 }
 
 // Signal sends a NetherNet signal to the corresponding address for the network ID.
@@ -171,7 +165,7 @@ func (l *Listener) Notify() (<-chan *nethernet.Signal, func()) {
 
 	l.notifiersMu.Lock()
 	i := l.notifyCount
-	l.notifiers[i] = notifier{ch: signals}
+	l.notifiers[i] = signals
 	l.notifyCount++
 	l.notifiersMu.Unlock()
 
@@ -191,12 +185,12 @@ func (l *Listener) Context() context.Context {
 // is internally assigned for the notifier and contained in the stop function returned
 // by [Listener.Notify]. It should not be called by anywhere else.
 func (l *Listener) stop(i uint32) {
-	n, ok := l.notifiers[i]
+	ch, ok := l.notifiers[i]
 	if !ok {
 		return
 	}
 	delete(l.notifiers, i)
-	close(n.ch)
+	close(ch)
 }
 
 // Credentials returns a nil *nethernet.Credentials with a nil error if the Listener is not closed.
@@ -333,9 +327,9 @@ func (l *Listener) handleMessage(pk *MessagePacket, senderID uint64) error {
 	signal.NetworkID = strconv.FormatUint(senderID, 10)
 
 	l.notifiersMu.RLock()
-	for _, n := range l.notifiers {
+	for _, ch := range l.notifiers {
 		select {
-		case n.ch <- signal:
+		case ch <- signal:
 		default:
 			// Drop when notifier is backed up to avoid deadlocks and keep packet processing moving.
 			l.conf.Log.Debug("dropping signal due to notifier being backed up", slog.String("signal", signal.String()))

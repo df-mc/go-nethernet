@@ -81,7 +81,7 @@ func TestNotifyBroadcastsToMultipleSubscribers(t *testing.T) {
 	)
 	l := &Listener{
 		conf:      ListenConfig{NetworkID: localID},
-		notifiers: make(map[uint32]notifier),
+		notifiers: make(map[uint32]chan *nethernet.Signal),
 	}
 
 	first, stopFirst := l.Notify()
