@@ -112,7 +112,7 @@ type Listener struct {
 	addressesMu sync.RWMutex
 
 	// notifyCount counts the total notifiers registered for the Listener.
-	// It is used as the ID for [nethernet.Notifier] and should not be decreased at all.
+	// It is used as the ID for notifier channels and should not be decreased at all.
 	// notifyCount should be atomically accessed by holding a lock on notifiersMu.
 	notifyCount uint32
 	notifiers   map[uint32]notifier
@@ -129,12 +129,10 @@ type Listener struct {
 	once sync.Once
 }
 
-// notifier holds a buffered input channel and a caller-provided output
-// channel for relaying incoming signals to a [nethernet.Listener].
+// notifier holds a buffered channel for relaying incoming signals to a
+// [nethernet.Listener].
 type notifier struct {
-	in   chan *nethernet.Signal
-	out  chan<- *nethernet.Signal
-	stop chan struct{}
+	ch chan *nethernet.Signal
 }
 
 // Signal sends a NetherNet signal to the corresponding address for the network ID.
@@ -165,43 +163,19 @@ func (l *Listener) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	}
 }
 
-// Notify registers a channel to receive incoming NetherNet signals.
+// Notify registers and returns a channel to receive incoming NetherNet signals.
 //
-// The returned stop function unregisters the channel and closes it. Callers must not close
-// the channel themselves.
-func (l *Listener) Notify(signals chan<- *nethernet.Signal) (stop func()) {
+// The returned stop function unregisters the channel and closes it.
+func (l *Listener) Notify() (<-chan *nethernet.Signal, func()) {
+	signals := make(chan *nethernet.Signal, 64)
+
 	l.notifiersMu.Lock()
 	i := l.notifyCount
-	n := notifier{
-		// Buffer notifications so packet handling never blocks under lock.
-		in:   make(chan *nethernet.Signal, 64),
-		out:  signals,
-		stop: make(chan struct{}),
-	}
-	l.notifiers[i] = n
+	l.notifiers[i] = notifier{ch: signals}
 	l.notifyCount++
 	l.notifiersMu.Unlock()
 
-	go func() {
-		defer close(signals)
-		for {
-			select {
-			case <-n.stop:
-				return
-			case sig, ok := <-n.in:
-				if !ok {
-					return
-				}
-				select {
-				case <-n.stop:
-					return
-				case n.out <- sig:
-				}
-			}
-		}
-	}()
-
-	return func() {
+	return signals, func() {
 		l.notifiersMu.Lock()
 		l.stop(i)
 		l.notifiersMu.Unlock()
@@ -222,8 +196,7 @@ func (l *Listener) stop(i uint32) {
 		return
 	}
 	delete(l.notifiers, i)
-	close(n.stop)
-	close(n.in)
+	close(n.ch)
 }
 
 // Credentials returns a nil *nethernet.Credentials with a nil error if the Listener is not closed.
@@ -362,7 +335,7 @@ func (l *Listener) handleMessage(pk *MessagePacket, senderID uint64) error {
 	l.notifiersMu.RLock()
 	for _, n := range l.notifiers {
 		select {
-		case n.in <- signal:
+		case n.ch <- signal:
 		default:
 			// Drop when notifier is backed up to avoid deadlocks and keep packet processing moving.
 			l.conf.Log.Debug("dropping signal due to notifier being backed up", slog.String("signal", signal.String()))
