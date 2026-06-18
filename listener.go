@@ -170,8 +170,8 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		closed: make(chan struct{}),
 	}
 
-	signals := make(chan *Signal, 64)
-	l.stop = signaling.Notify(signals)
+	signals, stop := signaling.Notify()
+	l.stop = stop
 	go l.listen(signals)
 
 	return l, nil
@@ -477,9 +477,7 @@ func (l *Listener) answererRole(role webrtc.DTLSRole) webrtc.DTLSRole {
 }
 
 // handleSignal looks up for a Conn that matches the ConnectionID and NetworkID of the Signal.
-// If a matching connection is found, it notifies the Signal by calling Conn.handleSignal. It
-// is called by the default handler in listenerNotifier.NotifySignal when the Signal type does
-// not match any specific handling cases.
+// If a matching connection is found, it notifies the Signal by calling Conn.handleSignal.
 func (l *Listener) handleSignal(signal *Signal) error {
 	addr := &Addr{
 		ConnectionID: signal.ConnectionID,
