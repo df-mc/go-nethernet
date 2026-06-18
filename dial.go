@@ -269,7 +269,7 @@ type dialerConn struct {
 	stop func()
 }
 
-// handleClose stops receiving notifications in Notifier from Signaling for incoming signals and errors.
+// handleClose stops receiving notifications from Signaling for incoming signals and errors.
 func (d dialerConn) handleClose(*Conn) {
 	d.stop()
 }
@@ -372,13 +372,12 @@ func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal) {
 // receiving notifications will be returned.
 func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Signal, func()) {
 	var (
-		signals     = make(chan *Signal, 64)
 		filtered    = make(chan *Signal, 16)
 		ctx, cancel = context.WithCancel(context.Background())
 
 		once sync.Once
 	)
-	stop := signaling.Notify(signals)
+	signals, stop := signaling.Notify()
 
 	go func() {
 		defer close(filtered)
