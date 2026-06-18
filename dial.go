@@ -226,7 +226,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					}
 				}
 
-				go d.handleConn(c, signals)
+				go d.handleConn(c, signals, signaling.Context())
 
 				select {
 				case <-c.ctx.Done():
@@ -343,11 +343,16 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 }
 
 // handleConn handles incoming Signals signaled from the remote connection and calls Conn.handleSignal
-// to handle them within the Conn. It returns when the Conn context is canceled.
-func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal) {
+// to handle them within the Conn. It returns when the Conn or Signaling context is canceled.
+func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal, signalingCtx context.Context) {
 	for {
 		select {
 		case <-conn.ctx.Done():
+			return
+		case <-signalingCtx.Done():
+			if err := conn.close(context.Cause(signalingCtx)); err != nil {
+				conn.log.Error("error closing conn", slog.Any("error", err))
+			}
 			return
 		case signal, ok := <-signals:
 			if !ok {
@@ -371,39 +376,44 @@ func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal) {
 // the same network ID and same ConnectionID of Dialer. A channel for filtered signals and a function to stop
 // receiving notifications will be returned.
 func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Signal, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
 	var (
-		filtered    = make(chan *Signal, 16)
-		ctx, cancel = context.WithCancel(context.Background())
-
+		notifier = &dialerNotifier{
+			networkID:    networkID,
+			connectionID: d.ConnectionID,
+			signals:      make(chan *Signal, 16),
+			ctx:          ctx,
+			log:          d.Log,
+		}
 		once sync.Once
 	)
-	signals, stop := signaling.Notify()
+	stop := signaling.Notify(notifier)
 
-	go func() {
-		defer close(filtered)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case signal, ok := <-signals:
-				if !ok {
-					return
-				}
-				if signal.NetworkID != networkID || signal.ConnectionID != d.ConnectionID {
-					continue
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case filtered <- signal:
-				}
-			}
-		}
-	}()
-	return filtered, func() {
+	return notifier.signals, func() {
 		once.Do(func() {
-			stop()
 			cancel()
+			stop()
 		})
+	}
+}
+
+type dialerNotifier struct {
+	networkID    string
+	connectionID uint64
+	signals      chan *Signal
+	ctx          context.Context
+	log          *slog.Logger
+}
+
+func (d *dialerNotifier) NotifySignal(signal *Signal) {
+	if signal.NetworkID != d.networkID || signal.ConnectionID != d.connectionID {
+		return
+	}
+	delivered := *signal
+	select {
+	case d.signals <- &delivered:
+	case <-d.ctx.Done():
+	default:
+		d.log.Debug("dropping signal because channel buffer is full", slog.Any("signal", signal))
 	}
 }

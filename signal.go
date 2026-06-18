@@ -17,13 +17,12 @@ type Signaling interface {
 	// the signaling server as soon as possible.
 	Signal(ctx context.Context, signal *Signal) error
 
-	// Notify registers and returns a channel for receiving incoming signals from
-	// remote networks. Each call creates an independent subscription; incoming
-	// signals are broadcast to all active subscriptions, not load-balanced
-	// between them. The returned stop function unregisters the channel and closes
-	// it after any in-flight delivery has finished. The stop function must be
-	// safe to call multiple times.
-	Notify() (signals <-chan *Signal, stop func())
+	// Notify registers n for receiving incoming signals from remote networks.
+	// Each call creates an independent subscription; incoming signals are
+	// broadcast to all active subscriptions, not load-balanced between them.
+	// The returned stop function unregisters n and must be safe to call
+	// multiple times.
+	Notify(n Notifier) (stop func())
 
 	// Context returns a context for Signaling that is canceled optionally with a cause when a fatal
 	// error has occurred on the signaling server. It is used by both Dialer and Listener to notify
@@ -42,6 +41,13 @@ type Signaling interface {
 	// PongData sets the server data in the format of a RakNet pong response. It is used by the Listener
 	// to respond to a ping request in the correct format.
 	PongData(b []byte)
+}
+
+// Notifier receives incoming Signals from a Signaling implementation.
+type Notifier interface {
+	// NotifySignal handles an incoming Signal from a remote network. It must
+	// return promptly and must not block the Signaling implementation.
+	NotifySignal(signal *Signal)
 }
 
 // trickleICEDisabler is implemented by Signaling when they're not capable

@@ -54,7 +54,7 @@ func (conf ClientConfig) New(u *url.URL) *Client {
 		url:  u,
 		conf: conf,
 
-		notifiers: make(map[uint32]chan<- *nethernet.Signal),
+		notifiers: make(map[uint32]nethernet.Notifier),
 	}
 }
 
@@ -70,7 +70,7 @@ type Client struct {
 	url  *url.URL
 	conf ClientConfig
 
-	notifiers   map[uint32]chan<- *nethernet.Signal
+	notifiers   map[uint32]nethernet.Notifier
 	notifyCount uint32
 	notifiersMu sync.RWMutex
 }
@@ -106,11 +106,11 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		if len(b) == 0 {
 			return errors.New("missing SDP answer in response body")
 		}
-		if errorCode, err := strconv.ParseUint(string(b), 10, 32); err != nil {
+		if errorCode, err := strconv.ParseUint(string(b), 10, 32); err == nil {
 			return fmt.Errorf("negotiation failed with error code: %d", errorCode)
 		}
 
-		go c.notifySignal(&nethernet.Signal{
+		c.notifySignal(&nethernet.Signal{
 			Type:         nethernet.SignalTypeAnswer,
 			ConnectionID: signal.ConnectionID,
 			Data:         string(b),
@@ -137,22 +137,24 @@ func (c *Client) DisableTrickleICE() bool {
 	return true
 }
 
-// Notify registers a channel to receive incoming NetherNet signals.
-//
-// The returned stop function unregisters the channel and closes it. Callers must not close
-// the channel themselves.
-func (c *Client) Notify(ch chan<- *nethernet.Signal) (stop func()) {
+// Notify registers n to receive incoming NetherNet signals.
+func (c *Client) Notify(n nethernet.Notifier) (stop func()) {
+	if n == nil {
+		panic("nethernet/endpoint: Client.Notify: nil Notifier")
+	}
 	c.notifiersMu.Lock()
 	i := c.notifyCount
 	c.notifyCount++
-	c.notifiers[i] = ch
+	c.notifiers[i] = n
 	c.notifiersMu.Unlock()
 
+	var once sync.Once
 	return func() {
-		c.notifiersMu.Lock()
-		delete(c.notifiers, i)
-		c.notifiersMu.Unlock()
-		close(ch)
+		once.Do(func() {
+			c.notifiersMu.Lock()
+			delete(c.notifiers, i)
+			c.notifiersMu.Unlock()
+		})
 	}
 }
 
@@ -185,16 +187,14 @@ func (c *Client) PongData([]byte) {
 }
 
 // notifySignal broadcasts a signal to Dialers registered to this Client.
-// Signals are dropped for notifiers whose channels are full to avoid deadlock.
 func (c *Client) notifySignal(signal *nethernet.Signal) {
 	c.notifiersMu.RLock()
+	notifiers := make([]nethernet.Notifier, 0, len(c.notifiers))
 	for _, n := range c.notifiers {
-		select {
-		case n <- signal:
-		default:
-			// Drop when notifier is backed up to avoid deadlocks and keep packet processing moving.
-			c.conf.Logger.Debug("dropping signal due to notifier being backed up", slog.String("networkID", signal.NetworkID), slog.String("signal", signal.String()))
-		}
+		notifiers = append(notifiers, n)
 	}
 	c.notifiersMu.RUnlock()
+	for _, n := range notifiers {
+		n.NotifySignal(signal)
+	}
 }

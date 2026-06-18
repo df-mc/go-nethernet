@@ -166,13 +166,14 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		id:        id,
 
 		incoming: make(chan *Conn),
+		signals:  make(chan *Signal, 64),
 
 		closed: make(chan struct{}),
 	}
 
-	signals, stop := signaling.Notify()
+	stop := signaling.Notify(l)
 	l.stop = stop
-	go l.listen(signals)
+	go l.listen()
 
 	return l, nil
 }
@@ -189,6 +190,7 @@ type Listener struct {
 	connections sync.Map
 
 	incoming chan *Conn
+	signals  chan *Signal
 
 	stop   func()
 	closed chan struct{}
@@ -271,11 +273,22 @@ func (l *Listener) PongData(b []byte) {
 	l.signaling.PongData(b)
 }
 
-// listen receives incoming signals sent from remote networks in the channel.
+// NotifySignal handles an incoming Signal from the remote network.
+func (l *Listener) NotifySignal(signal *Signal) {
+	select {
+	case l.signals <- signal:
+	case <-l.Context().Done():
+	case <-l.signaling.Context().Done():
+	default:
+		l.log().Warn("dropping signal because channel buffer is full", slog.Any("signal", signal))
+	}
+}
+
+// listen receives incoming signals sent from remote networks.
 // It is called as a goroutine from [ListenConfig.Listen] and initiates all incoming
 // connections from offers. When either the listener is closed or the signaling context
 // is canceled, the goroutine will automatically break.
-func (l *Listener) listen(signals <-chan *Signal) {
+func (l *Listener) listen() {
 	for {
 		select {
 		case <-l.closed:
@@ -288,13 +301,7 @@ func (l *Listener) listen(signals <-chan *Signal) {
 					slog.Any("error", err))
 			}
 			return
-		case signal, ok := <-signals:
-			if !ok {
-				if err := l.Close(); err != nil {
-					l.conf.Log.Error("error closing listener", slog.Any("error", err))
-				}
-				return
-			}
+		case signal := <-l.signals:
 			var err error
 			switch signal.Type {
 			case SignalTypeOffer:
