@@ -283,7 +283,7 @@ func encodePublicKey(publicKey *ecdsa.PublicKey) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
-// parsePubicKey decodes a base64-encoded string as an ECDSA public key.
+// parsePublicKey decodes a base64-encoded string as an ECDSA public key.
 // It returns an error when the input is malformed or is not an ECDSA public key.
 func parsePublicKey(s string) (*ecdsa.PublicKey, error) {
 	b, err := base64.StdEncoding.DecodeString(s)
