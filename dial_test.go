@@ -67,14 +67,8 @@ func (s *blockingErrorSignaling) Signal(ctx context.Context, signal *Signal) err
 	return ctx.Err()
 }
 
-func (*blockingErrorSignaling) Notify() (<-chan *Signal, func()) {
-	signals := make(chan *Signal)
-	var once sync.Once
-	return signals, func() {
-		once.Do(func() {
-			close(signals)
-		})
-	}
+func (*blockingErrorSignaling) Notify(Notifier) func() {
+	return func() {}
 }
 
 func (s *blockingErrorSignaling) Context() context.Context {

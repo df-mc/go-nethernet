@@ -81,12 +81,14 @@ func TestNotifyBroadcastsToMultipleSubscribers(t *testing.T) {
 	)
 	l := &Listener{
 		conf:      ListenConfig{NetworkID: localID},
-		notifiers: make(map[uint32]chan *nethernet.Signal),
+		notifiers: make(map[uint32]nethernet.Notifier),
 	}
 
-	first, stopFirst := l.Notify()
+	first := newSignalRecorder()
+	stopFirst := l.Notify(first)
 	defer stopFirst()
-	second, stopSecond := l.Notify()
+	second := newSignalRecorder()
+	stopSecond := l.Notify(second)
 	defer stopSecond()
 
 	signal := &nethernet.Signal{
@@ -101,25 +103,33 @@ func TestNotifyBroadcastsToMultipleSubscribers(t *testing.T) {
 	assertSignalReceived(t, second, signal, senderID)
 
 	stopFirst()
-	if _, ok := <-first; ok {
-		t.Fatal("first subscription still open after stop")
-	}
 
 	signal.ConnectionID = 43
 	if err := l.handleMessage(&MessagePacket{RecipientID: localID, Data: signal.String()}, senderID); err != nil {
 		t.Fatalf("handleMessage after stop: %v", err)
 	}
+	assertNoSignalReceived(t, first)
 	assertSignalReceived(t, second, signal, senderID)
 }
 
-func assertSignalReceived(t *testing.T, signals <-chan *nethernet.Signal, want *nethernet.Signal, senderID uint64) {
+type signalRecorder struct {
+	signals chan *nethernet.Signal
+}
+
+func newSignalRecorder() *signalRecorder {
+	return &signalRecorder{signals: make(chan *nethernet.Signal, 4)}
+}
+
+func (r *signalRecorder) NotifySignal(signal *nethernet.Signal) {
+	delivered := *signal
+	r.signals <- &delivered
+}
+
+func assertSignalReceived(t *testing.T, recorder *signalRecorder, want *nethernet.Signal, senderID uint64) {
 	t.Helper()
 
 	select {
-	case got, ok := <-signals:
-		if !ok {
-			t.Fatal("signal channel closed")
-		}
+	case got := <-recorder.signals:
 		if got.Type != want.Type {
 			t.Fatalf("signal type = %q, want %q", got.Type, want.Type)
 		}
@@ -135,5 +145,15 @@ func assertSignalReceived(t *testing.T, signals <-chan *nethernet.Signal, want *
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for signal")
+	}
+}
+
+func assertNoSignalReceived(t *testing.T, recorder *signalRecorder) {
+	t.Helper()
+
+	select {
+	case signal := <-recorder.signals:
+		t.Fatalf("unexpected signal after stop: %#v", signal)
+	case <-time.After(time.Millisecond * 50):
 	}
 }
