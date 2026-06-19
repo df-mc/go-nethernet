@@ -301,6 +301,12 @@ func (h *Handler) negotiate(ctx context.Context, networkID, offer string) (*neth
 
 	select {
 	case <-ctx.Done():
+		notifier.NotifySignal(&nethernet.Signal{
+			Type:         nethernet.SignalTypeError,
+			ConnectionID: signal.ConnectionID,
+			Data:         strconv.FormatUint(nethernet.ErrorCodeNegotiationTimeoutWaitingForResponse, 10),
+			NetworkID:    signal.NetworkID,
+		})
 		return nil, ctx.Err()
 	case result := <-ch:
 		return result, nil
