@@ -132,6 +132,9 @@ func (h *Handler) Notify(n nethernet.Notifier) (stop func()) {
 	if n == nil {
 		panic("nethernet/endpoint: Handler.Notify: nil Notifier")
 	}
+	if _, ok := n.(*nethernet.Listener); !ok {
+		panic(fmt.Sprintf("nethernet/endpoint: Handler can only be used with *nethernet.Listener: %T", n))
+	}
 	h.notifierMu.Lock()
 	if h.notifier != nil {
 		h.notifierMu.Unlock()
