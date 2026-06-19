@@ -19,8 +19,9 @@ func init() {
 	flag.Parse()
 }
 
-// main is a program that demonstrates a client connecting to
-// the server over NetherNet via HTTP signaling.
+// main is a program that demonstrates a client connecting to the server over NetherNet
+// using HTTP endpoint as the signaling method. The server must be running in offline mode
+// since it does not perform identity assertion.
 func main() {
 	address := flag.Arg(0)
 	if address == "" {

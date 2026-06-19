@@ -136,7 +136,7 @@ func (h *Handler) Notify(n nethernet.Notifier) (stop func()) {
 	if n == nil {
 		panic("nethernet/endpoint: Handler.Notify: nil Notifier")
 	}
-	//noinspection GoBoolExpressions enableHandlerNotifyCheck can be boolean in testing environment.
+	//noinspection GoBoolExpressions enableHandlerNotifyCheck can be false in testing environment.
 	if _, ok := n.(*nethernet.Listener); enableHandlerNotifyCheck && !ok {
 		panic(fmt.Sprintf("nethernet/endpoint: Handler can only be used with *nethernet.Listener: %T", n))
 	}

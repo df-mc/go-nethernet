@@ -14,6 +14,9 @@ import (
 
 func TestClientSignalDeliversSDPAnswer(t *testing.T) {
 	enableHandlerNotifyCheck = false
+	t.Cleanup(func() {
+		enableHandlerNotifyCheck = true
+	})
 
 	const answer = "v=0\r\ns=-\r\n"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +72,9 @@ func TestClientSignalDeliversSDPAnswer(t *testing.T) {
 
 func TestHandlerServesSDPAnswer(t *testing.T) {
 	enableHandlerNotifyCheck = false
+	t.Cleanup(func() {
+		enableHandlerNotifyCheck = true
+	})
 
 	const answer = "v=0\r\ns=-\r\n"
 	handler := NewHandler()
