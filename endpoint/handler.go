@@ -127,12 +127,17 @@ func (h *Handler) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	}
 }
 
+// enableHandlerNotifyCheck determines whether to ensure that the [nethernet.Notifier]
+// passed to [Handler.Notify] is [nethernet.Listener]. It is used for testing.
+var enableHandlerNotifyCheck = true
+
 // Notify registers n to receive incoming HTTP endpoint offers.
 func (h *Handler) Notify(n nethernet.Notifier) (stop func()) {
 	if n == nil {
 		panic("nethernet/endpoint: Handler.Notify: nil Notifier")
 	}
-	if _, ok := n.(*nethernet.Listener); !ok {
+	//noinspection GoBoolExpressions enableHandlerNotifyCheck can be boolean in testing environment.
+	if _, ok := n.(*nethernet.Listener); enableHandlerNotifyCheck && !ok {
 		panic(fmt.Sprintf("nethernet/endpoint: Handler can only be used with *nethernet.Listener: %T", n))
 	}
 	h.notifierMu.Lock()

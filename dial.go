@@ -379,10 +379,10 @@ func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Si
 	ctx, cancel := context.WithCancel(context.Background())
 	var (
 		notifier = &dialerNotifier{
-			networkID:    networkID,
-			connectionID: d.ConnectionID,
-			signals:      make(chan *Signal, 16),
-			ctx:          ctx,
+			Dialer:    d,
+			networkID: networkID,
+			signals:   make(chan *Signal, 64),
+			ctx:       ctx,
 		}
 		once sync.Once
 	)
@@ -409,11 +409,8 @@ type dialerNotifier struct {
 	ctx context.Context
 
 	// networkID is the remote network ID used to filter incoming signals.
-	// Along with connectionID, it is used to multiplex signals matching both identifiers.
+	// Along with [Dialer.ConnectionID], it is used to multiplex signals matching both identifiers.
 	networkID string
-	// connectionID is the unique ID assigned for this connection establishment.
-	// Along with networkID, it is used to multiplex signals matching both identifiers.
-	connectionID uint64
 }
 
 // NotifySignal notifies an incoming Signal received from the Signaling implementation.

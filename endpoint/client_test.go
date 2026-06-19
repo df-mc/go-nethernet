@@ -13,6 +13,8 @@ import (
 )
 
 func TestClientSignalDeliversSDPAnswer(t *testing.T) {
+	enableHandlerNotifyCheck = false
+
 	const answer = "v=0\r\ns=-\r\n"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -66,6 +68,8 @@ func TestClientSignalDeliversSDPAnswer(t *testing.T) {
 }
 
 func TestHandlerServesSDPAnswer(t *testing.T) {
+	enableHandlerNotifyCheck = false
+
 	const answer = "v=0\r\ns=-\r\n"
 	handler := NewHandler()
 	stop := handler.Notify(notifierFunc(func(signal *nethernet.Signal) {
