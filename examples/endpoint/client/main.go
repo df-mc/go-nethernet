@@ -39,7 +39,7 @@ func main() {
 	client := endpoint.NewClient(u)
 
 	slog.Info("establishing connection over NetherNet... send an interrupt signal (Ctrl+C) to abort", "url", u)
-	conn, err := nethernet.Dialer{DisableTrickleICE: true}.DialContext(ctx, "", client)
+	conn, err := nethernet.Dialer{DisableTrickleICE: true}.DialContext(ctx, client.NetworkID(), client)
 	if err != nil {
 		panic(err)
 	}
