@@ -239,8 +239,8 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 	// Wait until the Listener generates an answer SDP for the connection.
 	switch signal.Type {
 	case nethernet.SignalTypeAnswer:
-		w.Header().Set("Content-Type", "application/sdp")
 		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/sdp")
 		_, _ = w.Write([]byte(signal.Data))
 	case nethernet.SignalTypeError:
 		writeText(w, http.StatusBadRequest, fmt.Sprintf("Negotiation failed with error code: %s", signal.Data))
@@ -263,8 +263,8 @@ func (h *Handler) DisableTrickleICE() bool {
 // It also sets the 'Content-Type' header to 'text/plain' so the HTTP server can skip
 // inferring the content type for the response body.
 func writeText(w http.ResponseWriter, statusCode int, text string) {
-	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(statusCode)
+	w.Header().Set("Content-Type", "text/plain")
 	_, _ = w.Write([]byte(text))
 }
 
