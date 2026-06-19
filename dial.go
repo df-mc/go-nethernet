@@ -383,7 +383,6 @@ func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Si
 			connectionID: d.ConnectionID,
 			signals:      make(chan *Signal, 16),
 			ctx:          ctx,
-			log:          d.Log,
 		}
 		once sync.Once
 	)
@@ -397,23 +396,36 @@ func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Si
 	}
 }
 
+// dialerNotifier notifies incoming Signals and errors.
 type dialerNotifier struct {
-	networkID    string
+	Dialer
+
+	// signals is the channel which filtered signals are sent to the
+	// [Dialer.DialContext] caller.
+	signals chan *Signal
+
+	// ctx is a background context for this notifier which is canceled
+	// when the connection is closed or the notifier stops receiving signals.
+	ctx context.Context
+
+	// networkID is the remote network ID used to filter incoming signals.
+	// Along with connectionID, it is used to multiplex signals matching both identifiers.
+	networkID string
+	// connectionID is the unique ID assigned for this connection establishment.
+	// Along with networkID, it is used to multiplex signals matching both identifiers.
 	connectionID uint64
-	signals      chan *Signal
-	ctx          context.Context
-	log          *slog.Logger
 }
 
+// NotifySignal notifies an incoming Signal received from the Signaling implementation.
 func (d *dialerNotifier) NotifySignal(signal *Signal) {
-	if signal.NetworkID != d.networkID || signal.ConnectionID != d.connectionID {
+	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
 		return
 	}
-	delivered := *signal
 	select {
-	case d.signals <- &delivered:
+	case d.signals <- signal:
 	case <-d.ctx.Done():
+		return
 	default:
-		d.log.Debug("dropping signal because channel buffer is full", slog.Any("signal", signal))
+		d.Log.Warn("dropping signal because channel buffer is full", slog.Any("signal", signal))
 	}
 }
