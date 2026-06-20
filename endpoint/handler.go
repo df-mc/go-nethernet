@@ -2,6 +2,7 @@ package endpoint
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -75,6 +76,44 @@ func NewHandler() *Handler {
 	return c.New()
 }
 
+// ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified address
+// using the TLS certificate and key file.
+func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read certificate key pair: %w", err)
+	}
+	l, err := tls.Listen("tcp", address, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	h := conf.New()
+	var cancel context.CancelCauseFunc
+	h.ctx, cancel = context.WithCancelCause(context.Background())
+	server := &http.Server{Handler: h}
+	// Call [http.Server.Serve] in a goroutine since it is a blocking method.
+	go func() {
+		if err := server.Serve(l); err != nil {
+			cancel(err)
+		}
+	}()
+	h.closeFunc = func() error {
+		return server.Close()
+	}
+	return h, nil
+}
+
+// ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified
+// address using the TLS certificate and key file. It is equivalent of
+// calling HandlerConfig{}.ServeTLS().
+func ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
+	var conf HandlerConfig
+	return conf.ServeTLS(address, certFile, keyFile)
+}
+
 // Handler is an [http.Handler] that negotiates incoming NetherNet connections
 // over HTTP. Callers can create a Handler from [NewHandler] or [HandlerConfig.New],
 // then pass it to [http.ListenAndServeTLS] or assign to [http.Server.Handler].
@@ -94,6 +133,9 @@ type Handler struct {
 	mux *http.ServeMux
 	// conf is the HandlerConfig used to create this Handler.
 	conf HandlerConfig
+
+	closeFunc func() error
+	ctx       context.Context
 
 	// notifier is the active Listener receiving HTTP endpoint offers.
 	// The HTTP request-response model supports only one Listener because
@@ -162,13 +204,21 @@ func (h *Handler) Notify(n nethernet.Notifier) (stop func()) {
 	}
 }
 
-// Context always returns [context.Background].
-// It would be nicer if we returned the context for the underlying HTTP server,
-// but neither [http.Server] nor [net.Listener] exposes a way to determine whether
-// it is closed, so callers must serve HTTP requests in a goroutine and call Close
-// in [nethernet.Listener.Close] when it's done.
+// Context returns the background context of the underlying HTTP server, if one is bound
+// to this Handler. Otherwise, Context always returns [context.Background].
 func (h *Handler) Context() context.Context {
-	return context.Background()
+	if h.ctx == nil {
+		return context.Background()
+	}
+	return h.ctx
+}
+
+// Close closes the underlying HTTP server, if one is bound. Otherwise, Close is no-op.
+func (h *Handler) Close() error {
+	if h.closeFunc == nil {
+		return nil
+	}
+	return h.closeFunc()
 }
 
 // Credentials returns a [nethernet.Credentials] using the [HandlerConfig.Credentials]
