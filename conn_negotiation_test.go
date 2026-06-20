@@ -22,7 +22,7 @@ func TestConcurrentDialersShareSignaling(t *testing.T) {
 	defer client.close()
 	defer server.close()
 
-	l, err := (ListenConfig{}).Listen(server)
+	l, err := (ListenConfig{AllowAnonymous: true}).Listen(server)
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
@@ -129,7 +129,7 @@ func testDialListener(t *testing.T, disableTrickle bool) {
 	defer client.close()
 	defer server.close()
 
-	l, err := (ListenConfig{DisableTrickleICE: disableTrickle}).Listen(server)
+	l, err := (ListenConfig{DisableTrickleICE: disableTrickle, AllowAnonymous: true}).Listen(server)
 	if err != nil {
 		t.Fatalf("Listen() error = %v", err)
 	}
@@ -218,19 +218,9 @@ type memorySignaling struct {
 
 	mu        sync.Mutex
 	next      int
-	notifiers map[int]*memoryNotifier
+	notifiers map[int]Notifier
 
 	stats signalStats
-}
-
-type memoryNotifier struct {
-	ch   chan *Signal
-	done chan struct{}
-	once sync.Once
-
-	mu     sync.Mutex
-	closed bool
-	wg     sync.WaitGroup
 }
 
 type signalStats struct {
@@ -254,7 +244,7 @@ func newMemorySignaling(bus *memorySignalingBus, id string) *memorySignaling {
 		bus:       bus,
 		ctx:       ctx,
 		cancel:    func() { cancel(net.ErrClosed) },
-		notifiers: make(map[int]*memoryNotifier),
+		notifiers: make(map[int]Notifier),
 		stats: signalStats{
 			counts: make(map[string]int),
 		},
@@ -279,25 +269,20 @@ func (s *memorySignaling) Signal(ctx context.Context, signal *Signal) error {
 	return peer.deliver(ctx, &delivered)
 }
 
-func (s *memorySignaling) Notify() (<-chan *Signal, func()) {
-	n := &memoryNotifier{
-		ch:   make(chan *Signal, 64),
-		done: make(chan struct{}),
-	}
-
+func (s *memorySignaling) Notify(n Notifier) func() {
 	s.mu.Lock()
 	id := s.next
 	s.next++
 	s.notifiers[id] = n
 	s.mu.Unlock()
 
-	return n.ch, func() {
-		s.mu.Lock()
-		if s.notifiers[id] == n {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
 			delete(s.notifiers, id)
-		}
-		s.mu.Unlock()
-		n.close()
+			s.mu.Unlock()
+		})
 	}
 }
 
@@ -313,55 +298,24 @@ func (s *memorySignaling) close() { s.cancel() }
 
 func (s *memorySignaling) deliver(ctx context.Context, signal *Signal) error {
 	s.mu.Lock()
-	notifiers := make([]*memoryNotifier, 0, len(s.notifiers))
+	notifiers := make([]Notifier, 0, len(s.notifiers))
 	for _, n := range s.notifiers {
 		notifiers = append(notifiers, n)
 	}
 	s.mu.Unlock()
 
 	for _, n := range notifiers {
-		if !n.acquire() {
-			continue
-		}
 		delivered := *signal
 		select {
 		case <-ctx.Done():
-			n.release()
 			return ctx.Err()
 		case <-s.ctx.Done():
-			n.release()
 			return context.Cause(s.ctx)
-		case <-n.done:
-		case n.ch <- &delivered:
+		default:
 		}
-		n.release()
+		n.NotifySignal(&delivered)
 	}
 	return nil
-}
-
-func (n *memoryNotifier) acquire() bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.closed {
-		return false
-	}
-	n.wg.Add(1)
-	return true
-}
-
-func (n *memoryNotifier) release() {
-	n.wg.Done()
-}
-
-func (n *memoryNotifier) close() {
-	n.once.Do(func() {
-		n.mu.Lock()
-		n.closed = true
-		close(n.done)
-		n.mu.Unlock()
-		n.wg.Wait()
-		close(n.ch)
-	})
 }
 
 func (s *memorySignaling) recordSignal(signalType string) {

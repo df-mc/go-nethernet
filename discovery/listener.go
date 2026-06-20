@@ -72,7 +72,7 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		addresses: make(map[uint64]address),
 
-		notifiers: make(map[uint32]chan *nethernet.Signal),
+		notifiers: make(map[uint32]nethernet.Notifier),
 		responses: make(map[uint64][]byte),
 
 		closed: make(chan struct{}),
@@ -112,10 +112,10 @@ type Listener struct {
 	addressesMu sync.RWMutex
 
 	// notifyCount counts the total notifiers registered for the Listener.
-	// It is used as the ID for notifier channels and should not be decreased at all.
+	// It is used as the ID for notifiers and should not be decreased at all.
 	// notifyCount should be atomically accessed by holding a lock on notifiersMu.
 	notifyCount uint32
-	notifiers   map[uint32]chan *nethernet.Signal
+	notifiers   map[uint32]nethernet.Notifier
 	notifiersMu sync.RWMutex
 
 	// responses stores a map whose keys are NetherNet network IDs which value is an
@@ -157,40 +157,30 @@ func (l *Listener) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	}
 }
 
-// Notify registers and returns a channel to receive incoming NetherNet signals.
-//
-// The returned stop function unregisters the channel and closes it.
-func (l *Listener) Notify() (<-chan *nethernet.Signal, func()) {
-	signals := make(chan *nethernet.Signal, 64)
-
+// Notify registers n to receive incoming NetherNet signals.
+func (l *Listener) Notify(n nethernet.Notifier) func() {
+	if n == nil {
+		panic("nethernet/discovery: Listener.Notify: nil Notifier")
+	}
 	l.notifiersMu.Lock()
 	i := l.notifyCount
-	l.notifiers[i] = signals
+	l.notifiers[i] = n
 	l.notifyCount++
 	l.notifiersMu.Unlock()
 
-	return signals, func() {
-		l.notifiersMu.Lock()
-		l.stop(i)
-		l.notifiersMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.notifiersMu.Lock()
+			delete(l.notifiers, i)
+			l.notifiersMu.Unlock()
+		})
 	}
 }
 
 // Context returns a context that is canceled when the Listener is closed.
 func (l *Listener) Context() context.Context {
 	return listenerContext{l.closed}
-}
-
-// stop stops notifying signals on the notifier with the corresponding ID. The ID
-// is internally assigned for the notifier and contained in the stop function returned
-// by [Listener.Notify]. It should not be called by anywhere else.
-func (l *Listener) stop(i uint32) {
-	ch, ok := l.notifiers[i]
-	if !ok {
-		return
-	}
-	delete(l.notifiers, i)
-	close(ch)
 }
 
 // Credentials returns a nil *nethernet.Credentials with a nil error if the Listener is not closed.
@@ -327,15 +317,14 @@ func (l *Listener) handleMessage(pk *MessagePacket, senderID uint64) error {
 	signal.NetworkID = strconv.FormatUint(senderID, 10)
 
 	l.notifiersMu.RLock()
-	for _, ch := range l.notifiers {
-		select {
-		case ch <- signal:
-		default:
-			// Drop when notifier is backed up to avoid deadlocks and keep packet processing moving.
-			l.conf.Log.Debug("dropping signal due to notifier being backed up", slog.String("signal", signal.String()))
-		}
+	notifiers := make([]nethernet.Notifier, 0, len(l.notifiers))
+	for _, n := range l.notifiers {
+		notifiers = append(notifiers, n)
 	}
 	l.notifiersMu.RUnlock()
+	for _, n := range notifiers {
+		n.NotifySignal(signal)
+	}
 
 	return nil
 }
@@ -404,9 +393,7 @@ func (l *Listener) Close() (err error) {
 		err = l.conn.Close()
 
 		l.notifiersMu.Lock()
-		for i := range l.notifiers {
-			l.stop(i)
-		}
+		clear(l.notifiers)
 		l.notifiersMu.Unlock()
 	})
 	return err

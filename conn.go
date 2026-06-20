@@ -2,6 +2,9 @@ package nethernet
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -46,6 +49,9 @@ type Conn struct {
 	// description is the local session description for the Conn.
 	// newConn builds it from the local parameters of each underlying transport.
 	description *description
+
+	// publicKey is the public key which identifies the remote entity behind this Conn.
+	publicKey *ecdsa.PublicKey
 
 	// candidateReceived notifies that the first candidate is received from the other
 	// end, indicating that the Conn is ready to start its transports.
@@ -144,6 +150,18 @@ func (conn *Conn) BatchHeader() []byte {
 // authenticated.
 func (conn *Conn) DisableEncryption() bool {
 	return true
+}
+
+// PublicKey returns the authenticated public key of the remote peer.
+//
+// The peer has proven possession of the corresponding private key
+// by signing the SDP fingerprint assertion used to bind its identity
+// to the DTLS certificates of this WebRTC peer connection.
+//
+// If the connection was established without identity assertion, nil
+// is returned.
+func (conn *Conn) PublicKey() *ecdsa.PublicKey {
+	return conn.publicKey
 }
 
 // Context returns the background context associated with the Conn.
@@ -489,6 +507,20 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	}
 	fingerprintAlgorithm, fingerprintValue := fingerprint[0], fingerprint[1]
 
+	var identity *identityData
+	if attr, ok := d.Attribute("identity"); ok {
+		b, err := base64.StdEncoding.DecodeString(attr)
+		if err != nil {
+			return nil, fmt.Errorf("decode identity assertion in base64: %w", err)
+		}
+		if err := json.Unmarshal(b, &identity); err != nil {
+			return nil, fmt.Errorf("decode identity assertion: %w", err)
+		}
+		if identity == nil || !identity.Valid() {
+			return nil, fmt.Errorf("malformed identity attribute: %s", b)
+		}
+	}
+
 	attr, ok = m.Attribute("setup")
 	if !ok {
 		return nil, errors.New("missing setup attribute")
@@ -543,6 +575,7 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 		sctp: webrtc.SCTPCapabilities{
 			MaxMessageSize: uint32(maxMessageSize),
 		},
+		identity:   identity,
 		candidates: candidates,
 	}, nil
 }
@@ -642,6 +675,8 @@ type description struct {
 	dtls webrtc.DTLSParameters
 	sctp webrtc.SCTPCapabilities
 
+	identity *identityData
+
 	// candidates are inline ICE candidates included as SDP attributes.
 	candidates []webrtc.ICECandidate
 }
@@ -669,6 +704,13 @@ func (desc description) encode() ([]byte, error) {
 			sdp.NewPropertyAttribute(sdp.AttrKeyExtMapAllowMixed),
 			{Key: sdp.AttrKeyMsidSemantic, Value: " WMS"},
 		},
+	}
+	if desc.identity != nil {
+		b, err := json.Marshal(desc.identity)
+		if err != nil {
+			return nil, fmt.Errorf("encode identity assertion: %w", err)
+		}
+		d.WithValueAttribute("identity", base64.StdEncoding.EncodeToString(b))
 	}
 
 	media := &sdp.MediaDescription{

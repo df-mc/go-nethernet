@@ -2,6 +2,7 @@ package nethernet
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,6 +33,36 @@ type Dialer struct {
 	// set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires
 	// additional steps on the Conn (which cannot be determined by the Conn).
 	API *webrtc.API
+
+	// Identity specifies the identity presented to the remote peer during
+	// connection negotiation.
+	//
+	// When set to non-nil, an 'a=identity' attribute is attached to the SDP offer
+	// and used to authenticate the client and bind its identity to the WebRTC peer
+	// connection.
+	//
+	// When set to nil, no identity assertion is included in the offer.
+	Identity *Identity
+	// VerifyServerToken verifies the token contained in a server's identity
+	// assertion and returns the public key populated in its 'cpk' claim.
+	//
+	// The returned public key is used to verify the fingerprint assertion
+	// carried in the server answer's 'a=identity' attribute.
+	//
+	// When [Dialer.AllowIdentitylessServer] is set to true, VerifyServerToken may never be called.
+	//
+	// By default, this is set to a function that only extracts the public key
+	// from the token's 'cpk' claim and trusts it unconditionally.
+	VerifyServerToken func(ctx context.Context, token, domain string) (*ecdsa.PublicKey, error)
+
+	// AllowIdentitylessServer specifies whether to allow answer SDPs without an
+	// 'a=identity' attribute.
+	//
+	// When set to false, the server must present a valid identity assertion.
+	// When set to true, unauthenticated servers are allowed to establish connections.
+	//
+	// This may be useful when connecting to legacy or custom implementations.
+	AllowIdentitylessServer bool
 
 	// ICEGatherPolicy limits which local ICE candidates are gathered for the
 	// connection.
@@ -69,6 +100,16 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
+	if d.VerifyServerToken == nil {
+		d.VerifyServerToken = func(ctx context.Context, token, domain string) (*ecdsa.PublicKey, error) {
+			publicKey, err := claimPublicKey(token, true)
+			if err != nil {
+				return nil, err
+			}
+			d.Log.Debug("trusting server identity", "domain", domain)
+			return publicKey, nil
+		}
+	}
 
 	credentials, err := signaling.Credentials(ctx)
 	if err != nil {
@@ -94,6 +135,12 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			_ = c.close(fmt.Errorf("dial failure: %w", err))
 		}
 	}()
+	if d.Identity != nil {
+		if err := d.Identity.sign(c.description); err != nil {
+			return nil, fmt.Errorf("generate identity assertion: %w", err)
+		}
+	}
+
 	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
 		// For client connections, the server should never open a data channel.
 		//
@@ -101,7 +148,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		go c.close(fmt.Errorf("data channel %q was unexpectedly opened by remote peer", channel.Label()))
 	})
 
-	if d.DisableTrickleICE {
+	disableTrickleICE := shouldDisableTrickleICE(d.DisableTrickleICE, signaling)
+	if disableTrickleICE {
 		c.description.candidates, err = c.gatherCandidates(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("gather local candidates (non-trickle ICE): %w", err)
@@ -122,7 +170,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		return nil, fmt.Errorf("signal offer: %w", err)
 	}
 
-	if !d.DisableTrickleICE {
+	if !disableTrickleICE {
 		if err := c.trickleCandidates(signaling); err != nil {
 			return nil, fmt.Errorf("start gathering local candidates: %w", err)
 		}
@@ -155,6 +203,21 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("parse answer: %w", err)
 				}
+				if desc.identity != nil {
+					publicKey, err := d.VerifyServerToken(ctx, desc.identity.Assertion.Token, desc.identity.IdentityProvider.Domain)
+					if err != nil {
+						d.signalError(signaling, networkID, 37)
+						return nil, fmt.Errorf("verify server identity token: %w", err)
+					}
+					if err := desc.identity.verify(desc, publicKey); err != nil {
+						d.signalError(signaling, networkID, 37)
+						return nil, fmt.Errorf("verify server identity: %w", err)
+					}
+					c.publicKey = publicKey
+				} else if !d.AllowIdentitylessServer {
+					d.signalError(signaling, networkID, 37)
+					return nil, errors.New("identityless answer SDP not allowed")
+				}
 				for _, candidate := range desc.candidates {
 					// Non-trickle ICE connection such as Realms may include candidates in a single SDP.
 					if err := c.addRemoteCandidate(candidate); err != nil {
@@ -163,7 +226,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					}
 				}
 
-				go d.handleConn(c, signals)
+				go d.handleConn(c, signals, signaling.Context())
 
 				select {
 				case <-c.ctx.Done():
@@ -280,11 +343,16 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 }
 
 // handleConn handles incoming Signals signaled from the remote connection and calls Conn.handleSignal
-// to handle them within the Conn. It returns when the Conn context is canceled.
-func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal) {
+// to handle them within the Conn. It returns when the Conn or Signaling context is canceled.
+func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal, signalingCtx context.Context) {
 	for {
 		select {
 		case <-conn.ctx.Done():
+			return
+		case <-signalingCtx.Done():
+			if err := conn.close(context.Cause(signalingCtx)); err != nil {
+				conn.log.Error("error closing conn", slog.Any("error", err))
+			}
 			return
 		case signal, ok := <-signals:
 			if !ok {
@@ -308,39 +376,53 @@ func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal) {
 // the same network ID and same ConnectionID of Dialer. A channel for filtered signals and a function to stop
 // receiving notifications will be returned.
 func (d Dialer) notifySignals(networkID string, signaling Signaling) (<-chan *Signal, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
 	var (
-		filtered    = make(chan *Signal, 16)
-		ctx, cancel = context.WithCancel(context.Background())
-
+		notifier = &dialerNotifier{
+			Dialer:    d,
+			networkID: networkID,
+			signals:   make(chan *Signal, 64),
+			ctx:       ctx,
+		}
 		once sync.Once
 	)
-	signals, stop := signaling.Notify()
+	stop := signaling.Notify(notifier)
 
-	go func() {
-		defer close(filtered)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case signal, ok := <-signals:
-				if !ok {
-					return
-				}
-				if signal.NetworkID != networkID || signal.ConnectionID != d.ConnectionID {
-					continue
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case filtered <- signal:
-				}
-			}
-		}
-	}()
-	return filtered, func() {
+	return notifier.signals, func() {
 		once.Do(func() {
-			stop()
 			cancel()
+			stop()
 		})
+	}
+}
+
+// dialerNotifier notifies incoming Signals and errors.
+type dialerNotifier struct {
+	Dialer
+
+	// signals is the channel which filtered signals are sent to the
+	// [Dialer.DialContext] caller.
+	signals chan *Signal
+
+	// ctx is a background context for this notifier which is canceled
+	// when the connection is closed or the notifier stops receiving signals.
+	ctx context.Context
+
+	// networkID is the remote network ID used to filter incoming signals.
+	// Along with [Dialer.ConnectionID], it is used to multiplex signals matching both identifiers.
+	networkID string
+}
+
+// NotifySignal notifies an incoming Signal received from the Signaling implementation.
+func (d *dialerNotifier) NotifySignal(signal *Signal) {
+	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
+		return
+	}
+	select {
+	case d.signals <- signal:
+	case <-d.ctx.Done():
+		return
+	default:
+		d.Log.Warn("dropping signal because channel buffer is full", slog.Any("signal", signal))
 	}
 }
