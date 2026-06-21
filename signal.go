@@ -46,8 +46,9 @@ type Signaling interface {
 // Notifier receives incoming Signals from a Signaling implementation.
 type Notifier interface {
 	// NotifySignal handles an incoming Signal from a remote network. It must
-	// return promptly and must not block the Signaling implementation.
-	NotifySignal(signal *Signal)
+	// return promptly and must not block the Signaling implementation. It
+	// reports whether the Signal was accepted for processing.
+	NotifySignal(signal *Signal) bool
 }
 
 // trickleICEDisabler is implemented by Signaling when they're not capable

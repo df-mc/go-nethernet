@@ -120,9 +120,10 @@ func newSignalRecorder() *signalRecorder {
 	return &signalRecorder{signals: make(chan *nethernet.Signal, 4)}
 }
 
-func (r *signalRecorder) NotifySignal(signal *nethernet.Signal) {
+func (r *signalRecorder) NotifySignal(signal *nethernet.Signal) bool {
 	delivered := *signal
 	r.signals <- &delivered
+	return true
 }
 
 func assertSignalReceived(t *testing.T, recorder *signalRecorder, want *nethernet.Signal, senderID uint64) {

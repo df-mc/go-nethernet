@@ -313,7 +313,7 @@ func (s *memorySignaling) deliver(ctx context.Context, signal *Signal) error {
 			return context.Cause(s.ctx)
 		default:
 		}
-		n.NotifySignal(&delivered)
+		_ = n.NotifySignal(&delivered)
 	}
 	return nil
 }
