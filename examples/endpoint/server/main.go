@@ -50,7 +50,12 @@ func main() {
 	}
 
 	server := endpoint.NewHandler()
-	l, err := nethernet.ListenConfig{DisableTrickleICE: true}.Listen(server)
+	l, err := nethernet.ListenConfig{
+		// The example client does not send an identity assertion, so this
+		// endpoint server opts into anonymous/offline connections explicitly.
+		AllowAnonymous:    true,
+		DisableTrickleICE: true,
+	}.Listen(server)
 	if err != nil {
 		panic(fmt.Sprintf("error listening on NetherNet: %s", err))
 	}

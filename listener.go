@@ -75,18 +75,21 @@ type ListenConfig struct {
 	// verification using the public keys exposed by Minecraft's authorization service,
 	// as this library does not provide access to that endpoint.
 	//
-	// This is still safe because the Minecraft protocol layer verifies the same
-	// token present in the Login packet's connection request and checks that the
-	// same public key was used in the 'cpk' claim. Even if an attacker replayed
-	// a token, they could not replace the 'cpk' claim without invalidating the JWT
-	// signature, and therefore would be unable to produce a valid signature for the DTLS
-	// fingerprint assertion.
+	// The default verifier only binds the SDP identity assertion to the public
+	// key in the token. It is appropriate for Bedrock integrations only when the
+	// Minecraft protocol layer also verifies the Login packet token and checks
+	// that the same public key was used in its 'cpk' claim. Servers that rely on
+	// NetherNet identity alone should provide a verifier that validates token
+	// issuance.
 	VerifyClientToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)
 
 	// AllowAnonymous determines whether SDP offers without an 'a=identity'
 	// attribute are accepted.
 	// When set to false, all incoming connections must provide a valid identity
 	// assertion. When set to true, unauthenticated peers are allowed to connect.
+	//
+	// The zero value is false. Set this explicitly for offline/custom clients
+	// that do not send identity assertions.
 	//
 	// This may be useful for implementing offline-mode servers, but it removes
 	// the identity binding normally provided by NetherNet and may allow replay
