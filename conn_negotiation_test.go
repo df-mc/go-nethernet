@@ -17,6 +17,81 @@ func TestDialListenerNonTrickleICE(t *testing.T) {
 	testDialListener(t, true)
 }
 
+func TestDialedConnSurvivesSignalingCloseAfterNegotiation(t *testing.T) {
+	client, server := newMemorySignalingPair("1", "2")
+	defer server.close()
+
+	l, err := (ListenConfig{AllowAnonymous: true}).Listen(server)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer l.Close()
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- conn
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	conn, err := (Dialer{}).DialContext(ctx, server.NetworkID(), client)
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	defer conn.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-accepted:
+	case err := <-acceptErr:
+		t.Fatalf("Accept() error = %v", err)
+	case <-ctx.Done():
+		t.Fatalf("Accept() timed out: %v", ctx.Err())
+	}
+	defer serverConn.Close()
+
+	client.close()
+	select {
+	case <-conn.Context().Done():
+		t.Fatalf("dialed conn closed when signaling closed: %v", context.Cause(conn.Context()))
+	case <-time.After(time.Millisecond * 50):
+	}
+
+	read := make(chan string, 1)
+	readErr := make(chan error, 1)
+	go func() {
+		b := make([]byte, 32)
+		n, err := serverConn.Read(b)
+		if err != nil {
+			readErr <- err
+			return
+		}
+		read <- string(b[:n])
+	}()
+
+	const payload = "after-signaling-close"
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		t.Fatalf("Write() after signaling close error = %v", err)
+	}
+	select {
+	case got := <-read:
+		if got != payload {
+			t.Fatalf("Read() = %q, want %q", got, payload)
+		}
+	case err := <-readErr:
+		t.Fatalf("Read() error = %v", err)
+	case <-ctx.Done():
+		t.Fatalf("Read() timed out: %v", ctx.Err())
+	}
+}
+
 func TestConcurrentDialersShareSignaling(t *testing.T) {
 	client, server := newMemorySignalingPair("1", "2")
 	defer client.close()

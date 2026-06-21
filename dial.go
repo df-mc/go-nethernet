@@ -226,7 +226,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					}
 				}
 
-				go d.handleConn(c, signals, signaling.Context())
+				go d.handleConn(c, signals)
 
 				select {
 				case <-c.ctx.Done():
@@ -343,20 +343,17 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 }
 
 // handleConn handles incoming Signals signaled from the remote connection and calls Conn.handleSignal
-// to handle them within the Conn. It returns when the Conn or Signaling context is canceled.
-func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal, signalingCtx context.Context) {
+// to handle them within the Conn. It returns when the Conn context is canceled.
+func (d Dialer) handleConn(conn *Conn, signals <-chan *Signal) {
 	for {
 		select {
 		case <-conn.ctx.Done():
 			return
-		case <-signalingCtx.Done():
-			if err := conn.close(context.Cause(signalingCtx)); err != nil {
-				conn.log.Error("error closing conn", slog.Any("error", err))
-			}
-			return
 		case signal, ok := <-signals:
 			if !ok {
 				// Signals channel closed, connection should be closed as well
+				// when the notifier explicitly ends. Do not also watch Signaling.Context here:
+				// established WebRTC data connections may outlive the signaling transport.
 				if err := conn.Close(); err != nil {
 					conn.log.Error("error closing conn", slog.Any("error", err))
 				}
