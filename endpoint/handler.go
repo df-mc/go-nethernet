@@ -2,9 +2,7 @@ package endpoint
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -307,10 +305,9 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 
 	signal, err := h.negotiate(ctx, networkID, string(b))
 	if err != nil {
-		offerHash := sha256.Sum256(b)
 		log.Error("error negotiating",
 			slog.Int("offerSize", len(b)),
-			slog.String("offerSHA256", hex.EncodeToString(offerHash[:])),
+			slog.String("offer", string(b)),
 			slog.Any("error", err),
 		)
 		if errors.Is(err, context.DeadlineExceeded) {
