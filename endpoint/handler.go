@@ -2,7 +2,9 @@ package endpoint
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -93,18 +95,36 @@ func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*H
 	h := conf.New()
 	var cancel context.CancelCauseFunc
 	h.ctx, cancel = context.WithCancelCause(context.Background())
-	server := &http.Server{Handler: h}
+	server := &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: serveTLSReadHeaderTimeout,
+		ReadTimeout:       serveTLSReadTimeout,
+		IdleTimeout:       serveTLSIdleTimeout,
+	}
 	// Call [http.Server.Serve] in a goroutine since it is a blocking method.
 	go func() {
-		if err := server.Serve(l); err != nil {
+		if err := server.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			cancel(err)
 		}
 	}()
 	h.closeFunc = func() error {
-		return server.Close()
+		err := server.Close()
+		cancel(nil)
+		return err
 	}
 	return h, nil
 }
+
+const (
+	// maxSDPBodySize caps HTTP SDP offer and answer bodies at 1 MiB.
+	maxSDPBodySize int64 = 1 << 20
+	// serveTLSReadHeaderTimeout bounds how long a client may spend sending request headers.
+	serveTLSReadHeaderTimeout = 5 * time.Second
+	// serveTLSReadTimeout bounds how long a client may spend sending a complete request.
+	serveTLSReadTimeout = 10 * time.Second
+	// serveTLSIdleTimeout bounds how long an idle keep-alive connection may remain open.
+	serveTLSIdleTimeout = 30 * time.Second
+)
 
 // ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified
 // address using the TLS certificate and key file. It is equivalent of
@@ -143,6 +163,9 @@ type Handler struct {
 	notifier   nethernet.Notifier
 	notifierID uint64
 	notifierMu sync.RWMutex
+
+	// disableNotifyTypeCheck permits tests to register lightweight Notifier stubs.
+	disableNotifyTypeCheck bool
 }
 
 // Signal delivers a signal to the pending negotiation identified by the
@@ -169,17 +192,12 @@ func (h *Handler) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	}
 }
 
-// enableHandlerNotifyCheck determines whether to ensure that the [nethernet.Notifier]
-// passed to [Handler.Notify] is [nethernet.Listener]. It is used for testing.
-var enableHandlerNotifyCheck = true
-
 // Notify registers n to receive incoming HTTP endpoint offers.
 func (h *Handler) Notify(n nethernet.Notifier) (stop func()) {
 	if n == nil {
 		panic("nethernet/endpoint: Handler.Notify: nil Notifier")
 	}
-	//noinspection GoBoolExpressions enableHandlerNotifyCheck can be false in testing environment.
-	if _, ok := n.(*nethernet.Listener); enableHandlerNotifyCheck && !ok {
+	if _, ok := n.(*nethernet.Listener); !h.disableNotifyTypeCheck && !ok {
 		panic(fmt.Sprintf("nethernet/endpoint: Handler can only be used with *nethernet.Listener: %T", n))
 	}
 	h.notifierMu.Lock()
@@ -265,9 +283,21 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 	}
 	log = log.With("networkID", networkID)
 
+	req.Body = http.MaxBytesReader(w, req.Body, maxSDPBodySize)
 	b, err := io.ReadAll(req.Body)
-	if err != nil || len(b) == 0 {
-		log.Error("error reading response body", "error", err, "contentLength", len(b))
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			log.Error("SDP offer is too large", "limit", maxBytesError.Limit)
+			writeText(w, http.StatusRequestEntityTooLarge, "SDP offer is too large")
+			return
+		}
+		log.Error("error reading request body", "error", err)
+		writeText(w, http.StatusBadRequest, "Missing SDP offer in request body")
+		return
+	}
+	if len(b) == 0 {
+		log.Error("missing SDP offer in request body")
 		writeText(w, http.StatusBadRequest, "Missing SDP offer in request body")
 		return
 	}
@@ -277,7 +307,12 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 
 	signal, err := h.negotiate(ctx, networkID, string(b))
 	if err != nil {
-		log.Error("error negotiating", slog.String("offer", string(b)), slog.Any("error", err))
+		offerHash := sha256.Sum256(b)
+		log.Error("error negotiating",
+			slog.Int("offerSize", len(b)),
+			slog.String("offerSHA256", hex.EncodeToString(offerHash[:])),
+			slog.Any("error", err),
+		)
 		if errors.Is(err, context.DeadlineExceeded) {
 			writeText(w, http.StatusBadGateway, "Timed out waiting for answer")
 			return

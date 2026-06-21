@@ -99,9 +99,12 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
 		}
-		b, err := io.ReadAll(resp.Body)
+		b, err := io.ReadAll(io.LimitReader(resp.Body, maxSDPBodySize+1))
 		if err != nil {
 			return fmt.Errorf("read response body: %w", err)
+		}
+		if int64(len(b)) > maxSDPBodySize {
+			return fmt.Errorf("SDP answer exceeds %d bytes", maxSDPBodySize)
 		}
 		if len(b) == 0 {
 			return errors.New("missing SDP answer in response body")
@@ -181,7 +184,8 @@ func (c *Client) NetworkID() string {
 	return c.conf.NetworkID
 }
 
-// PongData is a no-op implementation of [nethernet.Signaling.PongData].
+// PongData is unsupported on Client because endpoint clients only dial and do
+// not receive server ping data.
 func (c *Client) PongData([]byte) {
 	panic("nethernet/endpoint: Client.PongData: unsupported")
 }
