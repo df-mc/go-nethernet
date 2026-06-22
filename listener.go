@@ -397,21 +397,25 @@ func (l *Listener) handleOffer(signal *Signal) error {
 	if desc.identity != nil {
 		publicKey, err := l.conf.VerifyClientToken(ctx, desc.identity.Assertion.Token)
 		if err != nil {
-			return wrapSignalError(fmt.Errorf("verify client token: %w", err), 37)
+			return wrapSignalError(fmt.Errorf("verify client token: %w", err), ErrorCodeIdentityVerificationFailed)
 		}
 		if err := desc.identity.verify(desc, publicKey); err != nil {
-			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), 37)
+			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), ErrorCodeIdentityVerificationFailed)
 		}
 		c.publicKey = publicKey
 	} else if !l.conf.AllowAnonymous {
-		return wrapSignalError(errors.New("nethernet: anonymous identity not allowed"), 37)
+		l.conf.Log.Warn("rejecting anonymous identity because AllowAnonymous is false",
+			slog.Uint64("connectionID", signal.ConnectionID),
+			slog.String("networkID", signal.NetworkID),
+		)
+		return wrapSignalError(errors.New("nethernet: anonymous identity not allowed"), ErrorCodeIdentityVerificationFailed)
 	}
 	identity, err := l.conf.IssueServerIdentity(ctx)
 	if err != nil {
-		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), 37)
+		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), ErrorCodeIdentityVerificationFailed)
 	}
 	if err := identity.sign(c.description); err != nil {
-		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), 37)
+		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), ErrorCodeIdentityVerificationFailed)
 	}
 
 	// Register a callback function immediately since the remote peer

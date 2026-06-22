@@ -39,7 +39,7 @@ type Identity struct {
 }
 
 // sign signs the DTLS fingerprints included in the given local description using
-// the [Identity.PublicKey], and returns an identityData that can be embedded
+// the [Identity.PrivateKey], and returns an identityData that can be embedded
 // to the description.
 func (i Identity) sign(desc *description) error {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: i.PrivateKey}, nil)
@@ -104,13 +104,17 @@ func claimPublicKey(token string, selfSigned bool) (*ecdsa.PublicKey, error) {
 // Identity contains a self-signed JWT token with a 1-minute expiration time and the public key
 // embedded as the 'cpk' claim.
 func GenerateServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Identity, error) {
+	encodedPublicKey, err := encodePublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("encode public key: %w", err)
+	}
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: privateKey}, &jose.SignerOptions{
 		ExtraHeaders: map[jose.HeaderKey]any{
 			// On Bedrock Dedicated Servers, just like the JWT token included in the
 			// ServerToClientHandshake packet, this JWT token also includes the public
 			// key in the 'x5u' claim.
 			// Though it is not strictly required, we do this to match vanilla behavior.
-			"x5u": encodePublicKey(&privateKey.PublicKey),
+			"x5u": encodedPublicKey,
 		},
 	})
 	if err != nil {
@@ -144,10 +148,14 @@ type tokenClaims struct {
 // It performs additional handling for encoding the cpk claim in base64.
 func (c tokenClaims) MarshalJSON() ([]byte, error) {
 	type Alias tokenClaims
+	publicKey, err := encodePublicKey(c.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("encode cpk: %w", err)
+	}
 	return json.Marshal(struct {
 		Alias
 		PublicKey string `json:"cpk"`
-	}{Alias: (Alias)(c), PublicKey: encodePublicKey(c.PublicKey)})
+	}{Alias: (Alias)(c), PublicKey: publicKey})
 }
 
 // UnmarshalJSON implements [json.Unmarshaler] for tokenClaims.
@@ -275,12 +283,15 @@ func (a *identityAssertion) UnmarshalJSON(b []byte) error {
 }
 
 // encodePublicKey encodes an ECDSA public key given by the user to a base64-encoded string.
-func encodePublicKey(publicKey *ecdsa.PublicKey) string {
+func encodePublicKey(publicKey *ecdsa.PublicKey) (string, error) {
+	if publicKey == nil {
+		return "", errors.New("nethernet: public key is nil")
+	}
 	b, err := x509.MarshalPKIXPublicKey(publicKey)
 	if err != nil {
-		panic(fmt.Sprintf("error encoding public key: %s", err))
+		return "", fmt.Errorf("marshal PKIX public key: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(b)
+	return base64.StdEncoding.EncodeToString(b), nil
 }
 
 // parsePublicKey decodes a base64-encoded string as an ECDSA public key.
