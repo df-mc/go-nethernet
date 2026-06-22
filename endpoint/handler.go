@@ -95,34 +95,24 @@ func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*H
 	h.ctx, cancel = context.WithCancelCause(context.Background())
 	server := &http.Server{
 		Handler:           h,
-		ReadHeaderTimeout: serveTLSReadHeaderTimeout,
-		ReadTimeout:       serveTLSReadTimeout,
-		IdleTimeout:       serveTLSIdleTimeout,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 	// Call [http.Server.Serve] in a goroutine since it is a blocking method.
 	go func() {
-		if err := server.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(l); err != nil {
 			cancel(err)
 		}
 	}()
 	h.closeFunc = func() error {
-		err := server.Close()
-		cancel(nil)
-		return err
+		return server.Close()
 	}
 	return h, nil
 }
 
-const (
-	// maxSDPBodySize caps HTTP SDP offer and answer bodies at 1 MiB.
-	maxSDPBodySize int64 = 1 << 20
-	// serveTLSReadHeaderTimeout bounds how long a client may spend sending request headers.
-	serveTLSReadHeaderTimeout = 5 * time.Second
-	// serveTLSReadTimeout bounds how long a client may spend sending a complete request.
-	serveTLSReadTimeout = 10 * time.Second
-	// serveTLSIdleTimeout bounds how long an idle keep-alive connection may remain open.
-	serveTLSIdleTimeout = 30 * time.Second
-)
+// maxSDPBodySize caps HTTP SDP offer and answer bodies at 1 MiB.
+const maxSDPBodySize int64 = 1 << 20
 
 // ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified
 // address using the TLS certificate and key file. It is equivalent of
