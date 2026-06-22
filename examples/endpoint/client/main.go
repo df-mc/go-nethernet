@@ -20,8 +20,8 @@ func init() {
 }
 
 // main is a program that demonstrates a client connecting to the server over NetherNet
-// using HTTP endpoint as the signaling method. The server must be running in offline mode
-// since it does not perform identity assertion.
+// using HTTP endpoint as the signaling method. This example does not configure a
+// client identity, so the server must allow anonymous/offline connections.
 func main() {
 	address := flag.Arg(0)
 	if address == "" {
