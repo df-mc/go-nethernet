@@ -205,6 +205,6 @@ func (c *Client) notifySignal(signal *nethernet.Signal) {
 	}
 	c.notifiersMu.RUnlock()
 	for _, n := range notifiers {
-		n.NotifySignal(signal)
+		_ = n.NotifySignal(signal)
 	}
 }
