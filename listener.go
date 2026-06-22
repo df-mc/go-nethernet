@@ -276,14 +276,19 @@ func (l *Listener) PongData(b []byte) {
 	l.signaling.PongData(b)
 }
 
-// NotifySignal handles an incoming Signal from the remote network.
-func (l *Listener) NotifySignal(signal *Signal) {
+// NotifySignal handles an incoming Signal from the remote network and reports
+// whether it was accepted for processing.
+func (l *Listener) NotifySignal(signal *Signal) bool {
 	select {
 	case l.signals <- signal:
+		return true
 	case <-l.Context().Done():
+		return false
 	case <-l.signaling.Context().Done():
+		return false
 	default:
 		l.log().Warn("dropping signal because channel buffer is full", slog.Any("signal", signal))
+		return false
 	}
 }
 

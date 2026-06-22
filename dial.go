@@ -411,15 +411,17 @@ type dialerNotifier struct {
 }
 
 // NotifySignal notifies an incoming Signal received from the Signaling implementation.
-func (d *dialerNotifier) NotifySignal(signal *Signal) {
+func (d *dialerNotifier) NotifySignal(signal *Signal) bool {
 	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
-		return
+		return false
 	}
 	select {
 	case d.signals <- signal:
+		return true
 	case <-d.ctx.Done():
-		return
+		return false
 	default:
 		d.Log.Warn("dropping signal because channel buffer is full", slog.Any("signal", signal))
+		return false
 	}
 }

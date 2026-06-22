@@ -323,7 +323,7 @@ func (l *Listener) handleMessage(pk *MessagePacket, senderID uint64) error {
 	}
 	l.notifiersMu.RUnlock()
 	for _, n := range notifiers {
-		n.NotifySignal(signal)
+		_ = n.NotifySignal(signal)
 	}
 
 	return nil

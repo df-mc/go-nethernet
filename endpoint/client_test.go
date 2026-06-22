@@ -203,8 +203,32 @@ func writeTestCertificate(t *testing.T) (certFile, keyFile string) {
 	return certFile, keyFile
 }
 
+func TestHandlerReturnsServiceUnavailableWhenOfferNotAdmitted(t *testing.T) {
+	handler := newTestHandler()
+	stop := handler.Notify(rejectingNotifier{})
+	defer stop()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/join/123", strings.NewReader("offer"))
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, req)
+	result := recorder.Result()
+	defer result.Body.Close()
+
+	if result.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusServiceUnavailable)
+	}
+}
+
 type notifierFunc func(*nethernet.Signal)
 
-func (f notifierFunc) NotifySignal(signal *nethernet.Signal) {
+func (f notifierFunc) NotifySignal(signal *nethernet.Signal) bool {
 	f(signal)
+	return true
+}
+
+type rejectingNotifier struct{}
+
+func (rejectingNotifier) NotifySignal(*nethernet.Signal) bool {
+	return false
 }

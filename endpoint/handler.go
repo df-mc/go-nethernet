@@ -299,6 +299,10 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 			slog.String("offer", string(b)),
 			slog.Any("error", err),
 		)
+		if errors.Is(err, errOfferNotAdmitted) {
+			writeText(w, http.StatusServiceUnavailable, "Service unavailable")
+			return
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			writeText(w, http.StatusBadGateway, "Timed out waiting for answer")
 			return
@@ -368,11 +372,13 @@ func (h *Handler) negotiate(ctx context.Context, networkID, offer string) (*neth
 		h.pendingMu.Unlock()
 	}()
 
-	notifier.NotifySignal(signal)
+	if !notifier.NotifySignal(signal) {
+		return nil, errOfferNotAdmitted
+	}
 
 	select {
 	case <-ctx.Done():
-		notifier.NotifySignal(&nethernet.Signal{
+		_ = notifier.NotifySignal(&nethernet.Signal{
 			Type:         nethernet.SignalTypeError,
 			ConnectionID: signal.ConnectionID,
 			Data:         strconv.FormatUint(nethernet.ErrorCodeNegotiationTimeoutWaitingForResponse, 10),
@@ -383,6 +389,10 @@ func (h *Handler) negotiate(ctx context.Context, networkID, offer string) (*neth
 		return result, nil
 	}
 }
+
+// errOfferNotAdmitted reports that the listener rejected or dropped an offer
+// before it could be processed.
+var errOfferNotAdmitted = errors.New("nethernet/endpoint: offer not admitted")
 
 // ServeHTTP implements [http.Handler] by delegating the given response writer
 // and the request to the internal [http.ServeMux].
