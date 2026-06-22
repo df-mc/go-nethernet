@@ -40,7 +40,7 @@ type ClientConfig struct {
 
 // New returns a new [Client] from the configuration.
 // The resulting [Client] can be passed to [nethernet.Dialer.DialContext].
-func (conf ClientConfig) New(u *url.URL) *Client {
+func (conf ClientConfig) New() *Client {
 	if conf.HTTPClient == nil {
 		conf.HTTPClient = http.DefaultClient
 	}
@@ -51,7 +51,6 @@ func (conf ClientConfig) New(u *url.URL) *Client {
 		conf.NetworkID = strconv.FormatUint(rand.Uint64(), 10)
 	}
 	return &Client{
-		url:  u,
 		conf: conf,
 
 		notifiers: make(map[uint32]nethernet.Notifier),
@@ -60,14 +59,13 @@ func (conf ClientConfig) New(u *url.URL) *Client {
 
 // NewClient creates a new [Client] with the default ClientConfig.
 // It is equivalent to calling ClientConfig{}.New().
-func NewClient(u *url.URL) *Client {
+func NewClient() *Client {
 	var conf ClientConfig
-	return conf.New(u)
+	return conf.New()
 }
 
 // Client implements [nethernet.Signaling] using the HTTP endpoints exposed by a NetherNet server.
 type Client struct {
-	url  *url.URL
 	conf ClientConfig
 
 	notifiers   map[uint32]nethernet.Notifier
@@ -80,9 +78,17 @@ type Client struct {
 // Only [nethernet.SignalTypeOffer] is supported. The returned SDP answer is delivered
 // to the Dialers registered to this Client.
 func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
+	u, err := url.Parse(signal.NetworkID)
+	if err != nil {
+		return fmt.Errorf("parse network ID as URL: %w", err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
+		return fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", signal.NetworkID)
+	}
+
 	switch signal.Type {
 	case nethernet.SignalTypeOffer:
-		requestURL := c.url.JoinPath("/v1/join", signal.NetworkID).String()
+		requestURL := u.JoinPath("/v1/join", c.conf.NetworkID).String()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(signal.Data))
 		if err != nil {
 			return fmt.Errorf("make request: %w", err)

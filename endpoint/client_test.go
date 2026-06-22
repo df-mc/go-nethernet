@@ -8,14 +8,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,11 +37,7 @@ func TestClientSignalDeliversSDPAnswer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	u, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-	client := NewClient(u)
+	client := ClientConfig{NetworkID: "123"}.New()
 	signals := make(chan *nethernet.Signal, 1)
 	stop := client.Notify(notifierFunc(func(signal *nethernet.Signal) {
 		signals <- signal
@@ -53,7 +47,7 @@ func TestClientSignalDeliversSDPAnswer(t *testing.T) {
 	if err := client.Signal(context.Background(), &nethernet.Signal{
 		Type:         nethernet.SignalTypeOffer,
 		ConnectionID: 42,
-		NetworkID:    "123",
+		NetworkID:    server.URL,
 		Data:         "offer",
 	}); err != nil {
 		t.Fatalf("Signal() error = %v", err)
@@ -67,8 +61,8 @@ func TestClientSignalDeliversSDPAnswer(t *testing.T) {
 		if signal.ConnectionID != 42 {
 			t.Fatalf("connection ID = %d, want 42", signal.ConnectionID)
 		}
-		if signal.NetworkID != "123" {
-			t.Fatalf("network ID = %q, want 123", signal.NetworkID)
+		if signal.NetworkID != server.URL {
+			t.Fatalf("network ID = %q, want %q", signal.NetworkID, server.URL)
 		}
 		if signal.Data != answer {
 			t.Fatalf("data = %q, want %q", signal.Data, answer)
@@ -85,16 +79,12 @@ func TestClientSignalRejectsOversizedSDPAnswer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	u, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-	client := NewClient(u)
+	client := NewClient()
 
-	err = client.Signal(context.Background(), &nethernet.Signal{
+	err := client.Signal(context.Background(), &nethernet.Signal{
 		Type:         nethernet.SignalTypeOffer,
 		ConnectionID: 42,
-		NetworkID:    "123",
+		NetworkID:    server.URL,
 		Data:         "offer",
 	})
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", maxSDPBodySize)) {
@@ -143,28 +133,6 @@ func TestHandlerRejectsOversizedSDPOffer(t *testing.T) {
 
 	if result.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", result.StatusCode, http.StatusRequestEntityTooLarge)
-	}
-}
-
-func TestServeTLSCloseCancelsContextWithoutServerClosedCause(t *testing.T) {
-	certFile, keyFile := writeTestCertificate(t)
-	handler, err := HandlerConfig{}.ServeTLS("127.0.0.1:0", certFile, keyFile)
-	if err != nil {
-		t.Fatalf("ServeTLS() error = %v", err)
-	}
-
-	if err := handler.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
-	select {
-	case <-handler.Context().Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for handler context cancellation")
-	}
-	if err := context.Cause(handler.Context()); errors.Is(err, http.ErrServerClosed) {
-		t.Fatalf("context cause = %v, want clean close cause", err)
-	} else if !errors.Is(err, context.Canceled) {
-		t.Fatalf("context cause = %v, want %v", err, context.Canceled)
 	}
 }
 

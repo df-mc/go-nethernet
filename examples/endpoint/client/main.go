@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"time"
@@ -33,14 +32,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Kill, os.Interrupt)
 	defer cancel()
 
-	u, err := url.Parse(address)
-	if err != nil {
-		panic(fmt.Sprintf("error parsing URL: %s", err))
-	}
-	client := endpoint.NewClient(u)
+	client := endpoint.NewClient()
 
-	slog.Info("establishing connection over NetherNet... send an interrupt signal (Ctrl+C) to abort", "url", u)
-	conn, err := nethernet.Dialer{DisableTrickleICE: true}.DialContext(ctx, client.NetworkID(), client)
+	slog.Info("establishing connection over NetherNet... send an interrupt signal (Ctrl+C) to abort", "url", address)
+	conn, err := nethernet.Dialer{DisableTrickleICE: true}.DialContext(ctx, address, client)
 	if err != nil {
 		panic(err)
 	}

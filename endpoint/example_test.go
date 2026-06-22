@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
-	"net/url"
-	"strconv"
 
 	"github.com/df-mc/go-nethernet"
 )
@@ -16,14 +13,11 @@ import (
 func ExampleClient() {
 	// Create a signaling client.
 	// This client is responsible for exchanging WebRTC connection details with the server over HTTP.
-	client := NewClient(&url.URL{
-		Scheme: "http",
-		Host:   ":19132",
-	})
+	client := NewClient()
 
 	// Establish a NetherNet connection using the client for the signaling.
 	var d nethernet.Dialer
-	conn, err := d.DialContext(context.TODO(), strconv.FormatUint(rand.Uint64(), 10), client)
+	conn, err := d.DialContext(context.TODO(), "https://localhost:19132", client)
 	if err != nil {
 		panic(fmt.Sprintf("error connecting to server: %s", err))
 	}
