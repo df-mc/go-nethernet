@@ -33,7 +33,7 @@ type ClientConfig struct {
 	Logger *slog.Logger
 
 	// NetworkID is the identifier assigned to this Handler.
-	// It is used only for identifying Client and is never transmitted to clients.
+	// It is included to the URL path of requests sent to servers.
 	// If empty, a random uint64 is generated and used.
 	NetworkID string
 }
@@ -184,8 +184,8 @@ func (c *Client) Credentials(ctx context.Context) (*nethernet.Credentials, error
 }
 
 // NetworkID returns a network ID assigned for this Client.
-// This is never transmitted to clients and is currently only
-// used for locally identifying this Client.
+// It is included to the URL path of requests sent to servers.
+// Callers can specify this value from [ClientConfig.NetworkID].
 func (c *Client) NetworkID() string {
 	return c.conf.NetworkID
 }

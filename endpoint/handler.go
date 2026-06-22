@@ -296,7 +296,6 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 	signal, err := h.negotiate(ctx, networkID, string(b))
 	if err != nil {
 		log.Error("error negotiating",
-			slog.Int("offerSize", len(b)),
 			slog.String("offer", string(b)),
 			slog.Any("error", err),
 		)

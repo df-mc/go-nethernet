@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -119,6 +120,26 @@ func TestHandlerServesSDPAnswer(t *testing.T) {
 	}
 	if got := result.Header.Get("Content-Type"); got != "application/sdp" {
 		t.Fatalf("content type = %q, want application/sdp", got)
+	}
+}
+
+func TestServeTLSCloseCancelsContextWithoutServerClosedCause(t *testing.T) {
+	certFile, keyFile := writeTestCertificate(t)
+	handler, err := HandlerConfig{}.ServeTLS("127.0.0.1:0", certFile, keyFile)
+	if err != nil {
+		t.Fatalf("ServeTLS() error = %v", err)
+	}
+
+	if err := handler.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case <-handler.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for handler context cancellation")
+	}
+	if err := context.Cause(handler.Context()); !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("context cause = %v, want http.ErrServerClosed", err)
 	}
 }
 
