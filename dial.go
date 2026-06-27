@@ -305,20 +305,12 @@ const signalErrorTimeout = time.Second * 2
 func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *description) error {
 	conn.log.Debug("starting ICE transport as controller")
 	iceRole := webrtc.ICERoleControlling
-	if err := withContextCancel(ctx, func() error {
-		return conn.ice.Start(nil, desc.ice, &iceRole)
-	}, func() {
-		_ = conn.ice.Stop()
-	}); err != nil {
+	if err := conn.ice.StartContext(ctx, nil, desc.ice, &iceRole); err != nil {
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
 	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", desc.dtls.Role.String()))
-	if err := withContextCancel(ctx, func() error {
-		return conn.dtls.Start(desc.dtls)
-	}, func() {
-		_ = conn.dtls.Stop()
-	}); err != nil {
+	if err := conn.dtls.StartContext(ctx, desc.dtls); err != nil {
 		return fmt.Errorf("start DTLS: %w", err)
 	}
 
