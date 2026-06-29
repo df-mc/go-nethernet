@@ -599,20 +599,12 @@ func (l *Listener) handleConn(conn *Conn, d *description, channelsReady <-chan s
 func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *description, channelsReady <-chan struct{}) error {
 	conn.log.Debug("starting ICE transport as controlled")
 	iceRole := webrtc.ICERoleControlled
-	if err := withContextCancel(ctx, func() error {
-		return conn.ice.Start(nil, d.ice, &iceRole)
-	}, func() {
-		_ = conn.ice.Stop()
-	}); err != nil {
+	if err := conn.ice.StartContext(ctx, nil, d.ice, &iceRole); err != nil {
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
 	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", d.dtls.Role.String()))
-	if err := withContextCancel(ctx, func() error {
-		return conn.dtls.Start(d.dtls)
-	}, func() {
-		_ = conn.dtls.Stop()
-	}); err != nil {
+	if err := conn.dtls.StartContext(ctx, d.dtls); err != nil {
 		return fmt.Errorf("start DTLS: %w", err)
 	}
 
@@ -648,8 +640,6 @@ func (l *Listener) waitForChannelsReady(ctx context.Context, conn *Conn, channel
 
 // withContextCancel calls f in a goroutine and returns early when ctx is done.
 // If cancel is non-nil, it is called when ctx is done to help unblock f.
-//
-// TODO: Remove when pion's transport Start methods accept a context.Context.
 func withContextCancel(ctx context.Context, f func() error, cancel func()) error {
 	errCh := make(chan error, 1)
 	go func() {
