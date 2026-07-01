@@ -22,13 +22,15 @@ func ExampleListen() {
 	}
 	defer d.Close()
 	d.ServerData(&ServerData{
-		ServerName:     "df-mc/go-nethernet",
-		LevelName:      "Bedrock World",
-		GameType:       2,
-		PlayerCount:    1,
-		MaxPlayerCount: 8,
-		TransportLayer: 2,
-		ConnectionType: 4,
+		ServerName:            "df-mc/go-nethernet",
+		LevelName:             "Bedrock World",
+		GameType:              GameTypeAdventure,
+		PlayerCount:           1,
+		MaxPlayerCount:        8,
+		AcceptsOnlineAuth:     true,
+		AcceptsSelfSignedAuth: true,
+		TransportLayer:        TransportLayerNetherNet,
+		ConnectionType:        4,
 	})
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
