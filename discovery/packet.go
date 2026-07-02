@@ -64,12 +64,8 @@ func Unmarshal(b []byte) (Packet, uint64, error) {
 	}
 	buf := bytes.NewBuffer(payload)
 
-	var length uint16
-	if err := binary.Read(buf, binary.LittleEndian, &length); err != nil {
-		return nil, 0, fmt.Errorf("read length: %w", err)
-	}
-	// Implementations disagree on the count; decryption and unread-byte checks cover size.
-	_ = length
+	// Skip the unused uint16 length prefix.
+	buf.Next(2)
 	h := &Header{}
 	if err := h.Read(buf); err != nil {
 		return nil, 0, fmt.Errorf("read header: %w", err)
