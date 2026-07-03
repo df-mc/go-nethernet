@@ -33,8 +33,9 @@ func Marshal(pk Packet, senderID uint64) []byte {
 
 	pk.Write(buf)
 
+	// Vanilla counts the whole decrypted payload, including this prefix.
 	payload := append(
-		binary.LittleEndian.AppendUint16(nil, uint16(buf.Len())),
+		binary.LittleEndian.AppendUint16(nil, uint16(buf.Len())+2),
 		buf.Bytes()...,
 	)
 	b := encrypt(payload)
@@ -63,13 +64,8 @@ func Unmarshal(b []byte) (Packet, uint64, error) {
 	}
 	buf := bytes.NewBuffer(payload)
 
-	var length uint16
-	if err := binary.Read(buf, binary.LittleEndian, &length); err != nil {
-		return nil, 0, fmt.Errorf("read length: %w", err)
-	}
-	if remaining := buf.Len(); int(length) != remaining {
-		return nil, 0, fmt.Errorf("invalid packet length: %d, remaining %d", length, remaining)
-	}
+	// Skip the unused uint16 length prefix.
+	buf.Next(2)
 	h := &Header{}
 	if err := h.Read(buf); err != nil {
 		return nil, 0, fmt.Errorf("read header: %w", err)
