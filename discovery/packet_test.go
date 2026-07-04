@@ -9,6 +9,26 @@ import (
 	"testing"
 )
 
+func TestPacketIDsStayStable(t *testing.T) {
+	tests := []struct {
+		name string
+		got  uint16
+		want uint16
+	}{
+		{name: "request", got: IDRequestPacket, want: 0},
+		{name: "response", got: IDResponsePacket, want: 1},
+		{name: "message", got: IDMessagePacket, want: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("packet ID = %d, want %d", tt.got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUnmarshalRejectsOversizedNestedLengths(t *testing.T) {
 	const oversizedLength = uint32(maxPacketPayloadLength)
 
