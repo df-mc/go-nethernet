@@ -120,7 +120,9 @@ func writeBytes[L ~uint32 | ~uint8](w io.Writer, b []byte) {
 const (
 	// maxPacketPayloadLength is 65,535 bytes, matching the uint16 length prefix.
 	maxPacketPayloadLength = 1<<16 - 1
+)
 
+const (
 	IDRequestPacket uint16 = iota
 	IDResponsePacket
 	IDMessagePacket
