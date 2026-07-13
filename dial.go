@@ -53,6 +53,9 @@ type Dialer struct {
 	//
 	// By default, this is set to a function that only extracts the public key
 	// from the token's 'cpk' claim and trusts it unconditionally.
+	//
+	// If the returned public key is nil, it will be automatically extracted
+	// from the JWT token's payload.
 	VerifyServerToken func(ctx context.Context, token, domain string) (*ecdsa.PublicKey, error)
 
 	// AllowIdentitylessServer specifies whether to allow answer SDPs without an
@@ -208,6 +211,13 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					if err != nil {
 						d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
 						return nil, fmt.Errorf("verify server identity token: %w", err)
+					}
+					if publicKey == nil {
+						publicKey, err = claimPublicKey(desc.identity.Assertion.Token, true)
+						if err != nil {
+							d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+							return nil, fmt.Errorf("claim public key: %w", err)
+						}
 					}
 					if err := desc.identity.verify(desc, publicKey); err != nil {
 						d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
