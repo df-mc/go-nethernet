@@ -359,29 +359,31 @@ func (l *Listener) PongData(b []byte) {
 	}
 
 	d := &ServerData{
-		ServerName:     parts[1],
-		LevelName:      parts[7],
-		GameType:       gameType,
-		PlayerCount:    int32(players),
-		MaxPlayerCount: int32(maxPlayers),
-		EditorWorld:    false,
-		Hardcore:       false,
-		TransportLayer: 2,
-		ConnectionType: 4,
+		ServerName:            parts[1],
+		LevelName:             parts[7],
+		GameType:              gameType,
+		PlayerCount:           int32(players),
+		MaxPlayerCount:        int32(maxPlayers),
+		EditorWorld:           false,
+		Hardcore:              false,
+		AcceptsOnlineAuth:     true,
+		AcceptsSelfSignedAuth: true,
+		TransportLayer:        TransportLayerNetherNet,
+		ConnectionType:        4,
 	}
 	l.ServerData(d)
 }
 
-// parsePongGameType converts the game type string from the pong data to its uint8 representation.
+// parsePongGameType converts the game type string from the pong data to its int32 representation.
 // Returns 0 and false if the game type is not valid.
-func parsePongGameType(v string) (uint8, bool) {
+func parsePongGameType(v string) (int32, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "survival":
-		return 0, true
+		return GameTypeSurvival, true
 	case "creative":
-		return 1, true
+		return GameTypeCreative, true
 	case "adventure":
-		return 2, true
+		return GameTypeAdventure, true
 	}
 	return 0, false
 }

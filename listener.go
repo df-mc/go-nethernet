@@ -61,6 +61,9 @@ type ListenConfig struct {
 	// The returned public key is used to verify the fingerprint assertion
 	// carried in the client offer's 'a=identity' attribute.
 	//
+	// If the returned public key is nil, it will be automatically extracted
+	// from the JWT token's payload.
+	//
 	// Unlike identity tokens issued by servers, client tokens are issued by
 	// Minecraft's authorization service and include additional information
 	// such as gamertag and XUID.
@@ -406,6 +409,12 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		publicKey, err := l.conf.VerifyClientToken(ctx, desc.identity.Assertion.Token)
 		if err != nil {
 			return wrapSignalError(fmt.Errorf("verify client token: %w", err), ErrorCodeIdentityVerificationFailed)
+		}
+		if publicKey == nil {
+			publicKey, err = claimPublicKey(desc.identity.Assertion.Token, false)
+			if err != nil {
+				return wrapSignalError(fmt.Errorf("claim public key: %w", err), ErrorCodeIdentityVerificationFailed)
+			}
 		}
 		if err := desc.identity.verify(desc, publicKey); err != nil {
 			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), ErrorCodeIdentityVerificationFailed)
