@@ -230,7 +230,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					if publicKey == nil {
 						publicKey, err = claimPublicKey(desc.identity.Assertion.Token, true)
 						if err != nil {
-							d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+							dialed.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
 							return nil, fmt.Errorf("claim public key: %w", err)
 						}
 					}
