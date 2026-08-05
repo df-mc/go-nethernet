@@ -327,10 +327,7 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 		if err != nil {
 			return fmt.Errorf("create %s: %w", r.Parameters().Label, err)
 		}
-		ch := wrapDataChannel(c, r, conn)
-		if existing := conn.storeChannel(r, ch); existing != nil {
-			// Close the redundant wrapper so its drainer goroutine exits.
-			_ = ch.Close()
+		if existing := conn.storeChannel(r, wrapDataChannel(c, r, conn)); existing != nil {
 			return fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label)
 		}
 	}

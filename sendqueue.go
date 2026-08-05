@@ -3,161 +3,141 @@ package nethernet
 import (
 	"fmt"
 	"sync"
+
+	"github.com/pion/webrtc/v4"
 )
 
-// sendChannel is the data-channel API used by sendQueue.
 type sendChannel interface {
-	Send(b []byte) error
+	Send([]byte) error
 	BufferedAmount() uint64
-	SetBufferedAmountLowThreshold(th uint64)
-	OnBufferedAmountLow(f func())
+	SetBufferedAmountLowThreshold(uint64)
+	OnBufferedAmountLow(func())
+	OnOpen(func())
+	ReadyState() webrtc.DataChannelState
 }
 
 const (
-	// maxSendBufferedAmount bounds data handed to the data channel.
-	maxSendBufferedAmount = 1 << 20
-
-	// Draining resumes after BufferedAmount crosses this threshold.
-	sendBufferedAmountLowThreshold = maxSendBufferedAmount / 2
-
-	// maxSendQueueBytes bounds the FIFO awaiting submission to the data channel.
-	maxSendQueueBytes = 16 << 20
+	maxSendBufferedAmount = 16 << 20
+	maxSendQueueBytes     = 16 << 20
 )
 
-// sendQueue is a bounded FIFO of encoded data-channel messages.
+var _ sendChannel = (*webrtc.DataChannel)(nil)
+
+// sendQueue retains messages that do not yet fit in the data channel.
 type sendQueue struct {
 	channel sendChannel
 	fail    func(error)
 
-	// These are fields so tests can use smaller limits.
 	maxQueue, maxBuffered uint64
 
-	// bytes includes the head while it is being handed to the channel.
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  [][]byte
-	bytes  uint64
-	closed error
-
-	// A buffered signal prevents an early callback from being lost.
-	resume chan struct{}
-
-	// done is closed by close, unblocking a drainer waiting on resume.
-	done chan struct{}
-
-	// drained is closed when the drainer goroutine exits.
-	drained chan struct{}
+	drainMu sync.Mutex
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   [][]byte
+	bytes   uint64
+	closed  error
 }
 
-// newSendQueue starts a flow-controlled channel drainer.
 func newSendQueue(channel sendChannel, fail func(error)) *sendQueue {
-	return newSendQueueLimits(channel, maxSendQueueBytes, maxSendBufferedAmount, sendBufferedAmountLowThreshold, fail)
+	return newSendQueueLimits(channel, maxSendQueueBytes, maxSendBufferedAmount, fail)
 }
 
-// newSendQueueLimits is newSendQueue with configurable limits for tests.
-func newSendQueueLimits(channel sendChannel, maxQueue, maxBuffered, threshold uint64, fail func(error)) *sendQueue {
+func newSendQueueLimits(channel sendChannel, maxQueue, maxBuffered uint64, fail func(error)) *sendQueue {
 	q := &sendQueue{
 		channel:     channel,
 		fail:        fail,
 		maxQueue:    maxQueue,
 		maxBuffered: maxBuffered,
-		resume:      make(chan struct{}, 1),
-		done:        make(chan struct{}),
-		drained:     make(chan struct{}),
 	}
 	q.cond = sync.NewCond(&q.mu)
-	channel.SetBufferedAmountLowThreshold(threshold)
-	channel.OnBufferedAmountLow(func() {
-		select {
-		case q.resume <- struct{}{}:
-		default:
-		}
-	})
-	go q.drain()
+	channel.OnBufferedAmountLow(func() { _ = q.drain() })
+	channel.OnOpen(func() { _ = q.drain() })
 	return q
 }
 
-// push blocks until b fits in the queue or the queue closes.
+// push blocks until b fits in the outer queue or the queue closes.
 func (q *sendQueue) push(b []byte) error {
 	size := uint64(len(b))
 	if size > q.maxQueue {
 		return fmt.Errorf("encoded message exceeds send queue limit: %d > %d", size, q.maxQueue)
 	}
+	if size > q.maxBuffered {
+		return fmt.Errorf("encoded message exceeds data channel limit: %d > %d", size, q.maxBuffered)
+	}
+
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	for q.closed == nil && q.bytes+size > q.maxQueue {
 		q.cond.Wait()
 	}
 	if q.closed != nil {
-		return q.closed
+		err := q.closed
+		q.mu.Unlock()
+		return err
 	}
 	q.queue = append(q.queue, b)
 	q.bytes += size
-	q.cond.Broadcast()
-	return nil
+	q.mu.Unlock()
+
+	return q.drain()
 }
 
-// close stops the drainer and unblocks waiting writers.
+// close stops delivery and unblocks waiting writers.
 func (q *sendQueue) close(cause error) {
+	q.drainMu.Lock()
 	q.mu.Lock()
+	q.closeLocked(cause)
+	q.mu.Unlock()
+	q.drainMu.Unlock()
+}
+
+func (q *sendQueue) closeLocked(cause error) {
 	if q.closed == nil {
 		q.closed = cause
-		close(q.done)
 	}
-	q.queue, q.bytes = nil, 0
+	q.queue = nil
+	q.bytes = 0
 	q.cond.Broadcast()
-	q.mu.Unlock()
 }
 
-// drain feeds queued messages to the data channel in FIFO order.
-func (q *sendQueue) drain() {
-	defer close(q.drained)
+// drain hands FIFO messages to the data channel while they fit its budget.
+func (q *sendQueue) drain() error {
+	q.drainMu.Lock()
+	defer q.drainMu.Unlock()
+
 	for {
-		b, ok := q.peek()
-		if !ok {
-			return
+		q.mu.Lock()
+		if q.closed != nil {
+			err := q.closed
+			q.mu.Unlock()
+			return err
 		}
-		// Signals may be stale, so re-check the budget after each one.
-		for q.channel.BufferedAmount()+uint64(len(b)) > q.maxBuffered {
-			select {
-			case <-q.resume:
-			case <-q.done:
-				return
-			}
+		if len(q.queue) == 0 || q.channel.ReadyState() != webrtc.DataChannelStateOpen {
+			q.mu.Unlock()
+			return nil
+		}
+		b := q.queue[0]
+		q.mu.Unlock()
+
+		threshold := q.maxBuffered - uint64(len(b))
+		q.channel.SetBufferedAmountLowThreshold(threshold)
+		if q.channel.BufferedAmount() > threshold {
+			return nil
 		}
 		if err := q.channel.Send(b); err != nil {
-			q.close(err)
+			q.mu.Lock()
+			q.closeLocked(err)
+			q.mu.Unlock()
 			if q.fail != nil {
 				q.fail(err)
 			}
-			return
+			return err
 		}
-		q.pop()
-	}
-}
 
-// peek waits for and returns the accounted queue head.
-func (q *sendQueue) peek() ([]byte, bool) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for len(q.queue) == 0 && q.closed == nil {
-		q.cond.Wait()
+		q.mu.Lock()
+		q.bytes -= uint64(len(q.queue[0]))
+		q.queue[0] = nil
+		q.queue = q.queue[1:]
+		q.cond.Broadcast()
+		q.mu.Unlock()
 	}
-	if q.closed != nil {
-		return nil, false
-	}
-	return q.queue[0], true
-}
-
-// pop releases the queue head after it has been sent.
-func (q *sendQueue) pop() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.queue) == 0 {
-		return
-	}
-	q.bytes -= uint64(len(q.queue[0]))
-	q.queue[0] = nil
-	q.queue = q.queue[1:]
-	q.cond.Broadcast()
 }

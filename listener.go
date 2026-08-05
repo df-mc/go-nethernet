@@ -437,14 +437,11 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			if r.Valid(channel) {
 				ch := wrapDataChannel(channel, r, c)
 				if existing := c.storeChannel(r, ch); existing != nil {
-					// The callback holds an internal lock, so close asynchronously.
-					go func() {
-						_ = ch.Close()
-						_ = c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
-					}()
+					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
 					return
 				}
 				channel.OnOpen(sync.OnceFunc(func() {
+					_ = ch.out.drain()
 					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
 					if opened.Add(1) == uint32(messageReliabilityCapacity) {
 						close(channelsReady)

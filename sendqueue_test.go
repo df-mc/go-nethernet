@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pion/webrtc/v4"
 )
 
 // fakeSendChannel implements sendChannel deterministically for tests. Its
@@ -20,6 +22,8 @@ type fakeSendChannel struct {
 	buffered  uint64
 	threshold uint64
 	onLow     func()
+	onOpen    func()
+	state     webrtc.DataChannelState
 	sendErr   error
 	sent      [][]byte
 
@@ -33,7 +37,10 @@ type fakeSendChannel struct {
 }
 
 func newFakeSendChannel() *fakeSendChannel {
-	return &fakeSendChannel{sentCh: make(chan []byte, 16)}
+	return &fakeSendChannel{
+		state:  webrtc.DataChannelStateOpen,
+		sentCh: make(chan []byte, 16),
+	}
 }
 
 func (f *fakeSendChannel) Send(b []byte) error {
@@ -68,6 +75,28 @@ func (f *fakeSendChannel) OnBufferedAmountLow(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.onLow = fn
+}
+
+func (f *fakeSendChannel) OnOpen(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onOpen = fn
+}
+
+func (f *fakeSendChannel) ReadyState() webrtc.DataChannelState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state
+}
+
+func (f *fakeSendChannel) open() {
+	f.mu.Lock()
+	f.state = webrtc.DataChannelStateOpen
+	fn := f.onOpen
+	f.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // release acknowledges n buffered bytes like a remote peer would, invoking
@@ -111,15 +140,8 @@ func wait[T any](t *testing.T, ch <-chan T, what string) T {
 func TestSendQueueBufferedAmountBudget(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
-	q := newSendQueueLimits(fake, 1000, 100, 50, nil)
-	defer func() {
-		q.close(net.ErrClosed)
-		wait(t, q.drained, "drainer to exit")
-	}()
-
-	if got := fake.threshold; got != 50 {
-		t.Fatalf("buffered amount low threshold = %d, want 50", got)
-	}
+	q := newSendQueueLimits(fake, 1000, 100, nil)
+	defer q.close(net.ErrClosed)
 
 	msgs := make([][]byte, 5)
 	for i := range msgs {
@@ -127,6 +149,9 @@ func TestSendQueueBufferedAmountBudget(t *testing.T) {
 		if err := q.push(msgs[i]); err != nil {
 			t.Fatalf("push(#%d) error = %v, want nil", i, err)
 		}
+	}
+	if got := fake.threshold; got != 60 {
+		t.Fatalf("buffered amount low threshold = %d, want 60", got)
 	}
 
 	// Only the first two messages fit the budget (80 of 100 bytes).
@@ -158,15 +183,52 @@ func TestSendQueueBufferedAmountBudget(t *testing.T) {
 	}
 }
 
+func TestSendQueueFullSizeMessageResumesAtCapacity(t *testing.T) {
+	fake := newFakeSendChannel()
+	fake.budget = maxSendBufferedAmount
+	fake.setBuffered(maxSendBufferedAmount)
+	q := newSendQueue(fake, nil)
+	defer q.close(net.ErrClosed)
+
+	msg := make([]byte, maxMessageSize+1)
+	if err := q.push(msg); err != nil {
+		t.Fatalf("push error = %v, want nil", err)
+	}
+	if got := fake.sentCount(); got != 0 {
+		t.Fatalf("sent count = %d, want 0", got)
+	}
+
+	fake.release(uint64(len(msg)))
+	if got := wait(t, fake.sentCh, "full-size message"); len(got) != len(msg) {
+		t.Fatalf("sent %d bytes, want %d", len(got), len(msg))
+	}
+}
+
+func TestSendQueueWaitsForOpen(t *testing.T) {
+	fake := newFakeSendChannel()
+	fake.state = webrtc.DataChannelStateConnecting
+	q := newSendQueue(fake, nil)
+	defer q.close(net.ErrClosed)
+
+	if err := q.push([]byte("queued")); err != nil {
+		t.Fatalf("push error = %v, want nil", err)
+	}
+	if got := fake.sentCount(); got != 0 {
+		t.Fatalf("sent count = %d, want 0", got)
+	}
+
+	fake.open()
+	if got := wait(t, fake.sentCh, "queued message"); !bytes.Equal(got, []byte("queued")) {
+		t.Fatalf("sent %q, want queued", got)
+	}
+}
+
 func TestSendQueuePushBlocksAtByteBound(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
 	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
-	q := newSendQueueLimits(fake, 100, 100, 50, nil)
-	defer func() {
-		q.close(net.ErrClosed)
-		wait(t, q.drained, "drainer to exit")
-	}()
+	q := newSendQueueLimits(fake, 100, 100, nil)
+	defer q.close(net.ErrClosed)
 
 	if err := q.push(make([]byte, 60)); err != nil {
 		t.Fatalf("push(60 bytes) error = %v, want nil", err)
@@ -198,7 +260,7 @@ func TestSendQueuePushBlocksAtByteBound(t *testing.T) {
 func TestSendQueueCloseUnblocks(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
-	q := newSendQueueLimits(fake, 50, 100, 50, nil)
+	q := newSendQueueLimits(fake, 50, 100, nil)
 
 	if err := q.push(make([]byte, 40)); err != nil {
 		t.Fatalf("push(40 bytes) error = %v, want nil", err)
@@ -211,7 +273,6 @@ func TestSendQueueCloseUnblocks(t *testing.T) {
 	if err := wait(t, pushed, "blocked push to unblock"); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("blocked push error = %v, want net.ErrClosed", err)
 	}
-	wait(t, q.drained, "drainer to exit")
 	if err := q.push(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("push after close error = %v, want net.ErrClosed", err)
 	}
@@ -226,13 +287,12 @@ func TestSendQueueSendErrorClosesQueue(t *testing.T) {
 	fake.sendErr = sendErr
 	failed := make(chan error, 1)
 
-	q := newSendQueueLimits(fake, 1<<20, 100, 50, func(err error) {
+	q := newSendQueueLimits(fake, 1<<20, 100, func(err error) {
 		failed <- err
 	})
-	if err := q.push([]byte("doomed")); err != nil {
-		t.Fatalf("push error = %v, want nil", err)
+	if err := q.push([]byte("doomed")); !errors.Is(err, sendErr) {
+		t.Fatalf("push error = %v, want %v", err, sendErr)
 	}
-	wait(t, q.drained, "drainer to exit after send failure")
 	if err := wait(t, failed, "failure callback"); !errors.Is(err, sendErr) {
 		t.Fatalf("failure callback error = %v, want %v", err, sendErr)
 	}
@@ -249,10 +309,7 @@ func TestConnSendFragmentsInOrder(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = maxSendBufferedAmount
 	q := newSendQueue(fake, nil)
-	defer func() {
-		q.close(net.ErrClosed)
-		wait(t, q.drained, "drainer to exit")
-	}()
+	defer q.close(net.ErrClosed)
 
 	conn := &Conn{ctx: ctx}
 	conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
@@ -293,7 +350,7 @@ func TestConnWriteUnblocksOnClose(t *testing.T) {
 
 	fake := newFakeSendChannel()
 	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
-	q := newSendQueueLimits(fake, 100, 100, 50, nil)
+	q := newSendQueueLimits(fake, 100, 100, nil)
 
 	conn := &Conn{ctx: ctx}
 	conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
@@ -317,5 +374,4 @@ func TestConnWriteUnblocksOnClose(t *testing.T) {
 	if err := wait(t, wrote, "blocked Write to unblock"); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("blocked Write error = %v, want net.ErrClosed", err)
 	}
-	wait(t, q.drained, "drainer to exit")
 }
