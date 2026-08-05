@@ -178,8 +178,8 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 }
 
 // Send writes the data into the data channel responsible for the given MessageReliability.
-// If the data exceeds 10,000 bytes, it is split into multiple segments. An error may be
-// returned while writing one or more segments or the Conn has been closed by [Conn.Close].
+// If the data exceeds the maximum segment size, it is split into multiple segments.
+// Send blocks when the outbound queue is full.
 func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err error) {
 	select {
 	case <-conn.ctx.Done():
@@ -209,7 +209,7 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		remaining := totalSegments - 1
 		for i := 0; i < len(data); i += maxMessageSize {
 			frag := data[i:min(len(data), i+maxMessageSize)]
-			if err := d.Send(append([]byte{uint8(remaining)}, frag...)); err != nil {
+			if err := d.send(append([]byte{uint8(remaining)}, frag...)); err != nil {
 				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, closedWriteError(err))
 			}
 			n += len(frag)

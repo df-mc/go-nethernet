@@ -437,7 +437,11 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			if r.Valid(channel) {
 				ch := wrapDataChannel(channel, r, c)
 				if existing := c.storeChannel(r, ch); existing != nil {
-					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
+					// The callback holds an internal lock, so close asynchronously.
+					go func() {
+						_ = ch.Close()
+						_ = c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
+					}()
 					return
 				}
 				channel.OnOpen(sync.OnceFunc(func() {
