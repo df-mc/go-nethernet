@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -88,30 +87,17 @@ type Dialer struct {
 	// This behavior can be seen when connecting to dedicated servers with the
 	// 'nethernet-disable-trickle-ice' setting property set to 'true'.
 	DisableTrickleICE bool
-
-	// OwnSignaling transfers ownership of the Signaling passed to DialContext to
-	// the dialer. The Signaling must implement [io.Closer]. Its closure is started
-	// asynchronously after a failed dial or when the returned Conn closes so that
-	// signaling cleanup cannot delay either operation. Terminal error signals are
-	// allowed to complete before Signaling is closed.
-	OwnSignaling bool
 }
 
 // DialContext establishes a Conn with a remote network referenced by the ID. The Signaling is used to signal
 // an offer with local candidates, and also to notify incoming signals received from the remote network. The
 // [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
 // ready to receive and send packets.
+//
+// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
+// asynchronously; it is abandoned after [SignalErrorTimeout]. Callers that open a Signaling per dial should
+// wait at least that long after an error before closing it.
 func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (_ *Conn, err error) {
-	owner, err := newSignalingOwner(signaling, d.OwnSignaling)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err != nil {
-			owner.close()
-		}
-	}()
-
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
 	}
@@ -144,8 +130,10 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			stop()
 		}
 	}()
-	dialed := &dialerConn{Dialer: d, stop: stop, signalingOwner: owner}
-	c, err := newConn(d.API, gatherOptions(credentials, d.ICEGatherPolicy), d.ConnectionID, networkID, signaling.NetworkID(), dialed, ErrorCodeFailedToCreateOffer)
+	c, err := newConn(d.API, gatherOptions(credentials, d.ICEGatherPolicy), d.ConnectionID, networkID, signaling.NetworkID(), dialerConn{
+		Dialer: d,
+		stop:   stop,
+	}, ErrorCodeFailedToCreateOffer)
 	if err != nil {
 		return nil, fmt.Errorf("create conn: %w", err)
 	}
@@ -201,7 +189,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			return nil, context.Cause(c.ctx)
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				dialed.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
+				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
 			return nil, ctx.Err()
 		case <-signaling.Context().Done():
@@ -214,40 +202,40 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			case SignalTypeAnswer:
 				s := &sdp.SessionDescription{}
 				if err := s.UnmarshalString(signal.Data); err != nil {
-					dialed.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
+					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("decode answer: %w", err)
 				}
 				desc, err := parseDescription(s)
 				if err != nil {
-					dialed.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
+					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("parse answer: %w", err)
 				}
 				if desc.identity != nil {
 					publicKey, err := d.VerifyServerToken(ctx, desc.identity.Assertion.Token, desc.identity.IdentityProvider.Domain)
 					if err != nil {
-						dialed.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+						d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
 						return nil, fmt.Errorf("verify server identity token: %w", err)
 					}
 					if publicKey == nil {
 						publicKey, err = claimPublicKey(desc.identity.Assertion.Token, true)
 						if err != nil {
-							dialed.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+							d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
 							return nil, fmt.Errorf("claim public key: %w", err)
 						}
 					}
 					if err := desc.identity.verify(desc, publicKey); err != nil {
-						dialed.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+						d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
 						return nil, fmt.Errorf("verify server identity: %w", err)
 					}
 					c.publicKey = publicKey
 				} else if !d.AllowIdentitylessServer {
-					dialed.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+					d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
 					return nil, errors.New("identityless answer SDP not allowed")
 				}
 				for _, candidate := range desc.candidates {
 					// Non-trickle ICE connection such as Realms may include candidates in a single SDP.
 					if err := c.addRemoteCandidate(candidate); err != nil {
-						dialed.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
+						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 						return nil, fmt.Errorf("add bundled answer candidate: %w", err)
 					}
 				}
@@ -259,7 +247,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					return nil, context.Cause(c.ctx)
 				case <-ctx.Done():
 					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-						dialed.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
 					}
 					if err := context.Cause(c.ctx); err != nil {
 						return nil, err
@@ -269,7 +257,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					c.log.Debug("received first candidate")
 					if err := d.startTransports(ctx, c, desc); err != nil {
 						if errors.Is(err, context.DeadlineExceeded) {
-							dialed.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
+							d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
 						}
 						return nil, fmt.Errorf("start transports: %w", err)
 					}
@@ -278,7 +266,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			default:
 				err = c.handleSignal(signal)
 				if err != nil {
-					dialed.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
+					d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
 					return nil, fmt.Errorf("handle signal: %w", err)
 				}
 			}
@@ -293,32 +281,25 @@ type dialerConn struct {
 	// stop is a function that can be called without parameters, which is returned by
 	// [Signaling.Notify] to stop notifying signals from Signaling.
 	stop func()
-
-	signalingOwner *signalingOwner
 }
 
-// handleClose stops receiving notifications from Signaling and begins closing owned signaling.
-func (d *dialerConn) handleClose(*Conn) {
+// handleClose stops receiving notifications from Signaling for incoming signals and errors.
+func (d dialerConn) handleClose(*Conn) {
 	d.stop()
-	d.signalingOwner.close()
 }
 
 // log returns the Log of the Dialer and extends it for a Conn with an additional [slog.Attr] of 'src'
 // set to 'dialer' to mark that the Conn has been negotiated by Dialer. [Dialer.Log] will always be
 // non-nil as it is always set up to the default [slog.Logger] before creating a Conn through newConn.
-func (d *dialerConn) log() *slog.Logger {
+func (d dialerConn) log() *slog.Logger {
 	return d.Log.With(slog.String("src", "dialer"))
 }
 
 // signalError sends a SignalTypeError to the remote connection using the
 // provided [Signaling] implementation, remote network ID, and error code.
-func (d *dialerConn) signalError(signaling Signaling, networkID string, code int) {
-	if !d.signalingOwner.beginErrorSignal() {
-		return
-	}
+func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	go func() {
-		defer d.signalingOwner.endErrorSignal()
-		ctx, cancel := context.WithTimeout(signaling.Context(), signalErrorTimeout)
+		ctx, cancel := context.WithTimeout(signaling.Context(), SignalErrorTimeout)
 		defer cancel()
 		_ = signaling.Signal(ctx, &Signal{
 			Type:         SignalTypeError,
@@ -329,85 +310,10 @@ func (d *dialerConn) signalError(signaling Signaling, networkID string, code int
 	}()
 }
 
-// signalingOwner closes signaling owned by the dialer, letting the dial's
-// terminal error signal finish first within a grace period.
-type signalingOwner struct {
-	closer io.Closer // nil when the dialer does not own the signaling
-
-	mu      sync.Mutex
-	closing bool
-	done    chan struct{} // non-nil once the terminal error signal is in flight
-}
-
-func newSignalingOwner(signaling Signaling, own bool) (*signalingOwner, error) {
-	owner := &signalingOwner{}
-	if !own {
-		return owner, nil
-	}
-	closer, ok := signaling.(io.Closer)
-	if !ok {
-		return nil, errors.New("nethernet: owned signaling does not implement io.Closer")
-	}
-	owner.closer = closer
-	return owner, nil
-}
-
-// beginErrorSignal reserves the dial's single terminal error signal, reporting
-// false if closure has already begun. endErrorSignal must be called once the
-// signal finishes.
-func (o *signalingOwner) beginErrorSignal() bool {
-	if o.closer == nil {
-		return true
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.closing {
-		return false
-	}
-	o.done = make(chan struct{})
-	return true
-}
-
-func (o *signalingOwner) endErrorSignal() {
-	if o.closer == nil {
-		return
-	}
-	close(o.done)
-}
-
-func (o *signalingOwner) close() {
-	o.closeAfter(signalErrorTimeout)
-}
-
-func (o *signalingOwner) closeAfter(gracePeriod time.Duration) {
-	if o.closer == nil {
-		return
-	}
-	o.mu.Lock()
-	if o.closing {
-		o.mu.Unlock()
-		return
-	}
-	o.closing = true
-	done := o.done
-	o.mu.Unlock()
-
-	// Close may perform network shutdown, so do not make DialContext or Conn.Close
-	// wait for signaling cleanup after ownership has been handed off.
-	go func() {
-		if done != nil {
-			timer := time.NewTimer(gracePeriod)
-			defer timer.Stop()
-			select {
-			case <-done:
-			case <-timer.C:
-			}
-		}
-		_ = o.closer.Close()
-	}()
-}
-
-const signalErrorTimeout = time.Second * 2
+// SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
+// failed dial. Callers that open a Signaling per dial should wait at least this long after a DialContext
+// error before closing it, so the signal can complete.
+const SignalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
 // then starts DTLS and SCTP using the parameters from the remote description.
