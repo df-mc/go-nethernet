@@ -2,6 +2,7 @@ package nethernet
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -164,7 +165,7 @@ func (c *tokenClaims) UnmarshalJSON(b []byte) (err error) {
 	type Alias tokenClaims
 	data := struct {
 		*Alias
-		PublicKey string `json:"cpk"`
+		PublicKey json.RawMessage `json:"cpk"`
 	}{Alias: (*Alias)(c)}
 	if err = json.Unmarshal(b, &data); err != nil {
 		return err
@@ -294,20 +295,42 @@ func encodePublicKey(publicKey *ecdsa.PublicKey) (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
-// parsePublicKey decodes a base64-encoded string as an ECDSA public key.
-// It returns an error when the input is malformed or is not an ECDSA public key.
-func parsePublicKey(s string) (*ecdsa.PublicKey, error) {
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return nil, fmt.Errorf("decode base64: %w", err)
+// parsePublicKey decodes the 'cpk' claim received from client/server into an ECDSA
+// public key. It decodes it from either a base64-encoded PKIX public key or a JWK,
+// returning an error when the input is malformed or is not an ECDSA public key.
+func parsePublicKey(data []byte) (*ecdsa.PublicKey, error) {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, errors.New("nethernet: nil cpk claim")
 	}
-	publicKey, err := x509.ParsePKIXPublicKey(b)
-	if err != nil {
-		return nil, err
+	var publicKey crypto.PublicKey
+	switch data[0] {
+	case '{':
+		var key jose.JSONWebKey
+		if err := json.Unmarshal(data, &key); err != nil {
+			return nil, err
+		}
+		publicKey = key.Key
+	case '"':
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return nil, err
+		}
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("decode base64: %w", err)
+		}
+		publicKey, err = x509.ParsePKIXPublicKey(b)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("invalid JSON value, expected an object ('{') or a string ('\"'), but got %q", data)
 	}
 	key, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
 		return nil, fmt.Errorf("invalid key type: %T, expected *ecdsa.PublicKey", key)
 	}
+	// Additional validation is left to the JOSE implementation.
 	return key, nil
 }
