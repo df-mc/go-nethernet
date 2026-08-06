@@ -73,6 +73,70 @@ func TestTokenClaimsMarshalRejectsNilPublicKey(t *testing.T) {
 	}
 }
 
+func TestClaimPublicKeyAcceptsJSONWebKey(t *testing.T) {
+	privateKey := newIdentityTestKey(t)
+	token, err := newIdentityTestTokenWithJSONWebKey(privateKey, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("newIdentityTestTokenWithJSONWebKey() error = %v", err)
+	}
+	publicKey, err := claimPublicKey(token, true)
+	if err != nil {
+		t.Fatalf("claimPublicKey() error = %v", err)
+	}
+	if !publicKey.Equal(&privateKey.PublicKey) {
+		t.Fatal("claimPublicKey() returned a different public key")
+	}
+}
+
+func TestParseClaimPublicKey(t *testing.T) {
+	privateKey := newIdentityTestKey(t)
+	encoded, err := encodePublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("encodePublicKey() error = %v", err)
+	}
+	base64Encoded, err := json.Marshal(encoded)
+	if err != nil {
+		t.Fatalf("marshal base64 cpk: %v", err)
+	}
+	webKeyEncoded, err := (&jose.JSONWebKey{Key: &privateKey.PublicKey}).MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal JSON web key cpk: %v", err)
+	}
+
+	for name, claim := range map[string]json.RawMessage{
+		"base64":       base64Encoded,
+		"json web key": webKeyEncoded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			publicKey, err := parseClaimPublicKey(claim)
+			if err != nil {
+				t.Fatalf("parseClaimPublicKey() error = %v", err)
+			}
+			if !publicKey.Equal(&privateKey.PublicKey) {
+				t.Fatal("parseClaimPublicKey() returned a different public key")
+			}
+		})
+	}
+
+	t.Run("absent", func(t *testing.T) {
+		for _, claim := range []json.RawMessage{nil, json.RawMessage("null")} {
+			publicKey, err := parseClaimPublicKey(claim)
+			if err != nil {
+				t.Fatalf("parseClaimPublicKey(%s) error = %v", claim, err)
+			}
+			if publicKey != nil {
+				t.Fatalf("parseClaimPublicKey(%s) = %v, want nil", claim, publicKey)
+			}
+		}
+	})
+
+	t.Run("unsupported key type", func(t *testing.T) {
+		if _, err := parseClaimPublicKey(json.RawMessage(`{"kty":"oct","k":"AAAA"}`)); err == nil {
+			t.Fatal("parseClaimPublicKey() succeeded for a symmetric key")
+		}
+	})
+}
+
 func newIdentityTestDescription() *description {
 	return &description{
 		dtls: webrtc.DTLSParameters{
@@ -105,5 +169,25 @@ func newIdentityTestToken(privateKey *ecdsa.PrivateKey, expiresAt time.Time) (st
 			IssuedAt: jwt.NewNumericDate(issuedAt),
 		},
 		PublicKey: &privateKey.PublicKey,
+	}).Serialize()
+}
+
+// newIdentityTestTokenWithJSONWebKey signs a token that encodes its cpk claim as a
+// JSON Web Key, as Minecraft does since v1.26.40.
+func newIdentityTestTokenWithJSONWebKey(privateKey *ecdsa.PrivateKey, expiresAt time.Time) (string, error) {
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: privateKey}, nil)
+	if err != nil {
+		return "", err
+	}
+	issuedAt := expiresAt.Add(-time.Minute)
+	return jwt.Signed(signer).Claims(struct {
+		jwt.Claims
+		PublicKey *jose.JSONWebKey `json:"cpk"`
+	}{
+		Claims: jwt.Claims{
+			Expiry:   jwt.NewNumericDate(expiresAt),
+			IssuedAt: jwt.NewNumericDate(issuedAt),
+		},
+		PublicKey: &jose.JSONWebKey{Key: &privateKey.PublicKey},
 	}).Serialize()
 }

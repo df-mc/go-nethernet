@@ -159,21 +159,52 @@ func (c tokenClaims) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON implements [json.Unmarshaler] for tokenClaims.
-// It performs additional handling for decoding the cpk claim in base64.
+// It performs additional handling for decoding the cpk claim, which may be
+// encoded either in base64 or as a JSON Web Key.
 func (c *tokenClaims) UnmarshalJSON(b []byte) (err error) {
 	type Alias tokenClaims
 	data := struct {
 		*Alias
-		PublicKey string `json:"cpk"`
+		PublicKey json.RawMessage `json:"cpk"`
 	}{Alias: (*Alias)(c)}
 	if err = json.Unmarshal(b, &data); err != nil {
 		return err
 	}
-	c.PublicKey, err = parsePublicKey(data.PublicKey)
+	c.PublicKey, err = parseClaimPublicKey(data.PublicKey)
 	if err != nil {
 		return fmt.Errorf("parse cpk: %w", err)
 	}
 	return nil
+}
+
+// parseClaimPublicKey decodes the cpk claim of an identity token.
+//
+// Minecraft v1.26.40 started encoding the claim as a JSON Web Key. Earlier versions
+// encode it as a base64-encoded public key, which remains accepted by vanilla clients,
+// so both encodings are supported here.
+//
+// A nil public key is returned when the claim is absent, which is reported by
+// [tokenClaims.Validate].
+func parseClaimPublicKey(b json.RawMessage) (*ecdsa.PublicKey, error) {
+	if len(b) == 0 || bytes.Equal(b, []byte("null")) {
+		return nil, nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return nil, err
+		}
+		return parsePublicKey(s)
+	}
+	var key jose.JSONWebKey
+	if err := key.UnmarshalJSON(b); err != nil {
+		return nil, fmt.Errorf("parse JSON web key: %w", err)
+	}
+	publicKey, ok := key.Key.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("invalid key type: %T, expected *ecdsa.PublicKey", key.Key)
+	}
+	return publicKey, nil
 }
 
 // Validate checks the validity of the JWT claims populated in this struct.
