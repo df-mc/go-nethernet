@@ -72,8 +72,8 @@ func TestSignalingOwnerForcesCloseAfterGracePeriod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSignalingOwner() error = %v", err)
 	}
-	if !owner.addErrorSignal() {
-		t.Fatal("addErrorSignal() = false, want true")
+	if !owner.beginErrorSignal() {
+		t.Fatal("beginErrorSignal() = false, want true")
 	}
 
 	owner.closeAfter(time.Millisecond * 10)
@@ -83,7 +83,7 @@ func TestSignalingOwnerForcesCloseAfterGracePeriod(t *testing.T) {
 		t.Fatal("owned signaling was not closed after the terminal signal grace period")
 	}
 
-	owner.doneErrorSignal()
+	owner.endErrorSignal()
 }
 
 type ownedErrorSignaling struct {

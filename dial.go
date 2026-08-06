@@ -297,7 +297,7 @@ type dialerConn struct {
 	signalingOwner *signalingOwner
 }
 
-// handleClose stops receiving notifications from Signaling for incoming signals and errors.
+// handleClose stops receiving notifications from Signaling and begins closing owned signaling.
 func (d *dialerConn) handleClose(*Conn) {
 	d.stop()
 	d.signalingOwner.close()
@@ -313,11 +313,11 @@ func (d *dialerConn) log() *slog.Logger {
 // signalError sends a SignalTypeError to the remote connection using the
 // provided [Signaling] implementation, remote network ID, and error code.
 func (d *dialerConn) signalError(signaling Signaling, networkID string, code int) {
-	if !d.signalingOwner.addErrorSignal() {
+	if !d.signalingOwner.beginErrorSignal() {
 		return
 	}
 	go func() {
-		defer d.signalingOwner.doneErrorSignal()
+		defer d.signalingOwner.endErrorSignal()
 		ctx, cancel := context.WithTimeout(signaling.Context(), signalErrorTimeout)
 		defer cancel()
 		_ = signaling.Signal(ctx, &Signal{
@@ -329,13 +329,14 @@ func (d *dialerConn) signalError(signaling Signaling, networkID string, code int
 	}()
 }
 
+// signalingOwner closes signaling owned by the dialer, letting the dial's
+// terminal error signal finish first within a grace period.
 type signalingOwner struct {
-	closer io.Closer
+	closer io.Closer // nil when the dialer does not own the signaling
 
 	mu      sync.Mutex
-	pending int
 	closing bool
-	closed  bool
+	done    chan struct{} // non-nil once the terminal error signal is in flight
 }
 
 func newSignalingOwner(signaling Signaling, own bool) (*signalingOwner, error) {
@@ -351,8 +352,11 @@ func newSignalingOwner(signaling Signaling, own bool) (*signalingOwner, error) {
 	return owner, nil
 }
 
-func (o *signalingOwner) addErrorSignal() bool {
-	if o == nil || o.closer == nil {
+// beginErrorSignal reserves the dial's single terminal error signal, reporting
+// false if closure has already begun. endErrorSignal must be called once the
+// signal finishes.
+func (o *signalingOwner) beginErrorSignal() bool {
+	if o.closer == nil {
 		return true
 	}
 	o.mu.Lock()
@@ -360,24 +364,15 @@ func (o *signalingOwner) addErrorSignal() bool {
 	if o.closing {
 		return false
 	}
-	o.pending++
+	o.done = make(chan struct{})
 	return true
 }
 
-func (o *signalingOwner) doneErrorSignal() {
-	if o == nil || o.closer == nil {
+func (o *signalingOwner) endErrorSignal() {
+	if o.closer == nil {
 		return
 	}
-	o.mu.Lock()
-	o.pending--
-	closeSignaling := o.closing && o.pending == 0 && !o.closed
-	if closeSignaling {
-		o.closed = true
-	}
-	o.mu.Unlock()
-	if closeSignaling {
-		_ = o.closer.Close()
-	}
+	close(o.done)
 }
 
 func (o *signalingOwner) close() {
@@ -385,7 +380,7 @@ func (o *signalingOwner) close() {
 }
 
 func (o *signalingOwner) closeAfter(gracePeriod time.Duration) {
-	if o == nil || o.closer == nil {
+	if o.closer == nil {
 		return
 	}
 	o.mu.Lock()
@@ -394,34 +389,22 @@ func (o *signalingOwner) closeAfter(gracePeriod time.Duration) {
 		return
 	}
 	o.closing = true
-	closeSignaling := o.pending == 0 && !o.closed
-	forceClose := o.pending != 0 && !o.closed
-	if closeSignaling {
-		o.closed = true
-	}
+	done := o.done
 	o.mu.Unlock()
-	if closeSignaling {
-		// Close may perform network shutdown, so do not make DialContext or Conn.Close
-		// wait for signaling cleanup after ownership has been handed off.
-		go func() { _ = o.closer.Close() }()
-	}
-	if forceClose {
-		go func() {
+
+	// Close may perform network shutdown, so do not make DialContext or Conn.Close
+	// wait for signaling cleanup after ownership has been handed off.
+	go func() {
+		if done != nil {
 			timer := time.NewTimer(gracePeriod)
 			defer timer.Stop()
-			<-timer.C
-
-			o.mu.Lock()
-			closeSignaling := !o.closed
-			if closeSignaling {
-				o.closed = true
+			select {
+			case <-done:
+			case <-timer.C:
 			}
-			o.mu.Unlock()
-			if closeSignaling {
-				_ = o.closer.Close()
-			}
-		}()
-	}
+		}
+		_ = o.closer.Close()
+	}()
 }
 
 const signalErrorTimeout = time.Second * 2
