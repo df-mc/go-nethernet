@@ -73,17 +73,27 @@ type Client struct {
 	notifiersMu sync.RWMutex
 }
 
+// parseURL parses the given network ID as a URL used for making requests
+// to remote servers.
+func parseURL(s string) (*url.URL, error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, fmt.Errorf("parse network ID as URL: %w", err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
+		return nil, fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", s)
+	}
+	return u, nil
+}
+
 // Signal sends a Signal to the remote endpoint.
 //
 // Only [nethernet.SignalTypeOffer] is supported. The returned SDP answer is delivered
 // to the Dialers registered to this Client.
 func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
-	u, err := url.Parse(signal.NetworkID)
+	u, err := parseURL(signal.NetworkID)
 	if err != nil {
-		return fmt.Errorf("parse network ID as URL: %w", err)
-	}
-	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
-		return fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", signal.NetworkID)
+		return err
 	}
 
 	switch signal.Type {

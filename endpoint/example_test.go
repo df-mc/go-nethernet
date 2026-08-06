@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/df-mc/go-nethernet"
 )
@@ -57,4 +58,15 @@ func ExampleServer() {
 	// Start listening on HTTP/TLS. This will block until the server stops.
 	// In production, it is recommended to create an [http.Server] and call its Close() method when it's done.
 	_ = http.ListenAndServeTLS(":19132", "/path/to/cert-file", "/path/to/key-file", handler)
+}
+
+func ExampleClient_PingContext() {
+	client := NewClient()
+	pongData, err := client.PingContext(context.TODO(), "http://127.0.0.1:19132")
+	if err != nil {
+		panic(err)
+	}
+
+	// Output: "Dedicated Server"
+	fmt.Println(strconv.Quote(pongData.ServerName))
 }
