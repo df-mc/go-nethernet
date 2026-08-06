@@ -7,19 +7,16 @@ import (
 
 // GameType represents the default game mode of a world.
 const (
-	GameTypeSurvival       int32 = 0
-	GameTypeCreative       int32 = 1
-	GameTypeAdventure      int32 = 2
-	GameTypeSurvivalViewer int32 = 3
-	GameTypeCreativeViewer int32 = 4
-	GameTypeDefault        int32 = 5
+	GameTypeSurvival int32 = iota
+	GameTypeCreative
+	GameTypeAdventure
 )
 
 // TransportLayer indicates the transport protocol used by a server.
 const (
-	TransportLayerRakNet    int32 = 0
-	TransportLayerNetherNet int32 = 2
-	TransportLayerLocal     int32 = 4
+	TransportLayerRakNet int32 = iota << 1
+	TransportLayerNetherNet
+	TransportLayerDefault
 )
 
 // ServerData defines the binary structure representing worlds in Minecraft: Bedrock Edition.
