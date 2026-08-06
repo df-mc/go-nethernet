@@ -95,8 +95,7 @@ type Dialer struct {
 // ready to receive and send packets.
 //
 // If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
-// asynchronously; it is abandoned after [SignalErrorTimeout]. Callers that open a Signaling per dial should
-// wait at least that long after an error before closing it.
+// asynchronously; it is abandoned after [SignalErrorTimeout].
 func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (_ *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
@@ -311,8 +310,7 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 }
 
 // SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
-// failed dial. Callers that open a Signaling per dial should wait at least this long after a DialContext
-// error before closing it, so the signal can complete.
+// failed dial.
 const SignalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
