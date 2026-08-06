@@ -90,8 +90,9 @@ type Dialer struct {
 	DisableTrickleICE bool
 
 	// OwnSignaling transfers ownership of the Signaling passed to DialContext to
-	// the dialer. The Signaling must implement [io.Closer]. It is closed after a
-	// failed dial or when the returned Conn closes. Terminal error signals are
+	// the dialer. The Signaling must implement [io.Closer]. Its closure is started
+	// asynchronously after a failed dial or when the returned Conn closes so that
+	// signaling cleanup cannot delay either operation. Terminal error signals are
 	// allowed to complete before Signaling is closed.
 	OwnSignaling bool
 }
@@ -391,6 +392,8 @@ func (o *signalingOwner) close() {
 	}
 	o.mu.Unlock()
 	if closeSignaling {
+		// Close may perform network shutdown, so do not make DialContext or Conn.Close
+		// wait for signaling cleanup after ownership has been handed off.
 		go func() { _ = o.closer.Close() }()
 	}
 }
