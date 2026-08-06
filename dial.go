@@ -93,6 +93,9 @@ type Dialer struct {
 // an offer with local candidates, and also to notify incoming signals received from the remote network. The
 // [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
 // ready to receive and send packets.
+//
+// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
+// asynchronously; it is abandoned after [SignalErrorTimeout].
 func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (_ *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
@@ -295,7 +298,7 @@ func (d dialerConn) log() *slog.Logger {
 // provided [Signaling] implementation, remote network ID, and error code.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	go func() {
-		ctx, cancel := context.WithTimeout(signaling.Context(), signalErrorTimeout)
+		ctx, cancel := context.WithTimeout(signaling.Context(), SignalErrorTimeout)
 		defer cancel()
 		_ = signaling.Signal(ctx, &Signal{
 			Type:         SignalTypeError,
@@ -306,7 +309,9 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	}()
 }
 
-const signalErrorTimeout = time.Second * 2
+// SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
+// failed dial.
+const SignalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
 // then starts DTLS and SCTP using the parameters from the remote description.
