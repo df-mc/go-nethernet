@@ -450,6 +450,7 @@ func (l *Listener) handleOffer(signal *Signal) error {
 					return
 				}
 				channel.OnOpen(sync.OnceFunc(func() {
+					_ = ch.out.drain()
 					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
 					if opened.Add(1) == uint32(messageReliabilityCapacity) {
 						close(channelsReady)
