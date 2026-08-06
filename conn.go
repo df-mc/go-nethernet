@@ -357,16 +357,19 @@ func (conn *Conn) Close() (err error) {
 	return conn.close(net.ErrClosed)
 }
 
+// isTerminalICEState reports whether an ICE transport can no longer recover.
+func isTerminalICEState(state webrtc.ICETransportState) bool {
+	return state == webrtc.ICETransportStateClosed || state == webrtc.ICETransportStateFailed
+}
+
 // handleTransports registers handlers for all underlying transports and data channels
 // associated with the Conn. It also ensures that the Conn is closed if an unrecoverable
 // error has occurred in any of the underlying transports and data channels.
 func (conn *Conn) handleTransports() {
 	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
-		switch state {
-		case webrtc.ICETransportStateClosed, webrtc.ICETransportStateFailed:
+		if isTerminalICEState(state) {
 			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 			go conn.close(fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state))
-		default:
 		}
 	})
 	conn.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
