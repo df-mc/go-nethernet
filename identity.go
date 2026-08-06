@@ -329,7 +329,7 @@ func parsePublicKey(data []byte) (*ecdsa.PublicKey, error) {
 	}
 	key, ok := publicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("invalid key type: %T, expected *ecdsa.PublicKey", key)
+		return nil, fmt.Errorf("invalid key type: %T, expected *ecdsa.PublicKey", publicKey)
 	}
 	// Additional validation is left to the JOSE implementation.
 	return key, nil
