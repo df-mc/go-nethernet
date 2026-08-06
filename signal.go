@@ -223,7 +223,16 @@ const (
 	ErrorCodeNoSignalingChannel
 	ErrorCodeNotLoggedIn
 	ErrorCodeSignalingFailedToSend
-
+	ErrorCodeRelayServerConfigurationResultFailure
+	ErrorCodeRelayServerConfigurationResultParsingErrorNoURLs
+	ErrorCodeRelayServerConfigurationResultParsingErrorNoCreds
+	ErrorCodeRelayServerConfigurationResultParsingErrorNoServers
+	ErrorCodeRelayServerConfigurationResultParsingErrorNoExpiration
+	ErrorCodeDataChannelClosed
+	ErrorCodeInternalErrorJSONSerialization
+	ErrorCodeInvalidArgument
+	ErrorCodeGenericFailure
+	_ // TODO
 	// ErrorCodeIdentityVerificationFailed reports that the remote identity token
 	// or its DTLS fingerprint assertion failed validation.
 	ErrorCodeIdentityVerificationFailed = 37
