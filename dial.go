@@ -381,12 +381,21 @@ func (o *signalingOwner) doneErrorSignal() {
 }
 
 func (o *signalingOwner) close() {
+	o.closeAfter(signalErrorTimeout)
+}
+
+func (o *signalingOwner) closeAfter(gracePeriod time.Duration) {
 	if o == nil || o.closer == nil {
 		return
 	}
 	o.mu.Lock()
+	if o.closing {
+		o.mu.Unlock()
+		return
+	}
 	o.closing = true
 	closeSignaling := o.pending == 0 && !o.closed
+	forceClose := o.pending != 0 && !o.closed
 	if closeSignaling {
 		o.closed = true
 	}
@@ -395,6 +404,23 @@ func (o *signalingOwner) close() {
 		// Close may perform network shutdown, so do not make DialContext or Conn.Close
 		// wait for signaling cleanup after ownership has been handed off.
 		go func() { _ = o.closer.Close() }()
+	}
+	if forceClose {
+		go func() {
+			timer := time.NewTimer(gracePeriod)
+			defer timer.Stop()
+			<-timer.C
+
+			o.mu.Lock()
+			closeSignaling := !o.closed
+			if closeSignaling {
+				o.closed = true
+			}
+			o.mu.Unlock()
+			if closeSignaling {
+				_ = o.closer.Close()
+			}
+		}()
 	}
 }
 

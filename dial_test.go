@@ -66,6 +66,26 @@ func TestDialContextOwnedSignalingClosesAfterErrorSignal(t *testing.T) {
 	}
 }
 
+func TestSignalingOwnerForcesCloseAfterGracePeriod(t *testing.T) {
+	signaling := newOwnedErrorSignaling("client")
+	owner, err := newSignalingOwner(signaling, true)
+	if err != nil {
+		t.Fatalf("newSignalingOwner() error = %v", err)
+	}
+	if !owner.addErrorSignal() {
+		t.Fatal("addErrorSignal() = false, want true")
+	}
+
+	owner.closeAfter(time.Millisecond * 10)
+	select {
+	case <-signaling.closed:
+	case <-time.After(time.Second):
+		t.Fatal("owned signaling was not closed after the terminal signal grace period")
+	}
+
+	owner.doneErrorSignal()
+}
+
 type ownedErrorSignaling struct {
 	id string
 
