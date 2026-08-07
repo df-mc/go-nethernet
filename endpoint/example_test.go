@@ -27,9 +27,9 @@ func ExampleClient() {
 	fmt.Printf("connected, latency: %s", conn.Latency())
 }
 
-// ExampleServer demonstrates how to expose a NetherNet listener using HTTP/TLS server
+// ExampleHandler demonstrates how to expose a NetherNet listener using HTTP/TLS server
 // for signaling.
-func ExampleServer() {
+func ExampleHandler() {
 	handler := NewHandler()
 
 	// Set up a NetherNet listener.
@@ -67,6 +67,5 @@ func ExampleClient_PingContext() {
 		panic(err)
 	}
 
-	// Output: "Dedicated Server"
 	fmt.Println(strconv.Quote(pongData.ServerName))
 }

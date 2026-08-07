@@ -2,6 +2,7 @@ package endpoint
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -71,6 +72,36 @@ type Client struct {
 	notifiers   map[uint32]nethernet.Notifier
 	notifyCount uint32
 	notifiersMu sync.RWMutex
+}
+
+func (c *Client) PingContext(ctx context.Context, address string) (Status, error) {
+	u, err := parseURL(address)
+	if err != nil {
+		return Status{}, fmt.Errorf("parse address: %w", err)
+	}
+	requestURL := u.JoinPath("/v1/join").String()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return Status{}, fmt.Errorf("make request: %w", err)
+	}
+	req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
+
+	resp, err := c.conf.HTTPClient.Do(req)
+	if err != nil {
+		return Status{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var status Status
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			return Status{}, fmt.Errorf("decode response body: %w", err)
+		}
+		return status, nil
+	default:
+		return Status{}, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+	}
 }
 
 // parseURL parses the given network ID as a URL used for making requests

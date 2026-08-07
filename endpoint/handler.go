@@ -3,14 +3,17 @@ package endpoint
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
@@ -38,6 +41,11 @@ type HandlerConfig struct {
 	// It is used only for identifying Handler and is never transmitted to clients.
 	// If empty, a random uint64 is generated and used.
 	NetworkID string
+
+	// DisablePongData specifies whether to disable syncing with the RakNet pong
+	// data provided by the upstream game protocol. When set to true, [Handler.PongData]
+	// becomes no-op.
+	DisablePongData bool
 }
 
 // New returns a new [Handler] from the configuration.
@@ -62,9 +70,7 @@ func (conf HandlerConfig) New() *Handler {
 		mux:  http.NewServeMux(),
 		conf: conf,
 	}
-	h.mux.HandleFunc("GET /v1/join", func(writer http.ResponseWriter, request *http.Request) {
-		writer.WriteHeader(http.StatusOK)
-	})
+	h.mux.HandleFunc("GET /v1/join", h.handlePing)
 	h.mux.HandleFunc("POST /v1/join/{networkID}", h.handleOffer)
 	return h
 }
@@ -89,7 +95,18 @@ func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*H
 	if err != nil {
 		return nil, err
 	}
+	return conf.serve(l)
+}
 
+func (conf HandlerConfig) Serve(address string) (*Handler, error) {
+	l, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	return conf.serve(l)
+}
+
+func (conf HandlerConfig) serve(l net.Listener) (*Handler, error) {
 	h := conf.New()
 	var cancel context.CancelCauseFunc
 	h.ctx, cancel = context.WithCancelCause(context.Background())
@@ -122,6 +139,11 @@ func ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
 	return conf.ServeTLS(address, certFile, keyFile)
 }
 
+func Serve(address string) (*Handler, error) {
+	var conf HandlerConfig
+	return conf.Serve(address)
+}
+
 // Handler is an [http.Handler] that negotiates incoming NetherNet connections
 // over HTTP. Callers can create a Handler from [NewHandler] or [HandlerConfig.New],
 // then pass it to [http.ListenAndServeTLS] or assign to [http.Server.Handler].
@@ -151,6 +173,9 @@ type Handler struct {
 	notifier   nethernet.Notifier
 	notifierID uint64
 	notifierMu sync.RWMutex
+
+	// status atomically stores the current server status assigned to the Handler.
+	status atomic.Pointer[Status]
 
 	// disableNotifyTypeCheck permits tests to register lightweight Notifier stubs.
 	disableNotifyTypeCheck bool
@@ -248,7 +273,43 @@ func (h *Handler) NetworkID() string {
 // PongData is a no-op implementation of [nethernet.Signaling.PongData].
 // It may become meaningful in the future if Mojang introduces an HTTP
 // endpoint for serving MOTDs.
-func (h *Handler) PongData([]byte) {}
+func (h *Handler) PongData(data []byte) {
+	if h.conf.DisablePongData {
+		return
+	}
+	status, err := RakNetPongData(data)
+	if err != nil {
+		h.conf.Logger.Error("error parsing RakNet pong data", "err", err)
+		return
+	}
+	h.status.Store(&status)
+}
+
+func (h *Handler) Status(status Status) {
+	h.status.Store(&status)
+}
+
+func (h *Handler) handlePing(w http.ResponseWriter, req *http.Request) {
+	req.Close = true // Do not keep-alive the TCP connection.
+	log := h.conf.Logger.With("method", req.Method, "url", req.URL)
+
+	status := h.status.Load()
+	if status == nil {
+		log.Debug("could not respond with pong data")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	b, err := json.Marshal(status)
+	if err != nil {
+		log.Error("error encoding pong data", "err", err)
+		writeText(w, http.StatusInternalServerError, "An error has occurred while handling this request.")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(b)
+	w.WriteHeader(http.StatusOK)
+}
 
 // handleOffer handles a POST request to the /v1/join/{networkID} endpoint.
 // It reads the SDP offer from the request body and forwards it to all
