@@ -307,8 +307,8 @@ func (h *Handler) handlePing(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(b)
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
 }
 
 // handleOffer handles a POST request to the /v1/join/{networkID} endpoint.
