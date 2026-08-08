@@ -74,6 +74,14 @@ type Dialer struct {
 	// as relayed candidates from TURN servers only.
 	ICEGatherPolicy webrtc.ICEGatherPolicy
 
+	// Credentials optionally supplies the ICE servers used for gathering local
+	// candidates. When non-nil, it takes precedence over [Signaling.Credentials],
+	// letting a caller gather through its own STUN/TURN servers rather than the
+	// ones advertised by the signaling service. This pairs with
+	// [Dialer.ICEGatherPolicy] set to relay-only to route the connection through
+	// a caller-controlled TURN server.
+	Credentials func(ctx context.Context) (*Credentials, error)
+
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
 	// When set to true, the dialer waits for ICE gathering to complete and embeds
@@ -117,7 +125,11 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		}
 	}
 
-	credentials, err := signaling.Credentials(ctx)
+	credentialsFunc := signaling.Credentials
+	if d.Credentials != nil {
+		credentialsFunc = d.Credentials
+	}
+	credentials, err := credentialsFunc(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("obtain credentials: %w", err)
 	}
