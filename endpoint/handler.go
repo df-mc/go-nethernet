@@ -198,16 +198,13 @@ func (h *Handler) Notify(n nethernet.Notifier) (stop func()) {
 	h.notifier = n
 	h.notifierMu.Unlock()
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			h.notifierMu.Lock()
-			if h.notifierID == id {
-				h.notifier = nil
-			}
-			h.notifierMu.Unlock()
-		})
-	}
+	return sync.OnceFunc(func() {
+		h.notifierMu.Lock()
+		if h.notifierID == id {
+			h.notifier = nil
+		}
+		h.notifierMu.Unlock()
+	})
 }
 
 // Context returns the background context of the underlying HTTP server, if one is bound

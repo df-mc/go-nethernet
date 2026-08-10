@@ -157,14 +157,11 @@ func (c *Client) Notify(n nethernet.Notifier) (stop func()) {
 	c.notifiers[i] = n
 	c.notifiersMu.Unlock()
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			c.notifiersMu.Lock()
-			delete(c.notifiers, i)
-			c.notifiersMu.Unlock()
-		})
-	}
+	return sync.OnceFunc(func() {
+		c.notifiersMu.Lock()
+		delete(c.notifiers, i)
+		c.notifiersMu.Unlock()
+	})
 }
 
 // Context always returns [context.Background].
