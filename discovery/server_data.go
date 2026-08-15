@@ -12,13 +12,6 @@ const (
 	GameTypeAdventure
 )
 
-// TransportLayer indicates the transport protocol used by a server.
-const (
-	TransportLayerRakNet int32 = iota << 1
-	TransportLayerNetherNet
-	TransportLayerDefault
-)
-
 // ServerData defines the binary structure representing worlds in Minecraft: Bedrock Edition.
 // It is encapsulated in [ResponsePacket.ApplicationData] and sent in response to [RequestPacket]
 // broadcasted by clients on port 7551.
@@ -26,8 +19,10 @@ type ServerData struct {
 	// ServerName is the name of the server. It is typically the player name of the owner
 	// hosting the server and is displayed below the LevelName in the world card.
 	ServerName string
-	Protocol   int32
-	Version    string
+	// Protocol is the protocol version used by the host of the server.
+	Protocol int32
+	// Version is the game version used by the host of the server.
+	Version string
 	// LevelName identifies the name of the world and appears at the top of ServerName in the world card.
 	LevelName string
 	// GameType is the default game mode of the world. Players receive this game mode when they
