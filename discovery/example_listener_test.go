@@ -37,6 +37,7 @@ func ExampleListen() {
 		AcceptsOnlineAuth:     true,
 		AcceptsSelfSignedAuth: true,
 		Nonce:                 hex.EncodeToString(nonce),
+		TransportLayer:        TransportLayerNetherNet,
 		ConnectionType:        4,
 	})
 
