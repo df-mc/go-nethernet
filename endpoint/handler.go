@@ -379,7 +379,7 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(signal.Data))
 	case nethernet.SignalTypeError:
-		writeText(w, http.StatusBadRequest, fmt.Sprintf("Negotiation failed with error code: %s", signal.Data))
+		writeText(w, http.StatusBadRequest, signal.Data)
 	default:
 		log.Error("unexpected negotiation result", slog.String("signal", signal.String()))
 		writeText(w, http.StatusInternalServerError, "An error has occurred while handling this request")
