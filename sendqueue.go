@@ -16,10 +16,7 @@ type sendChannel interface {
 	ReadyState() webrtc.DataChannelState
 }
 
-const (
-	maxSendBufferedAmount = 16 << 20
-	maxSendQueueBytes     = 16 << 20
-)
+const maxSendBufferedAmount = 16 << 20
 
 var _ sendChannel = (*webrtc.DataChannel)(nil)
 
@@ -28,57 +25,65 @@ type sendQueue struct {
 	channel sendChannel
 	fail    func(error)
 
-	maxQueue, maxBuffered uint64
+	maxBuffered uint64
 
 	drainMu sync.Mutex
 	mu      sync.Mutex
-	cond    *sync.Cond
 	queue   [][]byte
-	bytes   uint64
 	closed  error
+	wake    chan struct{}
 }
 
 func newSendQueue(channel sendChannel, fail func(error)) *sendQueue {
-	return newSendQueueLimits(channel, maxSendQueueBytes, maxSendBufferedAmount, fail)
+	return newSendQueueLimit(channel, maxSendBufferedAmount, fail)
 }
 
-func newSendQueueLimits(channel sendChannel, maxQueue, maxBuffered uint64, fail func(error)) *sendQueue {
+func newSendQueueLimit(channel sendChannel, maxBuffered uint64, fail func(error)) *sendQueue {
 	q := &sendQueue{
 		channel:     channel,
 		fail:        fail,
-		maxQueue:    maxQueue,
 		maxBuffered: maxBuffered,
+		wake:        make(chan struct{}, 1),
 	}
-	q.cond = sync.NewCond(&q.mu)
-	channel.OnBufferedAmountLow(func() { _ = q.drain() })
-	channel.OnOpen(func() { _ = q.drain() })
+	channel.OnBufferedAmountLow(q.signal)
+	channel.OnOpen(q.signal)
+	go q.run()
 	return q
 }
 
-// push blocks until b fits in the outer queue or the queue closes.
+// push retains b until it fits in the data channel or the queue closes.
 func (q *sendQueue) push(b []byte) error {
 	size := uint64(len(b))
-	if size > q.maxQueue {
-		return fmt.Errorf("encoded message exceeds send queue limit: %d > %d", size, q.maxQueue)
-	}
 	if size > q.maxBuffered {
 		return fmt.Errorf("encoded message exceeds data channel limit: %d > %d", size, q.maxBuffered)
 	}
 
 	q.mu.Lock()
-	for q.closed == nil && q.bytes+size > q.maxQueue {
-		q.cond.Wait()
-	}
 	if q.closed != nil {
 		err := q.closed
 		q.mu.Unlock()
 		return err
 	}
 	q.queue = append(q.queue, b)
-	q.bytes += size
 	q.mu.Unlock()
 
-	return q.drain()
+	q.signal()
+	return nil
+}
+
+func (q *sendQueue) signal() {
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (q *sendQueue) run() {
+	for range q.wake {
+		if q.drain() != nil {
+			return
+		}
+	}
 }
 
 // close stops delivery and unblocks waiting writers.
@@ -88,6 +93,7 @@ func (q *sendQueue) close(cause error) {
 	q.closeLocked(cause)
 	q.mu.Unlock()
 	q.drainMu.Unlock()
+	q.signal()
 }
 
 func (q *sendQueue) closeLocked(cause error) {
@@ -95,8 +101,6 @@ func (q *sendQueue) closeLocked(cause error) {
 		q.closed = cause
 	}
 	q.queue = nil
-	q.bytes = 0
-	q.cond.Broadcast()
 }
 
 // drain hands FIFO messages to the data channel while they fit its budget.
@@ -134,10 +138,8 @@ func (q *sendQueue) drain() error {
 		}
 
 		q.mu.Lock()
-		q.bytes -= uint64(len(q.queue[0]))
 		q.queue[0] = nil
 		q.queue = q.queue[1:]
-		q.cond.Broadcast()
 		q.mu.Unlock()
 	}
 }

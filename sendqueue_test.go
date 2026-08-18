@@ -125,6 +125,12 @@ func (f *fakeSendChannel) sentCount() int {
 	return len(f.sent)
 }
 
+func (f *fakeSendChannel) bufferedAmountLowThreshold() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.threshold
+}
+
 // wait fails the test if ch does not become ready in time.
 func wait[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
@@ -140,7 +146,7 @@ func wait[T any](t *testing.T, ch <-chan T, what string) T {
 func TestSendQueueBufferedAmountBudget(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
-	q := newSendQueueLimits(fake, 1000, 100, nil)
+	q := newSendQueueLimit(fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
 	msgs := make([][]byte, 5)
@@ -150,13 +156,12 @@ func TestSendQueueBufferedAmountBudget(t *testing.T) {
 			t.Fatalf("push(#%d) error = %v, want nil", i, err)
 		}
 	}
-	if got := fake.threshold; got != 60 {
-		t.Fatalf("buffered amount low threshold = %d, want 60", got)
-	}
-
 	// Only the first two messages fit the budget (80 of 100 bytes).
 	wait(t, fake.sentCh, "message #0")
 	wait(t, fake.sentCh, "message #1")
+	if got := fake.bufferedAmountLowThreshold(); got != 60 {
+		t.Fatalf("buffered amount low threshold = %d, want 60", got)
+	}
 
 	// Acknowledging 40 bytes crosses the threshold (80 -> 40) and resumes
 	// draining for exactly one more message.
@@ -223,56 +228,54 @@ func TestSendQueueWaitsForOpen(t *testing.T) {
 	}
 }
 
-func TestSendQueuePushBlocksAtByteBound(t *testing.T) {
+func TestSendQueueRetainsMessagesBeyondBufferedAmountBudget(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
 	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
-	q := newSendQueueLimits(fake, 100, 100, nil)
+	q := newSendQueueLimit(fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
-	if err := q.push(make([]byte, 60)); err != nil {
-		t.Fatalf("push(60 bytes) error = %v, want nil", err)
+	msgs := [][]byte{
+		bytes.Repeat([]byte{0}, 60),
+		bytes.Repeat([]byte{1}, 30),
+		bytes.Repeat([]byte{2}, 20),
 	}
-	if err := q.push(make([]byte, 30)); err != nil {
-		t.Fatalf("push(30 bytes) error = %v, want nil", err)
+	for i, msg := range msgs {
+		if err := q.push(msg); err != nil {
+			t.Fatalf("push(#%d) error = %v, want nil", i, err)
+		}
 	}
-
-	// 90+20 exceeds the 100-byte bound: this push must block.
-	pushed := make(chan error, 1)
-	go func() { pushed <- q.push(make([]byte, 20)) }()
-	select {
-	case err := <-pushed:
-		t.Fatalf("push(20 bytes) returned %v, want it to block", err)
-	case <-time.After(20 * time.Millisecond):
+	if got := fake.sentCount(); got != 0 {
+		t.Fatalf("sent count = %d, want 0", got)
 	}
 
-	// Acknowledging 160 bytes (200 -> 40) crosses the threshold; the drainer
-	// sends the 60-byte head, freeing space for the blocked push.
+	// The outer FIFO may retain more data than the channel's buffered-amount
+	// budget. Delivery resumes in order as room becomes available.
 	fake.release(160)
-	if got := wait(t, fake.sentCh, "head message"); len(got) != 60 {
-		t.Fatalf("sent %d bytes, want 60", len(got))
+	if got := wait(t, fake.sentCh, "message #0"); !bytes.Equal(got, msgs[0]) {
+		t.Fatalf("sent message #0 = %v, want %v", got, msgs[0])
 	}
-	if err := wait(t, pushed, "blocked push to complete"); err != nil {
-		t.Fatalf("blocked push error = %v, want nil", err)
+	fake.release(30)
+	if got := wait(t, fake.sentCh, "message #1"); !bytes.Equal(got, msgs[1]) {
+		t.Fatalf("sent message #1 = %v, want %v", got, msgs[1])
+	}
+	fake.release(20)
+	if got := wait(t, fake.sentCh, "message #2"); !bytes.Equal(got, msgs[2]) {
+		t.Fatalf("sent message #2 = %v, want %v", got, msgs[2])
 	}
 }
 
-func TestSendQueueCloseUnblocks(t *testing.T) {
+func TestSendQueueCloseDropsPendingMessages(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
-	q := newSendQueueLimits(fake, 50, 100, nil)
+	q := newSendQueueLimit(fake, 100, nil)
 
 	if err := q.push(make([]byte, 40)); err != nil {
 		t.Fatalf("push(40 bytes) error = %v, want nil", err)
 	}
-	pushed := make(chan error, 1)
-	go func() { pushed <- q.push(make([]byte, 20)) }()
 
 	q.close(net.ErrClosed)
 
-	if err := wait(t, pushed, "blocked push to unblock"); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("blocked push error = %v, want net.ErrClosed", err)
-	}
 	if err := q.push(make([]byte, 1)); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("push after close error = %v, want net.ErrClosed", err)
 	}
@@ -287,11 +290,11 @@ func TestSendQueueSendErrorClosesQueue(t *testing.T) {
 	fake.sendErr = sendErr
 	failed := make(chan error, 1)
 
-	q := newSendQueueLimits(fake, 1<<20, 100, func(err error) {
+	q := newSendQueueLimit(fake, 100, func(err error) {
 		failed <- err
 	})
-	if err := q.push([]byte("doomed")); !errors.Is(err, sendErr) {
-		t.Fatalf("push error = %v, want %v", err, sendErr)
+	if err := q.push([]byte("doomed")); err != nil {
+		t.Fatalf("push error = %v, want nil", err)
 	}
 	if err := wait(t, failed, "failure callback"); !errors.Is(err, sendErr) {
 		t.Fatalf("failure callback error = %v, want %v", err, sendErr)
@@ -344,34 +347,24 @@ func TestConnSendFragmentsInOrder(t *testing.T) {
 	}
 }
 
-func TestConnWriteUnblocksOnClose(t *testing.T) {
+func TestConnWriteQueuesWhileDataChannelIsFull(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
 	fake := newFakeSendChannel()
 	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
-	q := newSendQueueLimits(fake, 100, 100, nil)
+	q := newSendQueueLimit(fake, 100, nil)
+	defer q.close(net.ErrClosed)
 
 	conn := &Conn{ctx: ctx}
 	conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
 
-	if _, err := conn.Write(make([]byte, 90)); err != nil {
-		t.Fatalf("first Write error = %v, want nil", err)
+	for i := range 2 {
+		if _, err := conn.Write(make([]byte, 90)); err != nil {
+			t.Fatalf("Write(#%d) error = %v, want nil", i, err)
+		}
 	}
-
-	wrote := make(chan error, 1)
-	go func() {
-		_, err := conn.Write(make([]byte, 90))
-		wrote <- err
-	}()
-	select {
-	case err := <-wrote:
-		t.Fatalf("second Write returned %v, want it to block", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-
-	q.close(net.ErrClosed)
-	if err := wait(t, wrote, "blocked Write to unblock"); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("blocked Write error = %v, want net.ErrClosed", err)
+	if got := fake.sentCount(); got != 0 {
+		t.Fatalf("sent count = %d, want 0", got)
 	}
 }
