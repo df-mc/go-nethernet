@@ -285,10 +285,19 @@ func (h *Handler) PongData(data []byte) {
 	h.status.Store(&status)
 }
 
+// Status sets the server status that the Handler responds with for HTTP requests
+// sent by clients. Note that if the upstream game listener also provides pong data
+// via [Handler.PongData], that data will take precedence, since [Handler.PongData]
+// overwrites the status set here. Callers can set [HandlerConfig.DisablePongData]
+// to true to disable this behavior.
 func (h *Handler) Status(status Status) {
 	h.status.Store(&status)
 }
 
+// handlePing handles a GET request to the /v1/join endpoint.
+// It responds with the current server status, if one has been set by
+// the caller via [Handler.Status] or by the upstream game listener via
+// [Handler.PongData]. Otherwise, it responds with an empty body.
 func (h *Handler) handlePing(w http.ResponseWriter, req *http.Request) {
 	req.Close = true // Do not keep-alive the TCP connection.
 	log := h.conf.Logger.With("method", req.Method, "url", req.URL)
@@ -379,7 +388,8 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(signal.Data))
 	case nethernet.SignalTypeError:
-		writeText(w, http.StatusBadRequest, signal.Data)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(signal.Data))
 	default:
 		log.Error("unexpected negotiation result", slog.String("signal", signal.String()))
 		writeText(w, http.StatusInternalServerError, "An error has occurred while handling this request")

@@ -7,16 +7,29 @@ import (
 	"strings"
 )
 
+// Status represents a server status of a NetherNet server.
 type Status struct {
-	ServerName     string `json:"name"`
-	Protocol       int    `json:"protocol"`
-	Version        string `json:"version"`
-	LevelName      string `json:"level"`
-	PlayerCount    int    `json:"players"`
-	MaxPlayerCount int    `json:"maxPlayers"`
-	GameType       int    `json:"gameType"`
+	// ServerName is the name of the server. It is displayed as the MOTD.
+	ServerName string `json:"name"`
+	// Protocol is the protocol version used by the upstream game listener.
+	Protocol int `json:"protocol"`
+	// Version is the version of the game that the server is currently running.
+	Version string `json:"version"`
+	// LevelName is the name of the world. It is never displayed in the server card in Multiplayer tab.
+	LevelName string `json:"level"`
+	// PlayerCount is the number of players that is currently connected to the server.
+	PlayerCount int `json:"players"`
+	// MaxPlayerCount is the number of players that can be connected to the server.
+	MaxPlayerCount int `json:"maxPlayers"`
+	// GameType represents the game mode of the level running in the server in numerical value.
+	// It is 0 for survival, 1 for creative, and 2 for adventure.
+	GameType int `json:"gameType"`
 }
 
+// RakNetPongData produces a RakNet-compatible pong data from the status.
+// It is typically used for maintaining compatibility with older code that
+// still expects the same format used in RakNet servers. The port included
+// in the resulting data is always 19132.
 func (s Status) RakNetPongData() []byte {
 	var gameType string
 	switch s.GameType {
@@ -35,6 +48,11 @@ func (s Status) RakNetPongData() []byte {
 	))
 }
 
+// RakNetPongData parses a RakNet-compatible pong data into a Status.
+// It is typically used for maintaining compatibility with older code that
+// still produces the same format used in RakNet servers, e.g. Gophertunnel.
+// It is also used in [Handler.PongData] in order to synchronize the status
+// with the upstream Minecraft listener.
 func RakNetPongData(b []byte) (Status, error) {
 	frag := strings.Split(string(b), ";")
 	if len(frag) < 9 {
