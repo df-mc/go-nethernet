@@ -7,19 +7,16 @@ import (
 
 // GameType represents the default game mode of a world.
 const (
-	GameTypeSurvival       int32 = 0
-	GameTypeCreative       int32 = 1
-	GameTypeAdventure      int32 = 2
-	GameTypeSurvivalViewer int32 = 3
-	GameTypeCreativeViewer int32 = 4
-	GameTypeDefault        int32 = 5
+	GameTypeSurvival int32 = iota
+	GameTypeCreative
+	GameTypeAdventure
 )
 
 // TransportLayer indicates the transport protocol used by a server.
 const (
-	TransportLayerRakNet    int32 = 0
-	TransportLayerNetherNet int32 = 2
-	TransportLayerLocal     int32 = 4
+	TransportLayerRakNet int32 = iota << 1
+	TransportLayerNetherNet
+	TransportLayerDefault
 )
 
 // ServerData defines the binary structure representing worlds in Minecraft: Bedrock Edition.
@@ -48,6 +45,10 @@ type ServerData struct {
 	AcceptsOnlineAuth bool
 	// AcceptsSelfSignedAuth indicates whether the server accepts self-signed (LAN) authentication.
 	AcceptsSelfSignedAuth bool
+	// Nonce is a randomly generated, hex-encoded string produced by the host. Clients connecting
+	// to this server must include this same value in the 'Nonce' field of the ClientData sent
+	// in the connection request of the Login packet.
+	Nonce string
 	// TransportLayer indicates the transport layer used by the server. In vanilla, this is typically
 	// 2 for NetherNet. Other values are also supported but are currently not useful in LAN discovery
 	// as it only allows connections over NetherNet. Therefore, the purposes or usage of this field is
@@ -72,6 +73,7 @@ func (d *ServerData) MarshalBinary() ([]byte, error) {
 	writeBool(buf, d.Hardcore)
 	writeBool(buf, d.AcceptsOnlineAuth)
 	writeBool(buf, d.AcceptsSelfSignedAuth)
+	writeString(buf, d.Nonce)
 	writeVarint32(buf, d.TransportLayer)
 	writeVarint32(buf, d.ConnectionType)
 
@@ -125,6 +127,10 @@ func (d *ServerData) UnmarshalBinary(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("read accepts self-signed auth: %w", err)
 	}
+	d.Nonce, err = readString(buf)
+	if err != nil {
+		return fmt.Errorf("read nonce: %w", err)
+	}
 	d.TransportLayer, err = readVarint32(buf)
 	if err != nil {
 		return fmt.Errorf("read transport layer: %w", err)
@@ -141,4 +147,4 @@ func (d *ServerData) UnmarshalBinary(data []byte) error {
 }
 
 // version is the current version of ServerData as supported by the `discovery` package.
-const version uint8 = 5
+const version uint8 = 6

@@ -168,14 +168,11 @@ func (l *Listener) Notify(n nethernet.Notifier) func() {
 	l.notifyCount++
 	l.notifiersMu.Unlock()
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			l.notifiersMu.Lock()
-			delete(l.notifiers, i)
-			l.notifiersMu.Unlock()
-		})
-	}
+	return sync.OnceFunc(func() {
+		l.notifiersMu.Lock()
+		delete(l.notifiers, i)
+		l.notifiersMu.Unlock()
+	})
 }
 
 // Context returns a context that is canceled when the Listener is closed.

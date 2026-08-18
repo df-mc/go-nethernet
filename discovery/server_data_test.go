@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestServerDataMarshalBinaryV5(t *testing.T) {
+func TestServerDataMarshalBinary(t *testing.T) {
 	data := testServerData("server", "world")
 	data.Hardcore = true
 	data.AcceptsOnlineAuth = true
@@ -16,7 +16,7 @@ func TestServerDataMarshalBinaryV5(t *testing.T) {
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	want := []byte{
-		0x05,
+		0x06,
 		0x06, 's', 'e', 'r', 'v', 'e', 'r',
 		0x05, 'w', 'o', 'r', 'l', 'd',
 		0x04,
@@ -26,6 +26,7 @@ func TestServerDataMarshalBinaryV5(t *testing.T) {
 		0x01,
 		0x01,
 		0x01,
+		0x5, 'n', 'o', 'n', 'c', 'e',
 		0x04,
 		0x08,
 	}
@@ -34,10 +35,10 @@ func TestServerDataMarshalBinaryV5(t *testing.T) {
 	}
 }
 
-func TestServerDataUnmarshalBinaryV5(t *testing.T) {
+func TestServerDataUnmarshalBinary(t *testing.T) {
 	var data ServerData
 	if err := data.UnmarshalBinary([]byte{
-		0x05,
+		0x06,
 		0x06, 's', 'e', 'r', 'v', 'e', 'r',
 		0x05, 'w', 'o', 'r', 'l', 'd',
 		0x04,
@@ -47,6 +48,7 @@ func TestServerDataUnmarshalBinaryV5(t *testing.T) {
 		0x01,
 		0x01,
 		0x00,
+		0x5, 'n', 'o', 'n', 'c', 'e',
 		0x04,
 		0x08,
 	}); err != nil {
@@ -83,5 +85,6 @@ func testServerData(serverName, levelName string) *ServerData {
 		AcceptsSelfSignedAuth: true,
 		TransportLayer:        TransportLayerNetherNet,
 		ConnectionType:        4,
+		Nonce:                 "nonce",
 	}
 }

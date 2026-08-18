@@ -151,6 +151,14 @@ func Serve(address string) (*Handler, error) {
 // Currently, Handler implements the following endpoints:
 //   - GET /v1/join (ping)
 //   - POST /v1/join/{networkID} (WebRTC negotiation)
+//
+// On an address join a Bedrock client discovers this endpoint by sending the
+// GET /v1/join ping to each candidate URL in order, stopping at the first that
+// responds: https://host:port, https://host (443), http://host:port, then
+// http://host (80). An explicit port collapses the list to the https/http
+// variants on that port. If none respond the client falls back to RakNet, so a
+// server that serves this Handler is reached over NetherNet in preference to a
+// RakNet listener on the same address.
 type Handler struct {
 	// pending tracks connection that are currently waiting for an SDP answer.
 	// Each key identifies the connection with network ID and connection ID, and
@@ -223,16 +231,13 @@ func (h *Handler) Notify(n nethernet.Notifier) (stop func()) {
 	h.notifier = n
 	h.notifierMu.Unlock()
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			h.notifierMu.Lock()
-			if h.notifierID == id {
-				h.notifier = nil
-			}
-			h.notifierMu.Unlock()
-		})
-	}
+	return sync.OnceFunc(func() {
+		h.notifierMu.Lock()
+		if h.notifierID == id {
+			h.notifier = nil
+		}
+		h.notifierMu.Unlock()
+	})
 }
 
 // Context returns the background context of the underlying HTTP server, if one is bound
