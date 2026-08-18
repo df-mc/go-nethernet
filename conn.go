@@ -222,6 +222,8 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 	}
 }
 
+// messageFragmentCount returns how many data-channel messages are needed to
+// carry a packet at the given payload size.
 func messageFragmentCount(size, segmentSize int) int {
 	if size == 0 {
 		return 0
@@ -486,6 +488,8 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 // matching the 'a=max-message-size' value in the SDP sent by vanilla peer connections.
 const maxMessageSize = 262143
 
+// segmentPayloadSize returns the negotiated fragment payload size. It uses the
+// standard NetherNet size before transport negotiation has finished.
 func (conn *Conn) segmentPayloadSize() int {
 	if size := conn.maxSegmentPayload.Load(); size != 0 {
 		return int(size)
@@ -493,6 +497,8 @@ func (conn *Conn) segmentPayloadSize() int {
 	return maxMessageSize
 }
 
+// updateMaxSegmentPayload reads the established SCTP limit and stores the
+// space available after the one-byte NetherNet fragment header.
 func (conn *Conn) updateMaxSegmentPayload() error {
 	max := conn.sctp.GetCapabilities().MaxMessageSize
 	payload, err := segmentPayloadSizeFromSCTP(max)
@@ -503,6 +509,8 @@ func (conn *Conn) updateMaxSegmentPayload() error {
 	return nil
 }
 
+// segmentPayloadSizeFromSCTP removes the one-byte NetherNet fragment header
+// from an SCTP message-size limit.
 func segmentPayloadSizeFromSCTP(max uint32) (uint32, error) {
 	if max <= 1 {
 		return 0, fmt.Errorf("negotiated SCTP max message size must exceed one byte: %d", max)
