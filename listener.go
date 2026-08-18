@@ -390,6 +390,12 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			_ = c.Close()
 		}
 	}()
+	if !l.registerConnection(c) {
+		return wrapSignalError(
+			fmt.Errorf("connection already exists for %s", c.remoteAddr()),
+			ErrorCodeIncomingConnectionIgnored,
+		)
+	}
 	disableTrickleICE := shouldDisableTrickleICE(l.conf.DisableTrickleICE, l.signaling)
 	if disableTrickleICE {
 		c.description.candidates, err = c.gatherCandidates(ctx)
@@ -483,7 +489,6 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		}
 	}
 
-	l.connections.Store(c.remoteAddr().String(), c)
 	go l.handleConn(c, desc, channelsReady)
 	established = true
 	return nil
@@ -518,9 +523,16 @@ func (l *Listener) handleSignal(signal *Signal) error {
 	return conn.(*Conn).handleSignal(signal)
 }
 
+// registerConnection gives conn ownership of its remote address if no other
+// connection is already negotiating or established for it.
+func (l *Listener) registerConnection(conn *Conn) bool {
+	_, loaded := l.connections.LoadOrStore(conn.remoteAddr().String(), conn)
+	return !loaded
+}
+
 // handleClose deletes the Conn from the Listener, since it is closed and can no longer be negotiated.
 func (l *Listener) handleClose(conn *Conn) {
-	l.connections.Delete(conn.remoteAddr().String())
+	l.connections.CompareAndDelete(conn.remoteAddr().String(), conn)
 }
 
 // log extends the [slog.Logger] from [ListenConfig.Log] with an additional [slog.Attr] of "src" with the
