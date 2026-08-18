@@ -74,6 +74,10 @@ type Client struct {
 	notifiersMu sync.RWMutex
 }
 
+// PingContext sends a ping request to the given address and returns the
+// Status reported by the server. The returned Status can also be converted
+// to RakNet-compatible pong data via [Status.RakNetPongData], for use with
+// older code that still expects that format.
 func (c *Client) PingContext(ctx context.Context, address string) (Status, error) {
 	u, err := parseURL(address)
 	if err != nil {
