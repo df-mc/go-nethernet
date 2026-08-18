@@ -74,6 +74,14 @@ type Dialer struct {
 	// as relayed candidates from TURN servers only.
 	ICEGatherPolicy webrtc.ICEGatherPolicy
 
+	// Credentials optionally supplies the ICE servers used for gathering local
+	// candidates. When non-nil, it takes precedence over [Signaling.Credentials],
+	// letting a caller gather through its own STUN/TURN servers rather than the
+	// ones advertised by the signaling service. This pairs with
+	// [Dialer.ICEGatherPolicy] set to relay-only to route the connection through
+	// a caller-controlled TURN server.
+	Credentials func(ctx context.Context) (*Credentials, error)
+
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
 	// When set to true, the dialer waits for ICE gathering to complete and embeds
@@ -93,6 +101,9 @@ type Dialer struct {
 // an offer with local candidates, and also to notify incoming signals received from the remote network. The
 // [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
 // ready to receive and send packets.
+//
+// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
+// asynchronously; it is abandoned after [SignalErrorTimeout].
 func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (_ *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
@@ -114,7 +125,11 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		}
 	}
 
-	credentials, err := signaling.Credentials(ctx)
+	credentialsFunc := signaling.Credentials
+	if d.Credentials != nil {
+		credentialsFunc = d.Credentials
+	}
+	credentials, err := credentialsFunc(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("obtain credentials: %w", err)
 	}
@@ -295,7 +310,7 @@ func (d dialerConn) log() *slog.Logger {
 // provided [Signaling] implementation, remote network ID, and error code.
 func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	go func() {
-		ctx, cancel := context.WithTimeout(signaling.Context(), signalErrorTimeout)
+		ctx, cancel := context.WithTimeout(signaling.Context(), SignalErrorTimeout)
 		defer cancel()
 		_ = signaling.Signal(ctx, &Signal{
 			Type:         SignalTypeError,
@@ -306,7 +321,9 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 	}()
 }
 
-const signalErrorTimeout = time.Second * 2
+// SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
+// failed dial.
+const SignalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
 // then starts DTLS and SCTP using the parameters from the remote description.

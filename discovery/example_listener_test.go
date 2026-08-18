@@ -1,6 +1,8 @@
 package discovery
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +23,11 @@ func ExampleListen() {
 		panic(fmt.Sprintf("error listening on discovery: %s", err))
 	}
 	defer d.Close()
+
+	nonce := make([]byte, 16)
+	if _, err := cryptorand.Read(nonce); err != nil {
+		panic(fmt.Sprintf("error generating nonce: %s", err))
+	}
 	d.ServerData(&ServerData{
 		ServerName:            "df-mc/go-nethernet",
 		LevelName:             "Bedrock World",
@@ -29,6 +36,7 @@ func ExampleListen() {
 		MaxPlayerCount:        8,
 		AcceptsOnlineAuth:     true,
 		AcceptsSelfSignedAuth: true,
+		Nonce:                 hex.EncodeToString(nonce),
 		TransportLayer:        TransportLayerNetherNet,
 		ConnectionType:        4,
 	})
