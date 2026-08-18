@@ -51,8 +51,8 @@ func (s Status) RakNetPongData() []byte {
 // RakNetPongData parses a RakNet-compatible pong data into a Status.
 // It is typically used for maintaining compatibility with older code that
 // still produces the same format used in RakNet servers, e.g. Gophertunnel.
-// It is also used in [Handler.PongData] in order to synchronize the status
-// with the upstream Minecraft listener.
+// It is also used in [Handler.PongData] to synchronize the status with the
+// upstream game listener.
 func RakNetPongData(b []byte) (Status, error) {
 	frag := strings.Split(string(b), ";")
 	if len(frag) < 9 {
