@@ -32,6 +32,7 @@ type Signaling interface {
 	// Credentials blocks until Credentials are received by Signaling, and returns them. If Signaling
 	// does not support returning Credentials, it will return nil. Credentials are typically received
 	// from a WebSocket connection. The [context.Context] may be used to cancel the blocking.
+	// It may be called concurrently for different connections.
 	Credentials(ctx context.Context) (*Credentials, error)
 
 	// NetworkID returns the local network ID of Signaling. It is used by Listener to obtain its local
