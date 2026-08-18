@@ -31,3 +31,32 @@ func TestListenerWaitForChannelsReadyReturnsNilWhenReady(t *testing.T) {
 		t.Fatalf("waitForChannelsReady() error = %v, want nil", err)
 	}
 }
+
+func TestListenerConnectionOwnership(t *testing.T) {
+	l := &Listener{}
+	first := &Conn{id: 7, networkID: "remote"}
+	duplicate := &Conn{id: 7, networkID: "remote"}
+	key := first.remoteAddr().String()
+
+	if !l.registerConnection(first) {
+		t.Fatal("registerConnection(first) = false, want true")
+	}
+	if l.registerConnection(duplicate) {
+		t.Fatal("registerConnection(duplicate) = true, want false")
+	}
+	if got, ok := l.connections.Load(key); !ok || got != first {
+		t.Fatalf("connections.Load(%q) = (%p, %t), want (%p, true)", key, got, ok, first)
+	}
+
+	// Cleanup for a rejected duplicate must not remove the connection that owns
+	// the address.
+	l.handleClose(duplicate)
+	if got, ok := l.connections.Load(key); !ok || got != first {
+		t.Fatalf("connections.Load(%q) after duplicate close = (%p, %t), want (%p, true)", key, got, ok, first)
+	}
+
+	l.handleClose(first)
+	if _, ok := l.connections.Load(key); ok {
+		t.Fatalf("connections.Load(%q) after owner close succeeded, want missing", key)
+	}
+}
