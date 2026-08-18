@@ -80,3 +80,58 @@ func TestIsTerminalICEState(t *testing.T) {
 		}
 	}
 }
+
+func TestMessageFragmentCount(t *testing.T) {
+	tests := []struct {
+		name        string
+		size        int
+		segmentSize int
+		want        int
+	}{
+		{name: "empty", segmentSize: maxMessageSize},
+		{name: "single", size: maxMessageSize, segmentSize: maxMessageSize, want: 1},
+		{name: "two", size: maxMessageSize + 1, segmentSize: maxMessageSize, want: 2},
+		{name: "vanilla maximum", size: maxMessageSize * 255, segmentSize: maxMessageSize, want: 255},
+		{name: "over vanilla maximum", size: maxMessageSize*255 + 1, segmentSize: maxMessageSize, want: 256},
+		{name: "negotiated size", size: 1999, segmentSize: 999, want: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := messageFragmentCount(tt.size, tt.segmentSize); got != tt.want {
+				t.Fatalf("messageFragmentCount(%d, %d) = %d, want %d", tt.size, tt.segmentSize, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConnSegmentPayloadSizeDefaultsToVanilla(t *testing.T) {
+	var conn Conn
+	if got := conn.segmentPayloadSize(); got != maxMessageSize {
+		t.Fatalf("segmentPayloadSize() = %d, want %d", got, maxMessageSize)
+	}
+	conn.maxSegmentPayload.Store(999)
+	if got := conn.segmentPayloadSize(); got != 999 {
+		t.Fatalf("segmentPayloadSize() = %d, want 999", got)
+	}
+}
+
+func TestSegmentPayloadSizeFromSCTP(t *testing.T) {
+	for _, max := range []uint32{0, 1} {
+		if _, err := segmentPayloadSizeFromSCTP(max); err == nil {
+			t.Fatalf("segmentPayloadSizeFromSCTP(%d) error = nil, want error", max)
+		}
+	}
+	for max, want := range map[uint32]uint32{
+		2:       1,
+		65_535:  65_534,
+		262_144: maxMessageSize,
+	} {
+		got, err := segmentPayloadSizeFromSCTP(max)
+		if err != nil {
+			t.Fatalf("segmentPayloadSizeFromSCTP(%d) error = %v", max, err)
+		}
+		if got != want {
+			t.Fatalf("segmentPayloadSizeFromSCTP(%d) = %d, want %d", max, got, want)
+		}
+	}
+}

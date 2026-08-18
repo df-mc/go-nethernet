@@ -73,6 +73,9 @@ type Conn struct {
 	channels [messageReliabilityCapacity]*dataChannel
 	// channelsMu guards channels from concurrent read-write access during startup and closure.
 	channelsMu sync.RWMutex
+	// maxSegmentPayload is the negotiated SCTP message size minus the one-byte
+	// NetherNet fragment header.
+	maxSegmentPayload atomic.Uint32
 
 	readMu  sync.Mutex
 	readBuf []byte
@@ -188,8 +191,9 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		if reliability >= messageReliabilityCapacity {
 			return 0, fmt.Errorf("invalid message reliability: %d", reliability)
 		}
-		if reliability == MessageReliabilityUnreliable && len(data) > maxMessageSize {
-			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", maxMessageSize, len(data))
+		segmentSize := conn.segmentPayloadSize()
+		if reliability == MessageReliabilityUnreliable && len(data) > segmentSize {
+			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", segmentSize, len(data))
 		}
 		d := conn.channel(reliability)
 
@@ -198,17 +202,16 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		defer d.write.Unlock()
 
 		// Each segment is prefixed with a uint8 remaining-segment counter that starts
-		// at totalSegments-1 and decrements to 0 for the final segment. This limits
-		// the maximum number of segments to math.MaxUint8+1 (256).
-		const maxSegments = math.MaxUint8 + 1
-		totalSegments := (len(data) + maxMessageSize - 1) / maxMessageSize
-		if totalSegments > maxSegments {
-			return 0, fmt.Errorf("data too large: %d bytes requires %d segments (max %d)", len(data), totalSegments, maxSegments)
+		// at totalSegments-1 and decrements to 0 for the final segment. Vanilla
+		// limits the total number of segments to math.MaxUint8 (255).
+		totalSegments := messageFragmentCount(len(data), segmentSize)
+		if totalSegments > math.MaxUint8 {
+			return 0, fmt.Errorf("data too large: %d bytes requires %d segments (max %d)", len(data), totalSegments, math.MaxUint8)
 		}
 
 		remaining := totalSegments - 1
-		for i := 0; i < len(data); i += maxMessageSize {
-			frag := data[i:min(len(data), i+maxMessageSize)]
+		for i := 0; i < len(data); i += segmentSize {
+			frag := data[i:min(len(data), i+segmentSize)]
 			if err := d.Send(append([]byte{uint8(remaining)}, frag...)); err != nil {
 				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, closedWriteError(err))
 			}
@@ -217,6 +220,13 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		}
 		return n, nil
 	}
+}
+
+func messageFragmentCount(size, segmentSize int) int {
+	if size == 0 {
+		return 0
+	}
+	return (size-1)/segmentSize + 1
 }
 
 // closedWriteError wraps the given cause with [net.ErrClosed] so callers
@@ -475,6 +485,30 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 // This is 256KB (262144 bytes) minus 1 byte for the segment counter,
 // matching the 'a=max-message-size' value in the SDP sent by vanilla peer connections.
 const maxMessageSize = 262143
+
+func (conn *Conn) segmentPayloadSize() int {
+	if size := conn.maxSegmentPayload.Load(); size != 0 {
+		return int(size)
+	}
+	return maxMessageSize
+}
+
+func (conn *Conn) updateMaxSegmentPayload() error {
+	max := conn.sctp.GetCapabilities().MaxMessageSize
+	payload, err := segmentPayloadSizeFromSCTP(max)
+	if err != nil {
+		return err
+	}
+	conn.maxSegmentPayload.Store(payload)
+	return nil
+}
+
+func segmentPayloadSizeFromSCTP(max uint32) (uint32, error) {
+	if max <= 1 {
+		return 0, fmt.Errorf("negotiated SCTP max message size must exceed one byte: %d", max)
+	}
+	return max - 1, nil
+}
 
 // parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
 // It transforms the fields of the [sdp.SessionDescription] into a description, which can be
@@ -832,6 +866,7 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 		localNetworkID: localNetworkID,
 	}
 	c.ctx, c.cancel = context.WithCancelCause(context.Background())
+	c.maxSegmentPayload.Store(maxMessageSize)
 	c.handleTransports()
 	return c, nil
 }
