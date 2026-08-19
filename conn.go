@@ -125,7 +125,7 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	}
 	select {
 	case <-conn.ctx.Done():
-		return nil, context.Cause(conn.ctx)
+		return nil, errors.Join(context.Cause(conn.ctx), net.ErrClosed)
 	case pk := <-conn.channel(r).packets:
 		return pk, nil
 	}
