@@ -191,7 +191,10 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		if reliability >= messageReliabilityCapacity {
 			return 0, fmt.Errorf("invalid message reliability: %d", reliability)
 		}
-		segmentSize := conn.segmentPayloadSize()
+		segmentSize := int(conn.maxSegmentPayload.Load())
+		if segmentSize == 0 {
+			segmentSize = maxMessageSize
+		}
 		if reliability == MessageReliabilityUnreliable && len(data) > segmentSize {
 			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", segmentSize, len(data))
 		}
@@ -204,7 +207,10 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		// Each segment is prefixed with a uint8 remaining-segment counter that starts
 		// at totalSegments-1 and decrements to 0 for the final segment. Vanilla
 		// limits the total number of segments to math.MaxUint8 (255).
-		totalSegments := messageFragmentCount(len(data), segmentSize)
+		totalSegments := 0
+		if len(data) != 0 {
+			totalSegments = (len(data)-1)/segmentSize + 1
+		}
 		if totalSegments > math.MaxUint8 {
 			return 0, fmt.Errorf("data too large: %d bytes requires %d segments (max %d)", len(data), totalSegments, math.MaxUint8)
 		}
@@ -220,15 +226,6 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		}
 		return n, nil
 	}
-}
-
-// messageFragmentCount returns how many data-channel messages are needed to
-// carry a packet at the given payload size.
-func messageFragmentCount(size, segmentSize int) int {
-	if size == 0 {
-		return 0
-	}
-	return (size-1)/segmentSize + 1
 }
 
 // closedWriteError wraps the given cause with [net.ErrClosed] so callers
@@ -487,15 +484,6 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 // This is 256KB (262144 bytes) minus 1 byte for the segment counter,
 // matching the 'a=max-message-size' value in the SDP sent by vanilla peer connections.
 const maxMessageSize = 262143
-
-// segmentPayloadSize returns the negotiated fragment payload size. It uses the
-// standard NetherNet size before transport negotiation has finished.
-func (conn *Conn) segmentPayloadSize() int {
-	if size := conn.maxSegmentPayload.Load(); size != 0 {
-		return int(size)
-	}
-	return maxMessageSize
-}
 
 // parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
 // It transforms the fields of the [sdp.SessionDescription] into a description, which can be
