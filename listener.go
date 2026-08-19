@@ -637,6 +637,7 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
+	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
 
 	return l.waitForChannelsReady(ctx, conn, channelsReady)
 }

@@ -73,6 +73,9 @@ type Conn struct {
 	channels [messageReliabilityCapacity]*dataChannel
 	// channelsMu guards channels from concurrent read-write access during startup and closure.
 	channelsMu sync.RWMutex
+	// maxSegmentPayload is the negotiated SCTP message size minus the one-byte
+	// NetherNet fragment header.
+	maxSegmentPayload atomic.Uint32
 
 	readMu  sync.Mutex
 	readBuf []byte
@@ -188,8 +191,12 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		if reliability >= messageReliabilityCapacity {
 			return 0, fmt.Errorf("invalid message reliability: %d", reliability)
 		}
-		if reliability == MessageReliabilityUnreliable && len(data) > maxMessageSize {
-			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", maxMessageSize, len(data))
+		segmentSize := int(conn.maxSegmentPayload.Load())
+		if segmentSize == 0 {
+			segmentSize = maxMessageSize
+		}
+		if reliability == MessageReliabilityUnreliable && len(data) > segmentSize {
+			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", segmentSize, len(data))
 		}
 		d := conn.channel(reliability)
 
@@ -198,17 +205,19 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		defer d.write.Unlock()
 
 		// Each segment is prefixed with a uint8 remaining-segment counter that starts
-		// at totalSegments-1 and decrements to 0 for the final segment. This limits
-		// the maximum number of segments to math.MaxUint8+1 (256).
-		const maxSegments = math.MaxUint8 + 1
-		totalSegments := (len(data) + maxMessageSize - 1) / maxMessageSize
-		if totalSegments > maxSegments {
-			return 0, fmt.Errorf("data too large: %d bytes requires %d segments (max %d)", len(data), totalSegments, maxSegments)
+		// at totalSegments-1 and decrements to 0 for the final segment. Vanilla
+		// limits the total number of segments to math.MaxUint8 (255).
+		totalSegments := 0
+		if len(data) != 0 {
+			totalSegments = (len(data)-1)/segmentSize + 1
+		}
+		if totalSegments > math.MaxUint8 {
+			return 0, fmt.Errorf("data too large: %d bytes requires %d segments (max %d)", len(data), totalSegments, math.MaxUint8)
 		}
 
 		remaining := totalSegments - 1
-		for i := 0; i < len(data); i += maxMessageSize {
-			frag := data[i:min(len(data), i+maxMessageSize)]
+		for i := 0; i < len(data); i += segmentSize {
+			frag := data[i:min(len(data), i+segmentSize)]
 			if err := d.Send(append([]byte{uint8(remaining)}, frag...)); err != nil {
 				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, closedWriteError(err))
 			}
@@ -548,6 +557,9 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse max-message-size attribute as uint32: %w", err)
 	}
+	if maxMessageSize <= 1 {
+		return nil, fmt.Errorf("max-message-size attribute must exceed one byte: %d", maxMessageSize)
+	}
 
 	var candidates []webrtc.ICECandidate
 	for _, attr := range append(d.Attributes, m.Attributes...) {
@@ -832,6 +844,7 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 		localNetworkID: localNetworkID,
 	}
 	c.ctx, c.cancel = context.WithCancelCause(context.Background())
+	c.maxSegmentPayload.Store(maxMessageSize)
 	c.handleTransports()
 	return c, nil
 }
