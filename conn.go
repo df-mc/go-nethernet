@@ -497,12 +497,6 @@ func (conn *Conn) segmentPayloadSize() int {
 	return maxMessageSize
 }
 
-// updateMaxSegmentPayload reads the established SCTP limit and stores the
-// space available after the one-byte NetherNet fragment header.
-func (conn *Conn) updateMaxSegmentPayload() {
-	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
-}
-
 // parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
 // It transforms the fields of the [sdp.SessionDescription] into a description, which can be
 // used to start ICE, DTLS, and SCTP transports for a Conn.

@@ -349,7 +349,7 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
-	conn.updateMaxSegmentPayload()
+	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
 	for r := range messageReliabilityCapacity {
 		c, err := d.API.NewDataChannel(conn.sctp, r.Parameters())
 		if err != nil {
