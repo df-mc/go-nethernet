@@ -499,23 +499,8 @@ func (conn *Conn) segmentPayloadSize() int {
 
 // updateMaxSegmentPayload reads the established SCTP limit and stores the
 // space available after the one-byte NetherNet fragment header.
-func (conn *Conn) updateMaxSegmentPayload() error {
-	max := conn.sctp.GetCapabilities().MaxMessageSize
-	payload, err := segmentPayloadSizeFromSCTP(max)
-	if err != nil {
-		return err
-	}
-	conn.maxSegmentPayload.Store(payload)
-	return nil
-}
-
-// segmentPayloadSizeFromSCTP removes the one-byte NetherNet fragment header
-// from an SCTP message-size limit.
-func segmentPayloadSizeFromSCTP(max uint32) (uint32, error) {
-	if max <= 1 {
-		return 0, fmt.Errorf("negotiated SCTP max message size must exceed one byte: %d", max)
-	}
-	return max - 1, nil
+func (conn *Conn) updateMaxSegmentPayload() {
+	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
 }
 
 // parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
@@ -589,6 +574,9 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	maxMessageSize, err := strconv.ParseUint(attr, 10, 32)
 	if err != nil {
 		return nil, fmt.Errorf("parse max-message-size attribute as uint32: %w", err)
+	}
+	if maxMessageSize <= 1 {
+		return nil, fmt.Errorf("max-message-size attribute must exceed one byte: %d", maxMessageSize)
 	}
 
 	var candidates []webrtc.ICECandidate

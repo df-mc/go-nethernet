@@ -6,6 +6,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -115,23 +116,22 @@ func TestConnSegmentPayloadSizeDefaultsToVanilla(t *testing.T) {
 	}
 }
 
-func TestSegmentPayloadSizeFromSCTP(t *testing.T) {
-	for _, max := range []uint32{0, 1} {
-		if _, err := segmentPayloadSizeFromSCTP(max); err == nil {
-			t.Fatalf("segmentPayloadSizeFromSCTP(%d) error = nil, want error", max)
-		}
-	}
-	for max, want := range map[uint32]uint32{
-		2:       1,
-		65_535:  65_534,
-		262_144: maxMessageSize,
-	} {
-		got, err := segmentPayloadSizeFromSCTP(max)
-		if err != nil {
-			t.Fatalf("segmentPayloadSizeFromSCTP(%d) error = %v", max, err)
-		}
-		if got != want {
-			t.Fatalf("segmentPayloadSizeFromSCTP(%d) = %d, want %d", max, got, want)
-		}
+func TestParseDescriptionRejectsMessageSizesWithoutFragmentPayload(t *testing.T) {
+	for _, max := range []string{"0", "1"} {
+		t.Run(max, func(t *testing.T) {
+			media := &sdp.MediaDescription{}
+			media.WithValueAttribute("ice-ufrag", "ufrag")
+			media.WithValueAttribute("ice-pwd", "password")
+			media.WithFingerprint("sha-256", "fingerprint")
+			media.WithValueAttribute("setup", "actpass")
+			media.WithValueAttribute("max-message-size", max)
+
+			_, err := parseDescription(&sdp.SessionDescription{
+				MediaDescriptions: []*sdp.MediaDescription{media},
+			})
+			if err == nil {
+				t.Fatalf("parseDescription() error = nil, want error for max-message-size %s", max)
+			}
+		})
 	}
 }

@@ -349,9 +349,7 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
-	if err := conn.updateMaxSegmentPayload(); err != nil {
-		return fmt.Errorf("configure NetherNet message size: %w", err)
-	}
+	conn.updateMaxSegmentPayload()
 	for r := range messageReliabilityCapacity {
 		c, err := d.API.NewDataChannel(conn.sctp, r.Parameters())
 		if err != nil {

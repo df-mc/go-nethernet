@@ -625,9 +625,7 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
-	if err := conn.updateMaxSegmentPayload(); err != nil {
-		return fmt.Errorf("configure NetherNet message size: %w", err)
-	}
+	conn.updateMaxSegmentPayload()
 
 	return l.waitForChannelsReady(ctx, conn, channelsReady)
 }
