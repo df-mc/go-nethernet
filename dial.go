@@ -224,23 +224,23 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 				if desc.identity != nil {
 					publicKey, err := d.VerifyServerToken(ctx, desc.identity.Assertion.Token, desc.identity.IdentityProvider.Domain)
 					if err != nil {
-						d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+						d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 						return nil, fmt.Errorf("verify server identity token: %w", err)
 					}
 					if publicKey == nil {
 						publicKey, err = claimPublicKey(desc.identity.Assertion.Token, true)
 						if err != nil {
-							d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+							d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 							return nil, fmt.Errorf("claim public key: %w", err)
 						}
 					}
 					if err := desc.identity.verify(desc, publicKey); err != nil {
-						d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+						d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 						return nil, fmt.Errorf("verify server identity: %w", err)
 					}
 					c.publicKey = publicKey
 				} else if !d.AllowIdentitylessServer {
-					d.signalError(signaling, networkID, ErrorCodeIdentityVerificationFailed)
+					d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 					return nil, errors.New("identityless answer SDP not allowed")
 				}
 				for _, candidate := range desc.candidates {
@@ -349,7 +349,6 @@ func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
-	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
 	for r := range messageReliabilityCapacity {
 		c, err := d.API.NewDataChannel(conn.sctp, r.Parameters())
 		if err != nil {

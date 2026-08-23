@@ -232,8 +232,8 @@ const (
 	ErrorCodeInternalErrorJSONSerialization
 	ErrorCodeInvalidArgument
 	ErrorCodeGenericFailure
-	_ // TODO
-	// ErrorCodeIdentityVerificationFailed reports that the remote identity token
+	ErrorCodeFailedToCreateIdentityAssertion
+	// ErrorCodeIdentityNotAllowed reports that the remote identity token
 	// or its DTLS fingerprint assertion failed validation.
-	ErrorCodeIdentityVerificationFailed = 37
+	ErrorCodeIdentityNotAllowed
 )
