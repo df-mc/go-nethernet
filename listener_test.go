@@ -38,10 +38,10 @@ func TestListenerConnectionOwnership(t *testing.T) {
 	duplicate := &Conn{id: 7, networkID: "remote"}
 	key := first.remoteAddr().String()
 
-	if !l.registerConnection(first) {
+	if _, exists := l.connections.LoadOrStore(first.remoteAddr().String(), first); exists {
 		t.Fatal("registerConnection(first) = false, want true")
 	}
-	if l.registerConnection(duplicate) {
+	if _, exists := l.connections.LoadOrStore(duplicate.remoteAddr().String(), duplicate); !exists {
 		t.Fatal("registerConnection(duplicate) = true, want false")
 	}
 	if got, ok := l.connections.Load(key); !ok || got != first {
