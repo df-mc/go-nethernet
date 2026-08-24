@@ -34,7 +34,7 @@ func (pk *MessagePacket) Read(r io.Reader) error {
 	// remaining bytes as part of the data instead of leaving them for the
 	// trailing-bytes check in Unmarshal.
 	if buf, ok := r.(*bytes.Buffer); ok && buf.Len() > 0 {
-		data = append(data, buf.Bytes()...)
+		data = append(data, buf.Next(buf.Len())...)
 	}
 	pk.Data = string(data)
 	return nil
