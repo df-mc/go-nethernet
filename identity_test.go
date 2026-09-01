@@ -6,6 +6,7 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,42 @@ func TestClaimPublicKeyRejectsExpiredToken(t *testing.T) {
 	}
 	if _, err := claimPublicKey(token, true); err == nil {
 		t.Fatal("claimPublicKey() succeeded for expired token")
+	}
+}
+
+func TestClaimPublicKeyAllowsSmallFutureIssuedAtSkewForServerIdentity(t *testing.T) {
+	privateKey := newIdentityTestKey(t)
+	issuedAt := time.Now().Add(90 * time.Second)
+	token, err := newIdentityTestTokenAt(privateKey, issuedAt, issuedAt.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("newIdentityTestTokenAt() error = %v", err)
+	}
+	if _, err := claimPublicKey(token, true); err != nil {
+		t.Fatalf("claimPublicKey() rejected small future iat skew: %v", err)
+	}
+}
+
+func TestClaimPublicKeyRejectsLargeFutureIssuedAtSkewForServerIdentity(t *testing.T) {
+	privateKey := newIdentityTestKey(t)
+	issuedAt := time.Now().Add(2*time.Minute + 30*time.Second)
+	token, err := newIdentityTestTokenAt(privateKey, issuedAt, issuedAt.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("newIdentityTestTokenAt() error = %v", err)
+	}
+	if _, err := claimPublicKey(token, true); !errors.Is(err, jwt.ErrIssuedInTheFuture) {
+		t.Fatalf("claimPublicKey() error = %v, want future iat error", err)
+	}
+}
+
+func TestClaimPublicKeyRejectsFutureIssuedAtSkewForClientIdentity(t *testing.T) {
+	privateKey := newIdentityTestKey(t)
+	issuedAt := time.Now().Add(90 * time.Second)
+	token, err := newIdentityTestTokenAt(privateKey, issuedAt, issuedAt.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("newIdentityTestTokenAt() error = %v", err)
+	}
+	if _, err := claimPublicKey(token, false); !errors.Is(err, jwt.ErrIssuedInTheFuture) {
+		t.Fatalf("claimPublicKey() error = %v, want future iat error", err)
 	}
 }
 
@@ -176,11 +213,14 @@ func newIdentityTestKey(t *testing.T) *ecdsa.PrivateKey {
 }
 
 func newIdentityTestToken(privateKey *ecdsa.PrivateKey, expiresAt time.Time) (string, error) {
+	return newIdentityTestTokenAt(privateKey, expiresAt.Add(-time.Minute), expiresAt)
+}
+
+func newIdentityTestTokenAt(privateKey *ecdsa.PrivateKey, issuedAt, expiresAt time.Time) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: privateKey}, nil)
 	if err != nil {
 		return "", err
 	}
-	issuedAt := expiresAt.Add(-time.Minute)
 	return jwt.Signed(signer).Claims(tokenClaims{
 		Claims: jwt.Claims{
 			Expiry:   jwt.NewNumericDate(expiresAt),

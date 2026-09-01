@@ -39,6 +39,8 @@ type Identity struct {
 	Domain string
 }
 
+const serverIdentityIssuedAtLeeway = 2 * time.Minute
+
 // sign signs the DTLS fingerprints included in the given local description using
 // the [Identity.PrivateKey], and returns an identityData that can be embedded
 // to the description.
@@ -86,8 +88,14 @@ func claimPublicKey(token string, selfSigned bool) (*ecdsa.PublicKey, error) {
 	if err := t.UnsafeClaimsWithoutVerification(&claims); err != nil {
 		return nil, fmt.Errorf("extract JWT claims: %w", err)
 	}
-	if err := claims.Validate(jwt.Expected{Time: time.Now()}); err != nil {
-		return nil, fmt.Errorf("validate JWT claims: %w", err)
+	var validationErr error
+	if selfSigned {
+		validationErr = validateServerIdentityClaims(claims, time.Now())
+	} else {
+		validationErr = claims.Validate(jwt.Expected{Time: time.Now()})
+	}
+	if validationErr != nil {
+		return nil, fmt.Errorf("validate JWT claims: %w", validationErr)
 	}
 	if selfSigned {
 		// Verify that server identity tokens are self-signed using the corresponding
@@ -97,6 +105,21 @@ func claimPublicKey(token string, selfSigned bool) (*ecdsa.PublicKey, error) {
 		}
 	}
 	return claims.PublicKey, nil
+}
+
+// validateServerIdentityClaims retains go-jose's default leeway for expiry and
+// not-before claims while allowing a modest amount of clock skew for the
+// issued-at timestamp of a remote server identity.
+func validateServerIdentityClaims(claims tokenClaims, now time.Time) error {
+	issuedAt := claims.IssuedAt
+	claims.IssuedAt = nil
+	if err := claims.Validate(jwt.Expected{Time: now}); err != nil {
+		return err
+	}
+	if issuedAt != nil && now.Add(serverIdentityIssuedAtLeeway).Before(issuedAt.Time()) {
+		return jwt.ErrIssuedInTheFuture
+	}
+	return nil
 }
 
 // GenerateServerIdentity creates a new server Identity using the provided private key.
