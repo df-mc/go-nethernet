@@ -38,12 +38,14 @@ type ListenConfig struct {
 	// ConnContext provides a [context.Context] for starting the ICE, DTLS, and SCTP transports of the Conn. If nil,
 	// a default [context.Context] with 5 seconds timeout will be used. The parent [context.Context] may be used to
 	// create a [context.Context] to be returned (likely using [context.WithCancel] or [context.WithTimeout]).
+	// It may be called concurrently for different connections.
 	ConnContext func(parent context.Context, conn *Conn) (context.Context, context.CancelFunc)
 
 	// NegotiationContext provides a [context.Context] for the negotiation. If nil, a default [context.Context]
-	// with 5 seconds timeout will be used. The parent [context.Context] may be used to create a [context.Context]
+	// with a 15-second timeout will be used. The parent [context.Context] may be used to create a [context.Context]
 	// to be returned (likely using [context.WithCancel] or [context.WithTimeout]). If the deadline of the context
 	// is exceeded, a Signal of SignalTypeError with ErrorCodeNegotiationTimeoutWaitingForAccept will be signaled back.
+	// It may be called concurrently for different connections.
 	NegotiationContext func(parent context.Context) (context.Context, context.CancelFunc)
 
 	// IssueServerIdentity issues the identity presented to clients in SDP answers.
@@ -54,6 +56,7 @@ type ListenConfig struct {
 	// If set to nil, it is replaced to a function that automatically generates a
 	// temporary identity. Because the generated key is not saved, clients using
 	// Trust On First Use (TOFU) may treat each server restart as a different identity.
+	// It may be called concurrently for different connections.
 	IssueServerIdentity func(ctx context.Context) (*Identity, error)
 
 	// VerifyClientToken verifies the token contained in a client's identity
@@ -84,6 +87,7 @@ type ListenConfig struct {
 	// that the same public key was used in its 'cpk' claim. Servers that rely on
 	// NetherNet identity alone should provide a verifier that validates token
 	// issuance.
+	// It may be called concurrently for different connections.
 	VerifyClientToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)
 
 	// AllowAnonymous determines whether SDP offers without an 'a=identity'
@@ -171,15 +175,15 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		networkID: networkID,
 		id:        id,
 
-		incoming: make(chan *Conn),
-		signals:  make(chan *Signal, 64),
+		incoming:    make(chan *Conn),
+		signalLanes: make(map[string]*listenerSignalLane),
 
 		closed: make(chan struct{}),
 	}
 
 	stop := signaling.Notify(l)
 	l.stop = stop
-	go l.listen()
+	go l.monitorSignaling()
 
 	return l, nil
 }
@@ -196,12 +200,27 @@ type Listener struct {
 	connections sync.Map
 
 	incoming chan *Conn
-	signals  chan *Signal
+
+	signalLanesMu sync.Mutex
+	signalLanes   map[string]*listenerSignalLane
 
 	stop   func()
 	closed chan struct{}
 	once   sync.Once
 }
+
+// listenerSignalLane keeps signals in arrival order for one remote connection.
+type listenerSignalLane struct {
+	queue []*Signal
+}
+
+const (
+	// maxListenerSignalLanes limits how many connections may have signals being
+	// processed at the same time.
+	maxListenerSignalLanes = 64
+	// maxPendingSignalsPerLane keeps one connection from using all listener memory.
+	maxPendingSignalsPerLane = 64
+)
 
 // Accept waits for and returns the next [Conn] to the Listener. An error may be
 // returned, if the Listener has been closed.
@@ -283,57 +302,116 @@ func (l *Listener) PongData(b []byte) {
 // whether it was accepted for processing.
 func (l *Listener) NotifySignal(signal *Signal) bool {
 	select {
-	case l.signals <- signal:
-		return true
 	case <-l.Context().Done():
 		return false
 	case <-l.signaling.Context().Done():
 		return false
 	default:
-		l.log().Warn("dropping signal because channel buffer is full", slog.Any("signal", signal))
+	}
+
+	key := (&Addr{ConnectionID: signal.ConnectionID, NetworkID: signal.NetworkID}).String()
+	l.signalLanesMu.Lock()
+	lane, ok := l.signalLanes[key]
+	if !ok {
+		if len(l.signalLanes) >= maxListenerSignalLanes {
+			l.signalLanesMu.Unlock()
+			l.log().Warn("rejecting signal because too many connections are negotiating",
+				slog.String("type", signal.Type), slog.Uint64("connectionID", signal.ConnectionID))
+			return false
+		}
+		lane = &listenerSignalLane{}
+		l.signalLanes[key] = lane
+	}
+	if len(lane.queue) >= maxPendingSignalsPerLane {
+		l.signalLanesMu.Unlock()
+		l.log().Warn("rejecting signal because the connection queue is full",
+			slog.String("type", signal.Type), slog.Uint64("connectionID", signal.ConnectionID))
 		return false
+	}
+	lane.queue = append(lane.queue, signal)
+	l.signalLanesMu.Unlock()
+
+	if !ok {
+		go l.runSignalLane(key, lane)
+	}
+	return true
+}
+
+// runSignalLane handles one connection's signals in arrival order.
+func (l *Listener) runSignalLane(key string, lane *listenerSignalLane) {
+	for {
+		signal, ok := l.nextLaneSignal(key, lane)
+		if !ok {
+			return
+		}
+		l.handleQueuedSignal(signal)
 	}
 }
 
-// listen receives incoming signals sent from remote networks.
-// It is called as a goroutine from [ListenConfig.Listen] and initiates all incoming
-// connections from offers. When either the listener is closed or the signaling context
-// is canceled, the goroutine will automatically break.
-func (l *Listener) listen() {
-	for {
-		select {
-		case <-l.closed:
-			return
-		case <-l.signaling.Context().Done():
-			l.conf.Log.Warn("signaling context canceled",
-				slog.Any("error", context.Cause(l.signaling.Context())))
-			if err := l.Close(); err != nil {
-				l.conf.Log.Error("error closing listener due to cancellation of signaling context",
-					slog.Any("error", err))
-			}
-			return
-		case signal := <-l.signals:
-			var err error
-			switch signal.Type {
-			case SignalTypeOffer:
-				err = l.handleOffer(signal)
-			default:
-				err = l.handleSignal(signal)
-			}
-			if err != nil {
-				var s *signalError
-				if errors.As(err, &s) {
-					if err := l.signaling.Signal(l.Context(), &Signal{
-						Type:         SignalTypeError,
-						ConnectionID: signal.ConnectionID,
-						Data:         strconv.FormatUint(uint64(s.code), 10),
-						NetworkID:    signal.NetworkID,
-					}); err != nil {
-						l.conf.Log.Error("error signaling error", slog.Any("error", err))
-					}
-				}
-				l.conf.Log.Error("error handling signal", slog.Any("signal", signal), slog.Any("error", err))
-			}
+// nextLaneSignal returns the next queued signal. It removes an empty or closed
+// lane so a later signal can start a new worker for the same connection.
+func (l *Listener) nextLaneSignal(key string, lane *listenerSignalLane) (*Signal, bool) {
+	l.signalLanesMu.Lock()
+	defer l.signalLanesMu.Unlock()
+
+	select {
+	case <-l.closed:
+		if l.signalLanes[key] == lane {
+			delete(l.signalLanes, key)
+		}
+		return nil, false
+	default:
+	}
+	if len(lane.queue) == 0 {
+		if l.signalLanes[key] == lane {
+			delete(l.signalLanes, key)
+		}
+		return nil, false
+	}
+	signal := lane.queue[0]
+	lane.queue[0] = nil
+	lane.queue = lane.queue[1:]
+	return signal, true
+}
+
+// handleQueuedSignal processes one signal and reports any protocol error to
+// the remote connection when possible.
+func (l *Listener) handleQueuedSignal(signal *Signal) {
+	var err error
+	switch signal.Type {
+	case SignalTypeOffer:
+		err = l.handleOffer(signal)
+	default:
+		err = l.handleSignal(signal)
+	}
+	if err == nil {
+		return
+	}
+	var s *signalError
+	if errors.As(err, &s) {
+		if signalErr := l.signaling.Signal(l.Context(), &Signal{
+			Type:         SignalTypeError,
+			ConnectionID: signal.ConnectionID,
+			Data:         strconv.FormatUint(uint64(s.code), 10),
+			NetworkID:    signal.NetworkID,
+		}); signalErr != nil {
+			l.conf.Log.Error("error signaling error", slog.Any("error", signalErr))
+		}
+	}
+	l.conf.Log.Error("error handling signal", slog.Any("signal", signal), slog.Any("error", err))
+}
+
+// monitorSignaling closes the listener when its signaling connection ends.
+func (l *Listener) monitorSignaling() {
+	select {
+	case <-l.closed:
+		return
+	case <-l.signaling.Context().Done():
+		l.conf.Log.Warn("signaling context canceled",
+			slog.Any("error", context.Cause(l.signaling.Context())))
+		if err := l.Close(); err != nil {
+			l.conf.Log.Error("error closing listener due to cancellation of signaling context",
+				slog.Any("error", err))
 		}
 	}
 }
