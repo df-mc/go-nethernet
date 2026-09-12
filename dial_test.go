@@ -3,6 +3,7 @@ package nethernet
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func (s *blockingErrorSignaling) NetworkID() string {
 func (*blockingErrorSignaling) PongData([]byte) {}
 
 func TestDialerNotifierDropsMalformedSignals(t *testing.T) {
-	n := &dialerNotifier{Dialer: Dialer{ConnectionID: 42}, networkID: "server", ctx: t.Context(), signals: make(chan *Signal, 1)}
+	n := &dialerNotifier{Dialer: Dialer{ConnectionID: 42, Log: slog.New(slog.DiscardHandler)}, networkID: "server", ctx: t.Context(), signals: make(chan *Signal, 1)}
 	for _, signal := range []*Signal{
 		{Type: SignalTypeError, Data: "invalid"},
 		{Type: SignalTypeError, Data: "2147483648"},
