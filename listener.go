@@ -799,6 +799,7 @@ func (l *Listener) PongData(b []byte) {
 // whether it was accepted for processing.
 func (l *Listener) NotifySignal(signal *Signal) bool {
 	if err := signal.validate(); err != nil {
+		// This can happen when a Signaling implementation builds a Signal itself.
 		l.conf.Log.Error("error validating signal", "error", err)
 		return false
 	}
