@@ -798,7 +798,8 @@ func (l *Listener) PongData(b []byte) {
 // NotifySignal handles an incoming Signal from the remote network and reports
 // whether it was accepted for processing.
 func (l *Listener) NotifySignal(signal *Signal) bool {
-	if signal.validate() != nil {
+	if err := signal.validate(); err != nil {
+		l.conf.Log.Error("error validating signal", "error", err)
 		return false
 	}
 	l.negotiationsMu.Lock()
