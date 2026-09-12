@@ -84,3 +84,53 @@ func (s *blockingErrorSignaling) NetworkID() string {
 }
 
 func (*blockingErrorSignaling) PongData([]byte) {}
+
+func TestDialerNotifierDropsMalformedSignals(t *testing.T) {
+	n := &dialerNotifier{Dialer: Dialer{ConnectionID: 42}, networkID: "server", ctx: t.Context(), signals: make(chan *Signal, 1)}
+	for _, signal := range []*Signal{
+		{Type: SignalTypeError, Data: "invalid"},
+		{Type: SignalTypeError, Data: "2147483648"},
+		{Type: "UNKNOWN", Data: "data"},
+	} {
+		signal.ConnectionID, signal.NetworkID = 42, "server"
+		if n.NotifySignal(signal) {
+			t.Fatalf("NotifySignal(%q, %q) accepted malformed signal", signal.Type, signal.Data)
+		}
+		if len(n.signals) != 0 {
+			t.Fatal("malformed signal consumed dialer queue capacity")
+		}
+	}
+}
+
+func TestDialerIgnoresMalformedSignalsBeforeAnswer(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, clientConn, serverConn := dialAcceptedListener(t, client, malformedBeforeAnswerSignaling{server})
+	checkConnPayload(t, clientConn, serverConn, []byte("handshake survived malformed signals"))
+	if got := client.signalCount(SignalTypeError); got != 0 {
+		t.Fatalf("client sent %d error replies to malformed signals", got)
+	}
+}
+
+// malformedBeforeAnswerSignaling injects invalid signals before forwarding the answer.
+type malformedBeforeAnswerSignaling struct{ Signaling }
+
+// Signal delivers malformed signals while the dialer is still waiting for its answer.
+func (s malformedBeforeAnswerSignaling) Signal(ctx context.Context, signal *Signal) error {
+	if signal.Type == SignalTypeAnswer {
+		for _, injected := range []Signal{
+			{Type: SignalTypeError, Data: "invalid"},
+			{Type: SignalTypeError, Data: ""},
+			{Type: SignalTypeError, Data: "+1"},
+			{Type: SignalTypeError, Data: "2147483648"},
+			{Type: "UNKNOWN", Data: "data"},
+		} {
+			injected.NetworkID, injected.ConnectionID = signal.NetworkID, signal.ConnectionID
+			if err := s.Signaling.Signal(ctx, &injected); err != nil {
+				return err
+			}
+		}
+	}
+	return s.Signaling.Signal(ctx, signal)
+}

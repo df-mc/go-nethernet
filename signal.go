@@ -120,18 +120,52 @@ func (s *Signal) MarshalText() ([]byte, error) {
 
 // UnmarshalText decodes the text into the Signal. An error may be returned, if the text
 // is invalid or does not follow the format '[Signal.Type] [Signal.ConnectionID] [Signal.Data]'.
+// Numeric fields accept decimal prefixes, including trailing text, as in the vanilla client.
+// Unknown signal types and error codes that cannot be parsed as signed 32-bit integers are rejected.
 func (s *Signal) UnmarshalText(b []byte) (err error) {
 	segments := bytes.SplitN(b, []byte{' '}, 3)
 	if len(segments) != 3 {
 		return fmt.Errorf("unexpected segmentations: %d", len(segments))
 	}
 	s.Type = string(segments[0])
-	s.ConnectionID, err = strconv.ParseUint(string(segments[1]), 10, 64)
+	s.ConnectionID, err = strconv.ParseUint(decimalPrefix(string(segments[1]), false), 10, 64)
 	if err != nil {
 		return fmt.Errorf("parse ConnectionID: %w", err)
 	}
 	s.Data = string(segments[2])
-	return nil
+	return s.validate()
+}
+
+// validate checks signal types and error codes before a signal reaches a connection.
+// Signaling implementations may construct Signals directly instead of decoding text.
+func (s *Signal) validate() error {
+	switch s.Type {
+	case SignalTypeOffer, SignalTypeAnswer, SignalTypeCandidate:
+		return nil
+	case SignalTypeError:
+		_, err := parseSignalErrorCode(s.Data)
+		return err
+	default:
+		return fmt.Errorf("unknown signal type: %s", s.Type)
+	}
+}
+
+// parseSignalErrorCode decodes a signed 32-bit decimal prefix, as the vanilla client does.
+func parseSignalErrorCode(data string) (int64, error) {
+	return strconv.ParseInt(decimalPrefix(data, true), 10, 32)
+}
+
+// decimalPrefix returns the initial decimal number without accepting '+' or whitespace.
+// A leading '-' is allowed only for signed fields. Conversion still checks for overflow.
+func decimalPrefix(s string, signed bool) string {
+	i := 0
+	if signed && len(s) > 0 && s[0] == '-' {
+		i++
+	}
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	return s[:i]
 }
 
 // String returns a string representation of the Signal in the format

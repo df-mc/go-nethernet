@@ -475,7 +475,7 @@ func TestListenerRemoteCancellationReleasesPendingOffers(t *testing.T) {
 		waitForCredentialRequest(t, base.started, "pending offer")
 	}
 	// A malformed error must neither cancel the offer nor consume deferred capacity.
-	for _, data := range []string{"invalid", "-1", "4294967296"} {
+	for _, data := range []string{"invalid", "-", "2147483648"} {
 		if l.NotifySignal(&Signal{Type: SignalTypeError, NetworkID: "remote", ConnectionID: 0, Data: data}) {
 			t.Fatalf("malformed error %q was accepted", data)
 		}

@@ -424,7 +424,7 @@ func (conn *Conn) handleSignal(signal *Signal) error {
 			return err
 		}
 	case SignalTypeError:
-		code, err := strconv.ParseUint(signal.Data, 10, 32)
+		code, err := parseSignalErrorCode(signal.Data)
 		if err != nil {
 			return fmt.Errorf("parse error code: %w", err)
 		}

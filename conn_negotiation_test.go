@@ -430,3 +430,50 @@ func (s *memorySignaling) signalCount(signalType string) int {
 	defer s.stats.mu.Unlock()
 	return s.stats.counts[signalType]
 }
+
+func TestRemoteErrorsAfterNegotiation(t *testing.T) {
+	for _, receiver := range []string{"listener", "dialer"} {
+		t.Run(receiver, func(t *testing.T) {
+			client, server := newMemorySignalingPair("client", "server")
+			t.Cleanup(client.close)
+			t.Cleanup(server.close)
+			l, clientConn, serverConn := dialAcceptedListener(t, client, server)
+			waitListenerState(t, l, 0, 1)
+			conn, sender, receiverSignaling := serverConn, client, server
+			if receiver == "dialer" {
+				conn, sender, receiverSignaling = clientConn, server, client
+			}
+			addr := conn.LocalAddr().(*Addr)
+			for _, signal := range []Signal{
+				{Type: SignalTypeError, Data: "invalid"},
+				{Type: SignalTypeError, Data: "2147483648"},
+				{Type: "UNKNOWN", Data: "data"},
+			} {
+				signal.NetworkID, signal.ConnectionID = addr.NetworkID, addr.ConnectionID
+				if err := sender.Signal(t.Context(), &signal); err != nil {
+					t.Fatal(err)
+				}
+			}
+			checkConnPayload(t, clientConn, serverConn, []byte("client remains connected"))
+			checkConnPayload(t, serverConn, clientConn, []byte("server remains connected"))
+			if got := receiverSignaling.signalCount(SignalTypeError); got != 0 {
+				t.Fatalf("receiver sent %d error replies to malformed signals", got)
+			}
+			// A valid error follows the discarded signals on the same signaling path.
+			if err := sender.Signal(t.Context(), &Signal{
+				Type: SignalTypeError, NetworkID: addr.NetworkID, ConnectionID: addr.ConnectionID, Data: "-12suffix",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-conn.Context().Done():
+				want := "nethernet: remote peer notified connection failure (code: -12)"
+				if got := context.Cause(conn.Context()).Error(); got != want {
+					t.Fatalf("connection cause = %q, want %q", got, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("parsed error signal did not close the connection")
+			}
+		})
+	}
+}

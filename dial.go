@@ -432,7 +432,7 @@ type dialerNotifier struct {
 
 // NotifySignal notifies an incoming Signal received from the Signaling implementation.
 func (d *dialerNotifier) NotifySignal(signal *Signal) bool {
-	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID {
+	if signal.ConnectionID != d.ConnectionID || signal.NetworkID != d.networkID || signal.validate() != nil {
 		return false
 	}
 	select {

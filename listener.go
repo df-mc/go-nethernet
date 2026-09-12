@@ -260,8 +260,8 @@ const (
 )
 
 // handleSignal handles the given Signal received from the remote network.
-// Candidate and error signals are deferred until the Conn is established in the background.
-// Once the Conn is established, it directly calls [Conn.handleSignal].
+// Candidates are deferred until the offer publishes its Conn.
+// Valid remote errors cancel pending work or close the published Conn immediately.
 func (n *listenerNegotiator) handleSignal(signal *Signal) bool {
 	select {
 	case <-n.closed:
@@ -274,10 +274,6 @@ func (n *listenerNegotiator) handleSignal(signal *Signal) bool {
 		// close the original peer. Reject it without sending a connection error.
 		return false
 	case SignalTypeError:
-		if _, err := strconv.ParseUint(signal.Data, 10, 32); err != nil {
-			n.log().Error("error parsing remote error code", "error", err)
-			return false
-		}
 		n.mu.Lock()
 		n.remoteCanceled.Store(true)
 		conn := n.conn
@@ -802,6 +798,9 @@ func (l *Listener) PongData(b []byte) {
 // NotifySignal handles an incoming Signal from the remote network and reports
 // whether it was accepted for processing.
 func (l *Listener) NotifySignal(signal *Signal) bool {
+	if signal.validate() != nil {
+		return false
+	}
 	l.negotiationsMu.Lock()
 	select {
 	case <-l.Context().Done():
