@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
@@ -183,7 +182,8 @@ type Handler struct {
 	notifierMu sync.RWMutex
 
 	// status atomically stores the current server status assigned to the Handler.
-	status atomic.Pointer[Status]
+	status   []byte
+	statusMu sync.RWMutex
 
 	// disableNotifyTypeCheck permits tests to register lightweight Notifier stubs.
 	disableNotifyTypeCheck bool
@@ -287,7 +287,7 @@ func (h *Handler) PongData(data []byte) {
 		h.conf.Logger.Error("error parsing RakNet pong data", "err", err)
 		return
 	}
-	h.status.Store(&status)
+	h.Status(status)
 }
 
 // Status sets the server status that the Handler responds with for HTTP requests
@@ -296,7 +296,14 @@ func (h *Handler) PongData(data []byte) {
 // overwrites the status set here. Callers can set [HandlerConfig.DisablePongData]
 // to true to disable this behavior.
 func (h *Handler) Status(status Status) {
-	h.status.Store(&status)
+	b, err := json.Marshal(status)
+	if err != nil {
+		h.conf.Logger.Error("error encoding status", "error", err)
+		return
+	}
+	h.statusMu.Lock()
+	h.status = b
+	h.statusMu.Unlock()
 }
 
 // handlePing handles a GET request to the /v1/join endpoint.
@@ -307,22 +314,18 @@ func (h *Handler) handlePing(w http.ResponseWriter, req *http.Request) {
 	req.Close = true // Do not keep-alive the TCP connection.
 	log := h.conf.Logger.With("method", req.Method, "url", req.URL)
 
-	status := h.status.Load()
-	if status == nil {
-		log.Debug("could not respond with pong data")
+	h.statusMu.RLock()
+	status := h.status
+	h.statusMu.RUnlock()
+	if len(status) == 0 {
+		log.Debug("no status was assigned to Handler")
 		w.WriteHeader(http.StatusOK)
-		return
-	}
-	b, err := json.Marshal(status)
-	if err != nil {
-		log.Error("error encoding pong data", "err", err)
-		writeText(w, http.StatusInternalServerError, "An error has occurred while handling this request.")
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(b)
+	_, _ = w.Write(status)
 }
 
 // handleOffer handles a POST request to the /v1/join/{networkID} endpoint.
