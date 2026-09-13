@@ -6,6 +6,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -78,5 +79,25 @@ func TestIsTerminalICEState(t *testing.T) {
 		if got := isTerminalICEState(state); got != terminal {
 			t.Errorf("isTerminalICEState(%s) = %t, want %t", state, got, terminal)
 		}
+	}
+}
+
+func TestParseDescriptionRejectsMessageSizesWithoutFragmentPayload(t *testing.T) {
+	for _, max := range []string{"0", "1"} {
+		t.Run(max, func(t *testing.T) {
+			media := &sdp.MediaDescription{}
+			media.WithValueAttribute("ice-ufrag", "ufrag")
+			media.WithValueAttribute("ice-pwd", "password")
+			media.WithFingerprint("sha-256", "fingerprint")
+			media.WithValueAttribute("setup", "actpass")
+			media.WithValueAttribute("max-message-size", max)
+
+			_, err := parseDescription(&sdp.SessionDescription{
+				MediaDescriptions: []*sdp.MediaDescription{media},
+			})
+			if err == nil {
+				t.Fatalf("parseDescription() error = nil, want error for max-message-size %s", max)
+			}
+		})
 	}
 }

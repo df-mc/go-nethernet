@@ -119,6 +119,27 @@ func TestMarshalWritesInclusiveLengthAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestUnmarshalMessageDataPastDeclaredLength(t *testing.T) {
+	const declared = "CONNECTREQUEST 1 v=0\r\n"
+	const rest = "a=candidate:1 1 udp 1 192.168.1.2 50000 typ host\r\n"
+
+	pk, _, err := Unmarshal(rawPacket(IDMessagePacket, func(body *bytes.Buffer) {
+		_ = binary.Write(body, binary.LittleEndian, uint64(2))
+		writeBytes[uint32](body, []byte(declared))
+		body.WriteString(rest)
+	}))
+	if err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	msg, ok := pk.(*MessagePacket)
+	if !ok {
+		t.Fatalf("Unmarshal() packet = %T, want *MessagePacket", pk)
+	}
+	if msg.Data != declared+rest {
+		t.Fatalf("Unmarshal() data = %q, want %q", msg.Data, declared+rest)
+	}
+}
+
 func rawPacket(packetID uint16, write func(*bytes.Buffer)) []byte {
 	body := &bytes.Buffer{}
 	(&Header{PacketID: packetID, SenderID: 1}).Write(body)
