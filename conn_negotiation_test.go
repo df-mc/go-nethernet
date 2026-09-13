@@ -197,6 +197,32 @@ func TestConcurrentDialersShareSignaling(t *testing.T) {
 	}
 }
 
+func TestListenerRejectsDuplicateConn(t *testing.T) {
+	client, server := newMemorySignalingPair("1", "2")
+	defer client.close()
+	defer server.close()
+
+	l, err := (ListenConfig{AllowAnonymous: true}).Listen(server)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer l.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*10)
+	defer cancel()
+
+	firstConn, err := Dialer{ConnectionID: 20}.DialContext(ctx, server.NetworkID(), client)
+	if err != nil {
+		t.Fatalf("DialContext = %s, expected nil", err)
+	}
+	defer firstConn.Close()
+
+	_, err = Dialer{ConnectionID: 20}.DialContext(ctx, server.NetworkID(), client)
+	if err == nil {
+		t.Fatal("DialContext = nil, expected to return error")
+	}
+}
+
 func testDialListener(t *testing.T, disableTrickle bool) {
 	t.Helper()
 

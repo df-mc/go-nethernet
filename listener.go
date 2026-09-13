@@ -390,6 +390,12 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			_ = c.Close()
 		}
 	}()
+	if _, exists := l.connections.LoadOrStore(c.remoteAddr().String(), c); exists {
+		return wrapSignalError(
+			fmt.Errorf("connection already exists for %s", c.remoteAddr()),
+			ErrorCodeIncomingConnectionIgnored,
+		)
+	}
 	disableTrickleICE := shouldDisableTrickleICE(l.conf.DisableTrickleICE, l.signaling)
 	if disableTrickleICE {
 		c.description.candidates, err = c.gatherCandidates(ctx)
@@ -408,16 +414,16 @@ func (l *Listener) handleOffer(signal *Signal) error {
 	if desc.identity != nil {
 		publicKey, err := l.conf.VerifyClientToken(ctx, desc.identity.Assertion.Token)
 		if err != nil {
-			return wrapSignalError(fmt.Errorf("verify client token: %w", err), ErrorCodeIdentityVerificationFailed)
+			return wrapSignalError(fmt.Errorf("verify client token: %w", err), ErrorCodeIdentityNotAllowed)
 		}
 		if publicKey == nil {
 			publicKey, err = claimPublicKey(desc.identity.Assertion.Token, false)
 			if err != nil {
-				return wrapSignalError(fmt.Errorf("claim public key: %w", err), ErrorCodeIdentityVerificationFailed)
+				return wrapSignalError(fmt.Errorf("claim public key: %w", err), ErrorCodeIdentityNotAllowed)
 			}
 		}
 		if err := desc.identity.verify(desc, publicKey); err != nil {
-			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), ErrorCodeIdentityVerificationFailed)
+			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), ErrorCodeIdentityNotAllowed)
 		}
 		c.publicKey = publicKey
 	} else if !l.conf.AllowAnonymous {
@@ -425,14 +431,14 @@ func (l *Listener) handleOffer(signal *Signal) error {
 			slog.Uint64("connectionID", signal.ConnectionID),
 			slog.String("networkID", signal.NetworkID),
 		)
-		return wrapSignalError(errors.New("nethernet: anonymous identity not allowed"), ErrorCodeIdentityVerificationFailed)
+		return wrapSignalError(errors.New("nethernet: anonymous identity not allowed"), ErrorCodeIdentityNotAllowed)
 	}
 	identity, err := l.conf.IssueServerIdentity(ctx)
 	if err != nil {
-		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), ErrorCodeIdentityVerificationFailed)
+		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
 	}
 	if err := identity.sign(c.description); err != nil {
-		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), ErrorCodeIdentityVerificationFailed)
+		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
 	}
 
 	// Register a callback function immediately since the remote peer
@@ -483,7 +489,6 @@ func (l *Listener) handleOffer(signal *Signal) error {
 		}
 	}
 
-	l.connections.Store(c.remoteAddr().String(), c)
 	go l.handleConn(c, desc, channelsReady)
 	established = true
 	return nil
@@ -520,7 +525,7 @@ func (l *Listener) handleSignal(signal *Signal) error {
 
 // handleClose deletes the Conn from the Listener, since it is closed and can no longer be negotiated.
 func (l *Listener) handleClose(conn *Conn) {
-	l.connections.Delete(conn.remoteAddr().String())
+	l.connections.CompareAndDelete(conn.remoteAddr().String(), conn)
 }
 
 // log extends the [slog.Logger] from [ListenConfig.Log] with an additional [slog.Attr] of "src" with the
@@ -625,6 +630,7 @@ func (l *Listener) startTransports(ctx context.Context, conn *Conn, d *descripti
 	}); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
+	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
 
 	return l.waitForChannelsReady(ctx, conn, channelsReady)
 }

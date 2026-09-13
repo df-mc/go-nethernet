@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -27,6 +28,13 @@ func (pk *MessagePacket) Read(r io.Reader) error {
 	data, err := readBytes[uint32](r)
 	if err != nil {
 		return fmt.Errorf("read data: %w", err)
+	}
+	// Vanilla may write more data than the length prefix declares, with the
+	// rest of the signal continuing right after the declared range. Read the
+	// remaining bytes as part of the data instead of leaving them for the
+	// trailing-bytes check in Unmarshal.
+	if buf, ok := r.(*bytes.Buffer); ok && buf.Len() > 0 {
+		data = append(data, buf.Next(buf.Len())...)
 	}
 	pk.Data = string(data)
 	return nil
