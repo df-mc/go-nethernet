@@ -464,6 +464,10 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 		if err != nil {
 			return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeICE)
 		}
+		if len(c.description.candidates) == 0 {
+			// We may have run out of UDP ports configured in the WebRTC API.
+			return wrapSignalError(errors.New("no local candidates were gathered"), ErrorCodeICE)
+		}
 	}
 	for _, candidate := range desc.candidates {
 		// Non-trickle ICE connection may include candidates in a single SDP.
