@@ -158,8 +158,11 @@ func (c tokenClaims) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(struct {
 		Alias
-		PublicKey string `json:"cpk"`
-	}{Alias: (Alias)(c), PublicKey: publicKey})
+		PublicKey jose.JSONWebKey `json:"cpk"`
+	}{
+		Alias:     (Alias)(c),
+		PublicKey: jose.JSONWebKey{Key: publicKey},
+	})
 }
 
 // UnmarshalJSON implements [json.Unmarshaler] for tokenClaims.
@@ -309,12 +312,15 @@ func parsePublicKey(data []byte) (*ecdsa.PublicKey, error) {
 	var publicKey crypto.PublicKey
 	switch data[0] {
 	case '{':
+		// 26.40+ clients use JWK to represent public keys.
 		var key jose.JSONWebKey
 		if err := json.Unmarshal(data, &key); err != nil {
 			return nil, err
 		}
 		publicKey = key.Key
 	case '"':
+		// Pre 26.40 clients used base64-encoded DER public keys in the same format
+		// as seen in the connection request included in the Login packet.
 		var s string
 		if err := json.Unmarshal(data, &s); err != nil {
 			return nil, err
