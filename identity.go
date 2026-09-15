@@ -152,16 +152,12 @@ type tokenClaims struct {
 // It performs additional handling for encoding the cpk claim in base64.
 func (c tokenClaims) MarshalJSON() ([]byte, error) {
 	type Alias tokenClaims
-	publicKey, err := encodePublicKey(c.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("encode cpk: %w", err)
-	}
 	return json.Marshal(struct {
 		Alias
 		PublicKey jose.JSONWebKey `json:"cpk"`
 	}{
 		Alias:     (Alias)(c),
-		PublicKey: jose.JSONWebKey{Key: publicKey},
+		PublicKey: jose.JSONWebKey{Key: c.PublicKey},
 	})
 }
 
