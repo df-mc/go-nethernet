@@ -2,24 +2,9 @@ package discovery
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"io"
 )
-
-func writeInt32(buf *bytes.Buffer, v int32) {
-	var b [4]byte
-	binary.LittleEndian.PutUint32(b[:], uint32(v))
-	buf.Write(b[:])
-}
-
-func readInt32(r io.Reader) (int32, error) {
-	var b [4]byte
-	if _, err := io.ReadFull(r, b[:]); err != nil {
-		return 0, err
-	}
-	return int32(binary.LittleEndian.Uint32(b[:])), nil
-}
 
 func writeBool(buf *bytes.Buffer, v bool) {
 	if v {
