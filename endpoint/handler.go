@@ -81,7 +81,7 @@ func NewHandler() *Handler {
 	return c.New()
 }
 
-// ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified address
+// ServeTLS is a utility method that sets up an HTTP/TLS server on the specified address
 // using the TLS certificate and key file.
 func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -97,6 +97,7 @@ func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*H
 	return conf.serve(l)
 }
 
+// Serve is a utility method that sets up an HTTP server on the specified address.
 func (conf HandlerConfig) Serve(address string) (*Handler, error) {
 	l, err := net.Listen("tcp", address)
 	if err != nil {
@@ -105,6 +106,7 @@ func (conf HandlerConfig) Serve(address string) (*Handler, error) {
 	return conf.serve(l)
 }
 
+// serve starts an HTTP server using the provided listener and returns the Handler attached to it.
 func (conf HandlerConfig) serve(l net.Listener) (*Handler, error) {
 	h := conf.New()
 	var cancel context.CancelCauseFunc
@@ -130,7 +132,7 @@ func (conf HandlerConfig) serve(l net.Listener) (*Handler, error) {
 // maxSDPBodySize caps HTTP SDP offer and answer bodies at 1 MiB.
 const maxSDPBodySize int64 = 1 << 20
 
-// ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified
+// ServeTLS is a utility method that sets up an HTTP/TLS server on the specified
 // address using the TLS certificate and key file. It is equivalent of
 // calling HandlerConfig{}.ServeTLS().
 func ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
@@ -138,6 +140,8 @@ func ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
 	return conf.ServeTLS(address, certFile, keyFile)
 }
 
+// Serve is a utility method that sets up an HTTP server on the specified address.
+// It is equivalent of calling HandlerConfig{}.Serve().
 func Serve(address string) (*Handler, error) {
 	var conf HandlerConfig
 	return conf.Serve(address)
