@@ -151,6 +151,9 @@ type tokenClaims struct {
 // MarshalJSON implements [json.Marshaler] for tokenClaims.
 // It performs additional handling for encoding the cpk claim in base64.
 func (c tokenClaims) MarshalJSON() ([]byte, error) {
+	if c.PublicKey == nil {
+		return nil, errors.New("nethernet: public key is nil")
+	}
 	type Alias tokenClaims
 	return json.Marshal(struct {
 		Alias
