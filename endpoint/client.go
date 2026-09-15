@@ -2,6 +2,7 @@ package endpoint
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -73,17 +74,61 @@ type Client struct {
 	notifiersMu sync.RWMutex
 }
 
+// PingContext sends a ping request to the given address and returns the
+// Status reported by the server. The returned Status can also be converted
+// to RakNet-compatible pong data via [Status.RakNetPongData], for use with
+// older code that still expects that format.
+func (c *Client) PingContext(ctx context.Context, address string) (Status, error) {
+	u, err := parseURL(address)
+	if err != nil {
+		return Status{}, fmt.Errorf("parse address: %w", err)
+	}
+	requestURL := u.JoinPath("/v1/join").String()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return Status{}, fmt.Errorf("make request: %w", err)
+	}
+	req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
+
+	resp, err := c.conf.HTTPClient.Do(req)
+	if err != nil {
+		return Status{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var status Status
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			return Status{}, fmt.Errorf("decode response body: %w", err)
+		}
+		return status, nil
+	default:
+		return Status{}, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+	}
+}
+
+// parseURL parses the given network ID as a URL used for making requests
+// to remote servers.
+func parseURL(s string) (*url.URL, error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, fmt.Errorf("parse network ID as URL: %w", err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
+		return nil, fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", s)
+	}
+	return u, nil
+}
+
 // Signal sends a Signal to the remote endpoint.
 //
 // Only [nethernet.SignalTypeOffer] is supported. The returned SDP answer is delivered
 // to the Dialers registered to this Client.
 func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
-	u, err := url.Parse(signal.NetworkID)
+	u, err := parseURL(signal.NetworkID)
 	if err != nil {
-		return fmt.Errorf("parse network ID as URL: %w", err)
-	}
-	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
-		return fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", signal.NetworkID)
+		return err
 	}
 
 	switch signal.Type {

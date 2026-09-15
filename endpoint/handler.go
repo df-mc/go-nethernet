@@ -3,11 +3,13 @@ package endpoint
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -38,6 +40,11 @@ type HandlerConfig struct {
 	// It is used only for identifying Handler and is never transmitted to clients.
 	// If empty, a random uint64 is generated and used.
 	NetworkID string
+
+	// DisablePongData specifies whether to disable syncing with the RakNet pong
+	// data provided by the upstream game protocol. When set to true, [Handler.PongData]
+	// becomes no-op.
+	DisablePongData bool
 }
 
 // New returns a new [Handler] from the configuration.
@@ -62,9 +69,7 @@ func (conf HandlerConfig) New() *Handler {
 		mux:  http.NewServeMux(),
 		conf: conf,
 	}
-	h.mux.HandleFunc("GET /v1/join", func(writer http.ResponseWriter, request *http.Request) {
-		writer.WriteHeader(http.StatusOK)
-	})
+	h.mux.HandleFunc("GET /v1/join", h.handlePing)
 	h.mux.HandleFunc("POST /v1/join/{networkID}", h.handleOffer)
 	return h
 }
@@ -76,7 +81,7 @@ func NewHandler() *Handler {
 	return c.New()
 }
 
-// ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified address
+// ServeTLS is a utility method that sets up an HTTP/TLS server on the specified address
 // using the TLS certificate and key file.
 func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -89,7 +94,20 @@ func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*H
 	if err != nil {
 		return nil, err
 	}
+	return conf.serve(l)
+}
 
+// Serve is a utility method that sets up an HTTP server on the specified address.
+func (conf HandlerConfig) Serve(address string) (*Handler, error) {
+	l, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	return conf.serve(l)
+}
+
+// serve starts an HTTP server using the provided listener and returns the Handler attached to it.
+func (conf HandlerConfig) serve(l net.Listener) (*Handler, error) {
 	h := conf.New()
 	var cancel context.CancelCauseFunc
 	h.ctx, cancel = context.WithCancelCause(context.Background())
@@ -114,12 +132,19 @@ func (conf HandlerConfig) ServeTLS(address string, certFile, keyFile string) (*H
 // maxSDPBodySize caps HTTP SDP offer and answer bodies at 1 MiB.
 const maxSDPBodySize int64 = 1 << 20
 
-// ServeTLS is a utility method that set-ups an HTTP/TLS server on the specified
+// ServeTLS is a utility method that sets up an HTTP/TLS server on the specified
 // address using the TLS certificate and key file. It is equivalent of
 // calling HandlerConfig{}.ServeTLS().
 func ServeTLS(address string, certFile, keyFile string) (*Handler, error) {
 	var conf HandlerConfig
 	return conf.ServeTLS(address, certFile, keyFile)
+}
+
+// Serve is a utility method that sets up an HTTP server on the specified address.
+// It is equivalent of calling HandlerConfig{}.Serve().
+func Serve(address string) (*Handler, error) {
+	var conf HandlerConfig
+	return conf.Serve(address)
 }
 
 // Handler is an [http.Handler] that negotiates incoming NetherNet connections
@@ -159,6 +184,10 @@ type Handler struct {
 	notifier   nethernet.Notifier
 	notifierID uint64
 	notifierMu sync.RWMutex
+
+	// status atomically stores the current server status assigned to the Handler.
+	status   []byte
+	statusMu sync.RWMutex
 
 	// disableNotifyTypeCheck permits tests to register lightweight Notifier stubs.
 	disableNotifyTypeCheck bool
@@ -253,7 +282,55 @@ func (h *Handler) NetworkID() string {
 // PongData is a no-op implementation of [nethernet.Signaling.PongData].
 // It may become meaningful in the future if Mojang introduces an HTTP
 // endpoint for serving MOTDs.
-func (h *Handler) PongData([]byte) {}
+func (h *Handler) PongData(data []byte) {
+	if h.conf.DisablePongData {
+		return
+	}
+	status, err := RakNetPongData(data)
+	if err != nil {
+		h.conf.Logger.Error("error parsing RakNet pong data", "err", err)
+		return
+	}
+	h.Status(status)
+}
+
+// Status sets the server status that the Handler responds with for HTTP requests
+// sent by clients. Note that if the upstream game listener also provides pong data
+// via [Handler.PongData], that data will take precedence, since [Handler.PongData]
+// overwrites the status set here. Callers can set [HandlerConfig.DisablePongData]
+// to true to disable this behavior.
+func (h *Handler) Status(status Status) {
+	b, err := json.Marshal(status)
+	if err != nil {
+		h.conf.Logger.Error("error encoding status", "error", err)
+		return
+	}
+	h.statusMu.Lock()
+	h.status = b
+	h.statusMu.Unlock()
+}
+
+// handlePing handles a GET request to the /v1/join endpoint.
+// It responds with the current server status, if one has been set by
+// the caller via [Handler.Status] or by the upstream game listener via
+// [Handler.PongData]. Otherwise, it responds with an empty body.
+func (h *Handler) handlePing(w http.ResponseWriter, req *http.Request) {
+	req.Close = true // Do not keep-alive the TCP connection.
+	log := h.conf.Logger.With("method", req.Method, "url", req.URL)
+
+	h.statusMu.RLock()
+	status := h.status
+	h.statusMu.RUnlock()
+	if len(status) == 0 {
+		log.Debug("no status was assigned to Handler")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(status)
+}
 
 // handleOffer handles a POST request to the /v1/join/{networkID} endpoint.
 // It reads the SDP offer from the request body and forwards it to all
@@ -323,7 +400,8 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(signal.Data))
 	case nethernet.SignalTypeError:
-		writeText(w, http.StatusBadRequest, fmt.Sprintf("Negotiation failed with error code: %s", signal.Data))
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(signal.Data))
 	default:
 		log.Error("unexpected negotiation result", slog.String("signal", signal.String()))
 		writeText(w, http.StatusInternalServerError, "An error has occurred while handling this request")
