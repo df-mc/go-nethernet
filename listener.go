@@ -736,7 +736,15 @@ func (l *Listener) Accept() (net.Conn, error) {
 }
 
 // Addr returns an Addr that represents the local network ID of the Listener.
+// If the Signaling implements an Addr() method, it will return that value instead.
 func (l *Listener) Addr() net.Addr {
+	if a, ok := l.signaling.(interface {
+		Addr() net.Addr
+	}); ok {
+		if addr := a.Addr(); addr != nil {
+			return addr
+		}
+	}
 	return &Addr{NetworkID: l.networkID}
 }
 

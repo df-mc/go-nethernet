@@ -126,6 +126,7 @@ func (conf HandlerConfig) serve(l net.Listener) (*Handler, error) {
 	h.closeFunc = func() error {
 		return server.Close()
 	}
+	h.addr = l.Addr()
 	return h, nil
 }
 
@@ -177,6 +178,7 @@ type Handler struct {
 
 	closeFunc func() error
 	ctx       context.Context
+	addr      net.Addr
 
 	// notifier is the active Listener receiving HTTP endpoint offers.
 	// The HTTP request-response model supports only one Listener because
@@ -277,6 +279,13 @@ func (h *Handler) Credentials(ctx context.Context) (*nethernet.Credentials, erro
 // used for locally identifying this Handler.
 func (h *Handler) NetworkID() string {
 	return h.conf.NetworkID
+}
+
+// Addr returns the TCP address used by the underlying HTTP server.
+// It may be nil if the Handler has not been created using [HandlerConfig.Serve]
+// or [HandlerConfig.ServeTLS].
+func (h *Handler) Addr() net.Addr {
+	return h.addr
 }
 
 // PongData is a no-op implementation of [nethernet.Signaling.PongData].
