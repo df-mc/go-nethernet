@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strconv"
 
 	"github.com/df-mc/go-nethernet"
@@ -30,7 +29,11 @@ func ExampleClient() {
 // ExampleHandler demonstrates how to expose a NetherNet listener using HTTP/TLS server
 // for signaling.
 func ExampleHandler() {
-	handler := NewHandler()
+	handler, err := Serve(":19132")
+	if err != nil {
+		panic(fmt.Sprintf("error listening on HTTP: %s", err))
+	}
+	defer handler.Close()
 
 	// Set up a NetherNet listener.
 	var cfg nethernet.ListenConfig
@@ -40,24 +43,18 @@ func ExampleHandler() {
 	}
 	defer l.Close()
 
-	// Start accepting NetherNet connections in a goroutine.
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			slog.Info("connected",
-				"remoteAddr", conn.RemoteAddr(),
-				"localAddr", conn.LocalAddr(),
-				"latency", conn.(*nethernet.Conn).Latency(),
-			)
+	// Start accepting NetherNet connections.
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return
 		}
-	}()
-
-	// Start listening on HTTP/TLS. This will block until the server stops.
-	// In production, it is recommended to create an [http.Server] and call its Close() method when it's done.
-	_ = http.ListenAndServeTLS(":19132", "/path/to/cert-file", "/path/to/key-file", handler)
+		slog.Info("connected",
+			"remoteAddr", conn.RemoteAddr(),
+			"localAddr", conn.LocalAddr(),
+			"latency", conn.(*nethernet.Conn).Latency(),
+		)
+	}
 }
 
 // ExampleClient_Status demonstrates how to retrieve a status for a NetherNet server.
