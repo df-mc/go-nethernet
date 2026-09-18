@@ -26,6 +26,14 @@ type Status struct {
 	GameType int `json:"gameType"`
 }
 
+// RakNetPongData produces a RakNet-compatible pong data from the status.
+// Deprecated: Use [Status.RakNet] instead.
+//
+//go:fix inline
+func (s Status) RakNetPongData() []byte {
+	return s.RakNet()
+}
+
 // RakNet produces a RakNet-compatible pong data from the status.
 // It is typically used for maintaining compatibility with older code that
 // still expects the same format used in RakNet servers. The port included
