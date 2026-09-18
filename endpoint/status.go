@@ -27,6 +27,10 @@ type Status struct {
 }
 
 // RakNetPongData produces a RakNet-compatible pong data from the status.
+// It is typically used for maintaining compatibility with older code that
+// still expects the same format used in RakNet servers. The port included
+// in the resulting data is always 19132.
+//
 // Deprecated: Use [Status.RakNet] instead.
 //
 //go:fix inline
