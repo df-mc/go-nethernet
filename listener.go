@@ -132,6 +132,14 @@ type ListenConfig struct {
 
 // Listen listens on the local network ID specified by the Signaling implementation. It returns a Listener
 // that may be used to accept established connections from [Listener.Accept]. Signaling will be used to notify
+// incoming Signals from remote connections. It is equivalent of calling ListenConfig{}.Listen.
+func Listen(signaling Signaling) (*Listener, error) {
+	var c ListenConfig
+	return c.Listen(signaling)
+}
+
+// Listen listens on the local network ID specified by the Signaling implementation. It returns a Listener
+// that may be used to accept established connections from [Listener.Accept]. Signaling will be used to notify
 // incoming Signals from remote connections.
 func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 	if conf.Log == nil {
