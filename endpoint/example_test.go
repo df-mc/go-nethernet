@@ -60,12 +60,16 @@ func ExampleHandler() {
 	_ = http.ListenAndServeTLS(":19132", "/path/to/cert-file", "/path/to/key-file", handler)
 }
 
-func ExampleClient_PingContext() {
+// ExampleClient_Status demonstrates how to retrieve a status for a NetherNet server.
+func ExampleClient_Status() {
+	// Create a client.
 	client := NewClient()
-	pongData, err := client.PingContext(context.TODO(), "http://127.0.0.1:19132")
+
+	// Query the server status at the specific address. The address can be an HTTP or HTTPS URL with a port number.
+	status, err := client.Status(context.TODO(), "http://127.0.0.1:19132")
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Println(strconv.Quote(pongData.ServerName))
+	fmt.Println(strconv.Quote(status.ServerName)) // "Dedicated Server"
 }

@@ -26,11 +26,11 @@ type Status struct {
 	GameType int `json:"gameType"`
 }
 
-// RakNetPongData produces a RakNet-compatible pong data from the status.
+// RakNet produces a RakNet-compatible pong data from the status.
 // It is typically used for maintaining compatibility with older code that
 // still expects the same format used in RakNet servers. The port included
 // in the resulting data is always 19132.
-func (s Status) RakNetPongData() []byte {
+func (s Status) RakNet() []byte {
 	var gameType string
 	switch s.GameType {
 	case GameTypeSurvival:

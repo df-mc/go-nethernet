@@ -75,10 +75,21 @@ type Client struct {
 }
 
 // PingContext sends a ping request to the given address and returns the
+// pong data in the same format used with RakNet transport. It is useful
+// for older code that still expects that format.
+func (c *Client) PingContext(ctx context.Context, address string) ([]byte, error) {
+	status, err := c.Status(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	return status.RakNet(), nil
+}
+
+// Status sends a ping request to the given address and returns the
 // Status reported by the server. The returned Status can also be converted
-// to RakNet-compatible pong data via [Status.RakNetPongData], for use with
+// to RakNet-compatible pong data via [Status.RakNet], for use with
 // older code that still expects that format.
-func (c *Client) PingContext(ctx context.Context, address string) (Status, error) {
+func (c *Client) Status(ctx context.Context, address string) (Status, error) {
 	u, err := parseURL(address)
 	if err != nil {
 		return Status{}, fmt.Errorf("parse address: %w", err)
