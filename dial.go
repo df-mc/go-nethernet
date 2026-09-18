@@ -100,7 +100,10 @@ type Dialer struct {
 // Dial establishes a Conn with a remote network referenced by the ID with a 15-second timeout.
 // The Signaling implementation is used to signal an offer with local candidates, and also to
 // notify incoming signals received from the remote network. A Conn may be returned, that is
-// ready to receive and send packets. It is equivalent of calling Dialer{}.Dial.
+// ready to receive and send packets. It is equivalent to calling Dialer{}.Dial.
+//
+// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
+// asynchronously; it is abandoned after [SignalErrorTimeout].
 func Dial(networkID string, signaling Signaling) (*Conn, error) {
 	var d Dialer
 	return d.Dial(networkID, signaling)
@@ -109,7 +112,7 @@ func Dial(networkID string, signaling Signaling) (*Conn, error) {
 // DialContext establishes a Conn with a remote network referenced by the ID. The Signaling is used to signal
 // an offer with local candidates, and also to notify incoming signals received from the remote network. The
 // [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
-// ready to receive and send packets. It is equivalent of calling Dialer{}.DialContext.
+// ready to receive and send packets. It is equivalent to calling Dialer{}.DialContext.
 //
 // If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
 // asynchronously; it is abandoned after [SignalErrorTimeout].
@@ -122,6 +125,9 @@ func DialContext(ctx context.Context, networkID string, signaling Signaling) (*C
 // The Signaling implementation is used to signal an offer with local candidates, and also to
 // notify incoming signals received from the remote network. A Conn may be returned, that is
 // ready to receive and send packets.
+//
+// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
+// asynchronously; it is abandoned after [SignalErrorTimeout].
 func (d Dialer) Dial(networkID string, signaling Signaling) (*Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
 	defer cancel()
