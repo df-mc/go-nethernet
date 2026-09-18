@@ -457,10 +457,8 @@ func TestListenerRemoteCancellationReleasesPendingOffers(t *testing.T) {
 	t.Cleanup(base.close)
 	responses := make(chan Signal, maxListenerNegotiations)
 	l, err := (ListenConfig{
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		NegotiationContext: func(parent context.Context) (context.Context, context.CancelFunc) {
-			return context.WithCancel(parent)
-		},
+		Log:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		NegotiationContext: context.WithCancel,
 	}).Listen(listenerResponseSignaling{base, responses})
 	if err != nil {
 		t.Fatal(err)
