@@ -247,7 +247,7 @@ func (d identityData) Valid() bool {
 		return s != "" && strings.Count(s, ".") == 2
 	}
 	return validJWS(d.Assertion.Token) && validJWS(d.Assertion.Fingerprints) &&
-		d.IdentityProvider.Protocol == "default" && d.IdentityProvider.Domain != ""
+		d.IdentityProvider.Protocol == "default"
 }
 
 // verify verifies the fingerprints signature in the identity assertion using the provided public key.
