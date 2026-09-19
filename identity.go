@@ -246,9 +246,6 @@ func (d identityData) Valid() bool {
 	validJWS := func(s string) bool {
 		return s != "" && strings.Count(s, ".") == 2
 	}
-	// Bedrock 26.50 clients joining a dedicated server over the HTTP endpoint
-	// send "idp":{"domain":"","protocol":"default"}; BDS accepts them, so an
-	// empty domain must not invalidate the assertion.
 	return validJWS(d.Assertion.Token) && validJWS(d.Assertion.Fingerprints) &&
 		d.IdentityProvider.Protocol == "default"
 }
