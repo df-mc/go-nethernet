@@ -524,17 +524,17 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
 		for r := range messageReliabilityCapacity {
 			if r.Valid(channel) {
-				ch := wrapDataChannel(channel, r, c)
-				if existing := c.storeChannel(r, ch); existing != nil {
-					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
-					return
-				}
-				channel.OnOpen(sync.OnceFunc(func() {
+				ch := wrapDataChannel(channel, r, c, sync.OnceFunc(func() {
 					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
 					if opened.Add(1) == uint32(messageReliabilityCapacity) {
 						close(channelsReady)
 					}
 				}))
+				if existing := c.storeChannel(r, ch); existing != nil {
+					// The duplicate is not tracked by the Conn, so release its queue here.
+					_ = ch.Close()
+					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
+				}
 				return
 			}
 		}
