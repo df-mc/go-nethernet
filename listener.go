@@ -701,11 +701,7 @@ func (n *listenerNegotiator) startTransports(ctx context.Context, conn *Conn, d 
 	}
 
 	conn.log.Debug("starting SCTP transport")
-	if err := withContextCancel(ctx, func() error {
-		return conn.sctp.Start(d.sctp)
-	}, func() {
-		_ = conn.sctp.Stop()
-	}); err != nil {
+	if err := conn.sctp.StartContext(ctx, d.sctp); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
 	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
@@ -877,26 +873,6 @@ func (l *Listener) monitorSignaling() {
 	case <-l.signaling.Context().Done():
 		l.conf.Log.Warn("signaling context canceled", slog.Any("error", context.Cause(l.signaling.Context())))
 		_ = l.Close()
-	}
-}
-
-// withContextCancel calls f in a goroutine and returns early when ctx is done.
-// If cancel is non-nil, it is called when ctx is done to help unblock f.
-func withContextCancel(ctx context.Context, f func() error, cancel func()) error {
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- f()
-	}()
-	select {
-	case <-ctx.Done():
-		if cancel != nil {
-			cancel()
-		}
-		// Ensure the goroutine can complete without blocking even if it returns later.
-		go func() { <-errCh }()
-		return ctx.Err()
-	case err := <-errCh:
-		return err
 	}
 }
 
