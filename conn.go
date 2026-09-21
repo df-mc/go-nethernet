@@ -824,6 +824,9 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 	if len(dtlsParams.Fingerprints) == 0 {
 		return nil, wrapSignalError(errors.New("local DTLS parameters has no fingerprints"), localDescriptionErrorCode)
 	}
+	for i, fingerprint := range dtlsParams.Fingerprints {
+		dtlsParams.Fingerprints[i].Value = strings.ToUpper(fingerprint.Value)
+	}
 	sctpCapabilities := sctpTransport.GetCapabilities()
 
 	c := &Conn{
