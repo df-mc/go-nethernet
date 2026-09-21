@@ -9,12 +9,6 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// vanillaUserAgent mirrors the Bedrock client's libhttpclient header so
-// NetherNet HTTP signaling is indistinguishable from a vanilla client at
-// the network level (Wireshark: libhttpclient/1.0.0.0, no Go-http-client,
-// no Accept-Encoding: gzip, Connection: Keep-Alive).
-const vanillaUserAgent = "libhttpclient/1.0.0.0"
-
 const (
 	// vanillaUfragLen matches the vanilla Bedrock client (e.g. "iqQH").
 	vanillaUfragLen = 4
@@ -64,9 +58,7 @@ func vanillaSettingEngine() webrtc.SettingEngine {
 		}
 		return true
 	})
-	se.SetIPFilter(func(ip net.IP) (keep bool) {
-		return keepVanillaIP(ip)
-	})
+	se.SetIPFilter(keepVanillaIP)
 	return se
 }
 
