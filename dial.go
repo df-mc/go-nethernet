@@ -109,7 +109,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		d.ConnectionID = rand.Uint64()
 	}
 	if d.API == nil {
-		d.API = webrtc.NewAPI()
+		d.API = defaultVanillaAPI()
 	}
 	if d.Log == nil {
 		d.Log = slog.Default()

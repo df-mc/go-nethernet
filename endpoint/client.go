@@ -88,6 +88,12 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 
 	switch signal.Type {
 	case nethernet.SignalTypeOffer:
+		// Use byte-identical vanilla HTTP for plain http endpoints so
+		// Wireshark captures match the Bedrock client (header order,
+		// no Accept-Encoding: gzip, libhttpclient UA).
+		if u.Scheme == "http" && c.conf.HTTPClient.Transport == nil {
+			return c.signalVanilla(ctx, u, signal)
+		}
 		requestURL := u.JoinPath("/v1/join", c.conf.NetworkID).String()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader(signal.Data))
 		if err != nil {
@@ -95,8 +101,9 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		}
 		req.Header.Set("Content-Type", "application/sdp")
 		req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
+		req.Header.Set("Connection", "Keep-Alive")
 
-		resp, err := c.conf.HTTPClient.Do(req)
+		resp, err := doVanillaPost(c.conf.HTTPClient, req)
 		if err != nil {
 			return err
 		}

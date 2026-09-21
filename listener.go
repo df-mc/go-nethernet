@@ -138,7 +138,7 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		conf.Log = slog.Default()
 	}
 	if conf.API == nil {
-		conf.API = webrtc.NewAPI()
+		conf.API = defaultVanillaAPI()
 	}
 	if conf.IssueServerIdentity == nil {
 		conf.Log.Warn("generating a new private key for this listener. a TOFU (Trust on First Use) prompt may be surfaced to players on first join")

@@ -649,7 +649,7 @@ func (conn *Conn) trickleCandidates(signaling Signaling) error {
 		}
 		// Signal the local candidate in a goroutine so candidate gathering is never blocked by signaling.
 		// It uses [Conn.Context] as the parent context so signaling stops once the connection is closed.
-		go conn.trickleCandidate(signaling, formatICECandidate(int(candidateIndex.Add(1)-1), *candidate, conn.description.ice))
+		go conn.trickleCandidate(signaling, formatICECandidate(int(candidateIndex.Add(1)), *candidate, conn.description.ice))
 	})
 	return conn.gatherer.Gather()
 }
@@ -757,10 +757,28 @@ func (desc description) encode() ([]byte, error) {
 	//
 	// This behavior can be only seen on dedicated servers with the
 	// 'nethernet-disable-trickle-ice' setting property set to 'true' (including Realms).
-	for i, candidate := range desc.candidates {
+	//
+	// Vanilla clients embed candidates without the "candidate:" prefix (pion/sdp
+	// already emits "a=candidate:"), without inline ufrag, with 1-based
+	// network-id and "network-cost 50" on the first candidate only. The media
+	// port and connection address match the first host candidate instead of
+	// the trickle placeholders (9 and 0.0.0.0).
+	candidates := filterVanillaCandidates(desc.candidates)
+	if len(candidates) > 0 {
+		media.MediaName.Port.Value = int(candidates[0].Port)
+		if ip := net.ParseIP(candidates[0].Address); ip != nil {
+			if ip.To4() != nil {
+				media.ConnectionInformation.AddressType = "IP4"
+			} else {
+				media.ConnectionInformation.AddressType = "IP6"
+			}
+			media.ConnectionInformation.Address.Address = candidates[0].Address
+		}
+	}
+	for i, candidate := range candidates {
 		media.Attributes = append(media.Attributes, sdp.Attribute{
 			Key:   sdp.AttrKeyCandidate,
-			Value: formatICECandidate(i, candidate, desc.ice),
+			Value: formatSDPCandidate(i+1, candidate),
 		})
 	}
 
