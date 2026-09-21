@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -704,6 +705,58 @@ type description struct {
 	candidates []webrtc.ICECandidate
 }
 
+// defaultCandidate returns the ICE candidate to be used as the connection address for the media section in SDP.
+// It returns zero candidate with false when trickle ICE is enabled, or none of the candidates are suitable.
+// See https://webrtc.googlesource.com/src/+/refs/heads/main/api/jsep.cc#43.
+func (desc description) defaultCandidate() (candidate webrtc.ICECandidate, _ bool) {
+	if len(desc.candidates) == 0 {
+		return candidate, false
+	}
+	var (
+		currentIP         netip.Addr
+		currentPreference uint16
+	)
+	for _, c := range desc.candidates {
+		if c.Protocol != webrtc.ICEProtocolUDP || c.Component != uint16(webrtc.ICEComponentRTP) {
+			continue
+		}
+		ip, err := netip.ParseAddr(c.Address)
+		if err != nil {
+			// Hostname candidate cannot be used as the default candidate.
+			continue
+		}
+		pref := typePreference(c)
+		if pref <= currentPreference || currentIP.IsValid() && currentIP.Is4() && ip.Is6() {
+			// Do not use a candidate with a lower or equal preference, or an IPv6 address
+			// when the current IP address is IPv4.
+			continue
+		}
+		candidate, currentIP, currentPreference = c, ip, pref
+	}
+	if currentIP.IsValid() {
+		return candidate, true
+	}
+	return webrtc.ICECandidate{}, false
+}
+
+// typePreference returns the type preference of the given [webrtc.ICECandidate].
+func typePreference(candidate webrtc.ICECandidate) uint16 {
+	var typ ice.CandidateType
+	switch candidate.Typ {
+	case webrtc.ICECandidateTypeHost:
+		typ = ice.CandidateTypeHost
+	case webrtc.ICECandidateTypePrflx:
+		typ = ice.CandidateTypePeerReflexive
+	case webrtc.ICECandidateTypeSrflx:
+		typ = ice.CandidateTypeServerReflexive
+	case webrtc.ICECandidateTypeRelay:
+		typ = ice.CandidateTypeRelay
+	default:
+		typ = ice.CandidateTypeUnspecified
+	}
+	return typ.Preference()
+}
+
 // encode transforms the description into a [sdp.SessionDescription] and encodes them using the [sdp.SessionDescription.Marshal]
 // method. It is called by a negotiator (Listener or Dialer) to signal an offer or answer to the remote connection with the local
 // parameters of each transport within a Conn.
@@ -750,6 +803,16 @@ func (desc description) encode() ([]byte, error) {
 				Address: "0.0.0.0",
 			},
 		},
+	}
+
+	// Use the default candidate's address as the connection address for
+	// the media description whenever possible.
+	if candidate, ok := desc.defaultCandidate(); ok {
+		if netip.MustParseAddr(candidate.Address).Is6() {
+			media.ConnectionInformation.AddressType = "IP6"
+		}
+		media.MediaName.Port = sdp.RangedPort{Value: int(candidate.Port)}
+		media.ConnectionInformation.Address = &sdp.Address{Address: candidate.Address}
 	}
 
 	// When Trickle ICE is disabled, local ICE candidates are embedded directly in
