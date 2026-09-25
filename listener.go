@@ -837,7 +837,7 @@ func (l *Listener) NotifySignal(signal *Signal) bool {
 		n, ok := l.negotiations[key]
 		if !ok {
 			if signal.Type != SignalTypeOffer {
-				l.conf.Log.Error("received non-offer signal for a non-existing negotiation", "signal", signal.String(), "networkID", signal.NetworkID)
+				l.conf.Log.Debug("received non-offer signal for a non-existing negotiation", "signal", signal.String(), "networkID", signal.NetworkID)
 				l.negotiationsMu.Unlock()
 				return false
 			}
