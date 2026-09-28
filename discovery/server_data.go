@@ -39,8 +39,21 @@ type ServerData struct {
 	// GameType to Survival (0) as well to reproduce expected behavior.
 	Hardcore bool
 	// AcceptsOnlineAuth indicates whether the server accepts online-authenticated (Xbox Live) players.
+	// When set to true, the client prefers to use a multiplayer token issued by the authorization service.
+	//
+	// If the client is not logged in or the authorization service is unable to issue a multiplayer token
+	// and AcceptsSelfSignedAuth is false, the client will fast-fail before connecting to the server. Otherwise,
+	// it falls back to using a self-signed JWT token in the Login packet.
+	//
+	// When both AcceptsOnlineAuth and AcceptsSelfSignedAuth are false, clients are unable to join this server.
 	AcceptsOnlineAuth bool
 	// AcceptsSelfSignedAuth indicates whether the server accepts self-signed (LAN) authentication.
+	// When any of the following conditions are true, clients will use a self-signed JWT token in the
+	// Login packet:
+	//   - The client is not logged in to an Xbox Live account, or the authorization service is unable to issue a multiplayer token due to service errors.
+	//   - AcceptsOnlineAuth is false and AcceptsSelfSignedAuth is true.
+	// When AcceptsOnlineAuth is true, the client prefers to use a multiplayer token issued by the authorization service.
+	// When both AcceptsOnlineAuth and AcceptsSelfSignedAuth are false, clients are unable to join this server.
 	AcceptsSelfSignedAuth bool
 	// Nonce is a randomly generated, hex-encoded string produced by the host. Clients connecting
 	// to this server must include this same value in the 'Nonce' field of the ClientData sent
