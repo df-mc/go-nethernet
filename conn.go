@@ -53,6 +53,10 @@ type Conn struct {
 
 	// publicKey is the public key which identifies the remote entity behind this Conn.
 	publicKey *ecdsa.PublicKey
+	// verifyPublicKey, if set, replaces the comparison against publicKey in VerifyPublicKey.
+	verifyPublicKey func(*ecdsa.PublicKey) error
+	// iceStateHook, if set, is called on every ICE transport state change.
+	iceStateHook func(webrtc.ICETransportState)
 
 	// candidateReceived notifies that the first candidate is received from the other
 	// end, indicating that the Conn is ready to start its transports.
@@ -166,6 +170,18 @@ func (conn *Conn) DisableEncryption() bool {
 // is returned.
 func (conn *Conn) PublicKey() *ecdsa.PublicKey {
 	return conn.publicKey
+}
+
+// VerifyPublicKey reports an error if pub does not identify the remote peer. It returns
+// nil if the connection was established without an identity.
+func (conn *Conn) VerifyPublicKey(pub *ecdsa.PublicKey) error {
+	if conn.verifyPublicKey != nil {
+		return conn.verifyPublicKey(pub)
+	}
+	if conn.publicKey != nil && !conn.publicKey.Equal(pub) {
+		return errors.New("nethernet: public key does not match the identity of the remote peer")
+	}
+	return nil
 }
 
 // Context returns the background context associated with the Conn.
@@ -377,6 +393,9 @@ func isTerminalICEState(state webrtc.ICETransportState) bool {
 // error has occurred in any of the underlying transports and data channels.
 func (conn *Conn) handleTransports() {
 	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
+		if conn.iceStateHook != nil {
+			conn.iceStateHook(state)
+		}
 		if isTerminalICEState(state) {
 			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 			go conn.close(fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state))
@@ -866,13 +885,13 @@ func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole 
 // The caller must register [SCTPTransport.OnDataChannel] immediately on
 // the returned Conn, then use [Conn.description] to signal an offer or
 // answer to the remote peer.
-func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, networkID, localNetworkID string, n negotiator, localDescriptionErrorCode int) (*Conn, error) {
+func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, certificates []webrtc.Certificate, id uint64, networkID, localNetworkID string, n negotiator, localDescriptionErrorCode int) (*Conn, error) {
 	gatherer, err := api.NewICEGatherer(gathererOpts)
 	if err != nil {
 		return nil, wrapSignalError(fmt.Errorf("create ICE gatherer: %w", err), ErrorCodeFailedToCreatePeerConnection)
 	}
 	iceTransport := api.NewICETransport(gatherer)
-	dtlsTransport, err := api.NewDTLSTransport(iceTransport, nil)
+	dtlsTransport, err := api.NewDTLSTransport(iceTransport, certificates)
 	if err != nil {
 		return nil, wrapSignalError(fmt.Errorf("create DTLS transport: %w", err), ErrorCodeFailedToCreatePeerConnection)
 	}

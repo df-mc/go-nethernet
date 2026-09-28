@@ -451,6 +451,7 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	c, err := newConn(
 		n.conf.API,
 		gatherOptions(credentials, n.conf.ICEGatherPolicy),
+		nil,
 		signal.ConnectionID,
 		signal.NetworkID,
 		n.networkID,
@@ -517,29 +518,7 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 
 	// Register a callback function immediately since the remote peer
 	// may open data channels at any time while ICE candidates are being signaled.
-	var (
-		opened        atomic.Uint32
-		channelsReady = make(chan struct{})
-	)
-	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
-		for r := range messageReliabilityCapacity {
-			if r.Valid(channel) {
-				ch := wrapDataChannel(channel, r, c)
-				if existing := c.storeChannel(r, ch); existing != nil {
-					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
-					return
-				}
-				channel.OnOpen(sync.OnceFunc(func() {
-					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
-					if opened.Add(1) == uint32(messageReliabilityCapacity) {
-						close(channelsReady)
-					}
-				}))
-				return
-			}
-		}
-		go c.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
-	})
+	channelsReady := c.acceptDataChannels()
 
 	// Encode an answer using the local parameters!
 	answer, err := c.description.encode()
@@ -589,6 +568,35 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	}
 	established = true
 	return nil
+}
+
+// acceptDataChannels registers a handler for the data channels opened by the remote peer.
+// The returned channel is closed once all of them are open.
+func (c *Conn) acceptDataChannels() <-chan struct{} {
+	var (
+		opened        atomic.Uint32
+		channelsReady = make(chan struct{})
+	)
+	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
+		for r := range messageReliabilityCapacity {
+			if r.Valid(channel) {
+				ch := wrapDataChannel(channel, r, c)
+				if existing := c.storeChannel(r, ch); existing != nil {
+					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
+					return
+				}
+				channel.OnOpen(sync.OnceFunc(func() {
+					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
+					if opened.Add(1) == uint32(messageReliabilityCapacity) {
+						close(channelsReady)
+					}
+				}))
+				return
+			}
+		}
+		go c.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
+	})
+	return channelsReady
 }
 
 // answererRole returns the local [webrtc.DTLSRole] for an answer based on the

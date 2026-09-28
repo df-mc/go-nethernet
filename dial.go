@@ -178,7 +178,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			stop()
 		}
 	}()
-	c, err := newConn(d.API, gatherOptions(credentials, d.ICEGatherPolicy), d.ConnectionID, networkID, signaling.NetworkID(), dialerConn{
+	c, err := newConn(d.API, gatherOptions(credentials, d.ICEGatherPolicy), nil, d.ConnectionID, networkID, signaling.NetworkID(), dialerConn{
 		Dialer: d,
 		stop:   stop,
 	}, ErrorCodeFailedToCreateOffer)
