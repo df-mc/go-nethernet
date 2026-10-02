@@ -1,6 +1,7 @@
 package nethernet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -15,6 +16,84 @@ func TestDialListenerTrickleICE(t *testing.T) {
 
 func TestDialListenerNonTrickleICE(t *testing.T) {
 	testDialListener(t, true)
+}
+
+func TestSendQueueDrainsBeyondWebRTCBufferedAmountBudget(t *testing.T) {
+	client, server := newMemorySignalingPair("1", "2")
+	defer client.close()
+	defer server.close()
+
+	l, err := (ListenConfig{AllowAnonymous: true}).Listen(server)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer l.Close()
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- conn
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	conn, err := (Dialer{}).DialContext(ctx, server.NetworkID(), client)
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	defer conn.Close()
+
+	var serverConn *Conn
+	select {
+	case acceptedConn := <-accepted:
+		serverConn = acceptedConn.(*Conn)
+	case err := <-acceptErr:
+		t.Fatalf("Accept() error = %v", err)
+	case <-ctx.Done():
+		t.Fatalf("Accept() timed out: %v", ctx.Err())
+	}
+	defer serverConn.Close()
+
+	payload := make([]byte, maxSendBufferedAmount+maxMessageSize)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	received := make(chan []byte, 1)
+	readErr := make(chan error, 1)
+	go func() {
+		packet, err := serverConn.ReadPacket()
+		if err != nil {
+			readErr <- err
+			return
+		}
+		received <- packet
+	}()
+
+	n, err := conn.Write(payload)
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("Write() = %d, want %d", n, len(payload))
+	}
+
+	select {
+	case got := <-received:
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("ReadPacket() returned %d corrupted bytes", len(got))
+		}
+	case err := <-readErr:
+		t.Fatalf("ReadPacket() error = %v", err)
+	case <-ctx.Done():
+		t.Fatalf("ReadPacket() timed out: %v", ctx.Err())
+	}
 }
 
 func TestDialedConnSurvivesSignalingCloseAfterNegotiation(t *testing.T) {

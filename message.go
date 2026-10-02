@@ -81,10 +81,14 @@ func (r MessageReliability) compareOptional(a, b *uint16) bool {
 
 // wrapDataChannel wraps a [webrtc.DataChannel] and sets up handlers to reconstruct
 // fragmented messages. Received message segments are reassembled and sent to packets
-// when all segments have arrived.
-func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability, conn *Conn) *dataChannel {
+// when all segments have arrived. onOpen, if non-nil, runs once the channel opens.
+func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability, conn *Conn, onOpen func()) *dataChannel {
 	ch := &dataChannel{
 		DataChannel: channel,
+		out: newSendQueue(conn.ctx, channel, maxSendBufferedAmount, func(err error) {
+			// Closing tears down this queue too, so do it off the drain goroutine.
+			go conn.close(fmt.Errorf("nethernet: send on data channel %q: %w", channel.Label(), err))
+		}),
 		reliability: reliability,
 		// Previously, message.data was pre-allocated for all possible segments.
 		// Since most messages are smaller than 256KB and don't require fragmentation,
@@ -93,6 +97,12 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 		packets: make(chan []byte),
 		close:   make(chan struct{}),
 	}
+	ch.OnOpen(func() {
+		ch.out.signal()
+		if onOpen != nil {
+			onOpen()
+		}
+	})
 	ch.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if err := ch.handleMessage(msg.Data); err != nil {
 			if errors.Is(err, net.ErrClosed) {
@@ -119,6 +129,9 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 // within a Conn. It contains the fields necessary for handling multiple segments received in the embedded [webrtc.DataChannel].
 type dataChannel struct {
 	*webrtc.DataChannel
+
+	// out delivers outbound messages once the channel is open and has room.
+	out *sendQueue
 
 	// An embedded message contains the buffer that holds the segments received
 	// to now and the count of the last segment count.
@@ -212,6 +225,7 @@ func (c *dataChannel) handleMessage(b []byte) error {
 func (c *dataChannel) Close() (err error) {
 	c.once.Do(func() {
 		close(c.close)
+		c.out.close(net.ErrClosed)
 		c.messageMu.Lock()
 		clear(c.data)
 		c.messageMu.Unlock()
