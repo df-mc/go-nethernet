@@ -37,6 +37,43 @@ type ClientConfig struct {
 	// It is included to the URL path of requests sent to servers.
 	// If empty, a random uint64 is generated and used.
 	NetworkID string
+
+	// ClientInfo contains additional information about the client.
+	// If all fields have non-zero values, it is used to populate URL
+	// query parameters in requests sent by [Client.PingContext] or
+	// [Client.Status].
+	ClientInfo ClientInfo
+}
+
+// ClientInfo represents additional information about the client connecting to servers.
+type ClientInfo struct {
+	// Version identifies the game version of the client.
+	Version string
+	// Protocol identifies the protocol version of the client.
+	Protocol int
+	// Platform identifies the build platform of the client.
+	Platform int
+}
+
+// Valid reports whether all fields in ClientInfo have non-zero values.
+func (c ClientInfo) Valid() bool {
+	return c.Version != "" && c.Protocol != 0 && c.Platform != 0
+}
+
+// zero reports whether all fields in ClientInfo have zero values.
+// It is used to check for malformed or half-complete ClientInfo in [Client.Status].
+func (c ClientInfo) zero() bool {
+	return c.Version == "" && c.Protocol == 0 && c.Platform == 0
+}
+
+// Query returns [url.Values] containing the URL query parameters
+// corresponding to each field in ClientInfo.
+func (c ClientInfo) Query() url.Values {
+	q := make(url.Values)
+	q.Set("version", c.Version)
+	q.Set("protocol", strconv.Itoa(c.Protocol))
+	q.Set("platform", strconv.Itoa(c.Platform))
+	return q
 }
 
 // New returns a new [Client] from the configuration.
@@ -94,9 +131,19 @@ func (c *Client) Status(ctx context.Context, address string) (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("parse address: %w", err)
 	}
-	requestURL := u.JoinPath("/v1/join").String()
+	requestURL := u.JoinPath("/v1/join")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	info := c.conf.ClientInfo
+	if !info.zero() && !info.Valid() {
+		return Status{}, errors.New("nethernet/endpoint: malformed ClientConfig.ClientInfo")
+	}
+	if info.Valid() {
+		q := info.Query()
+		q.Set("id", c.NetworkID())
+		requestURL.RawQuery = q.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
 	if err != nil {
 		return Status{}, fmt.Errorf("make request: %w", err)
 	}
