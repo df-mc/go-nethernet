@@ -138,7 +138,7 @@ func selfSignedIdentity(privateKey *ecdsa.PrivateKey, domain string, jwk bool) (
 			IssuedAt: jwt.NewNumericDate(issuedAt),
 		},
 		PublicKey: &privateKey.PublicKey,
-		jwk:       true,
+		jwk:       jwk,
 	}).Serialize()
 	if err != nil {
 		return nil, fmt.Errorf("generate JWT token: %w", err)
