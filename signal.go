@@ -184,9 +184,14 @@ func (s *Signal) String() string {
 // It returns a string in the format used by the C++ implementation of WebRTC. Local ICE candidates
 // gathered by [webrtc.ICEGatherer] should be formatted with formatICECandidate when signaling to a remote
 // network, otherwise it will be ignored.
-func formatICECandidate(id int, candidate webrtc.ICECandidate, iceParams webrtc.ICEParameters) string {
+// The prefixed parameter determines whether the resulting string is prefixed by 'candidate:'.
+// It is typically false when the candidate is included as an SDP attribute, since the attribute
+// key already provides that prefix.
+func formatICECandidate(id int, candidate webrtc.ICECandidate, iceParams webrtc.ICEParameters, prefixed bool) string {
 	b := &strings.Builder{}
-	b.WriteString("candidate:")
+	if prefixed {
+		b.WriteString("candidate:")
+	}
 	b.WriteString(candidate.Foundation)
 	b.WriteByte(' ')
 	b.WriteByte('1')
