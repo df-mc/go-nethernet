@@ -163,6 +163,7 @@ func ServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Identity, err
 // (non-TLS) context (though it is not functional in release versions somehow). The returned
 // Identity contains a self-signed JWT token with a 1-minute expiration time and the public key
 // embedded as the 'cpk' claim.
+//
 // Deprecated: Use ServerIdentity instead.
 //
 //go:fix inline
