@@ -102,12 +102,19 @@ func claimPublicKey(token string, selfSigned bool) (*ecdsa.PublicKey, error) {
 	return claims.PublicKey, nil
 }
 
-// GenerateServerIdentity creates a new server Identity using the provided private key.
-// The domain may be surfaced to players on first join when connecting via an insecure
-// (non-TLS) context (though it is not functional in release versions somehow). The returned
-// Identity contains a self-signed JWT token with a 1-minute expiration time and the public key
-// embedded as the 'cpk' claim.
-func GenerateServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Identity, error) {
+// SelfSignedIdentity generates a self-signed identity using the provided
+// private key. The domain parameter should be the domain of the authorization
+// service used by Minecraft, which can be obtained from the discovery service.
+// The returned Identity contains a self-signed JWT that expires after one minute,
+// with the corresponding public key embedded in the 'cpk' claim as a base64-encoded
+// DER public key.
+func SelfSignedIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Identity, error) {
+	return selfSignedIdentity(privateKey, domain, false)
+}
+
+// selfSignedIdentity generates a self-signed connection identity using the provided key.
+// The jwk parameter is typically true for servers and false for clients.
+func selfSignedIdentity(privateKey *ecdsa.PrivateKey, domain string, jwk bool) (*Identity, error) {
 	encodedPublicKey, err := encodePublicKey(&privateKey.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("encode public key: %w", err)
@@ -131,6 +138,7 @@ func GenerateServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Ident
 			IssuedAt: jwt.NewNumericDate(issuedAt),
 		},
 		PublicKey: &privateKey.PublicKey,
+		jwk:       true,
 	}).Serialize()
 	if err != nil {
 		return nil, fmt.Errorf("generate JWT token: %w", err)
@@ -142,10 +150,33 @@ func GenerateServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Ident
 	}, nil
 }
 
+// ServerIdentity generates a server identity using the provided private key.
+// The domain may be shown to players the first time they join over an insecure (non-TLS)
+// connection. The returned Identity contains a self-signed JWT that expires after one minute,
+// with the corresponding public key embedded in the 'cpk' claim as a JSON Web Key (JWK).
+func ServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Identity, error) {
+	return selfSignedIdentity(privateKey, domain, true)
+}
+
+// GenerateServerIdentity creates a new server Identity using the provided private key.
+// The domain may be surfaced to players on first join when connecting via an insecure
+// (non-TLS) context (though it is not functional in release versions somehow). The returned
+// Identity contains a self-signed JWT token with a 1-minute expiration time and the public key
+// embedded as the 'cpk' claim.
+// Deprecated: Use ServerIdentity instead.
+//
+//go:fix inline
+func GenerateServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Identity, error) {
+	return ServerIdentity(privateKey, domain)
+}
+
 // tokenClaims contains the essential JWT claims for both client and server identity tokens.
 type tokenClaims struct {
 	jwt.Claims
 	PublicKey *ecdsa.PublicKey `json:"cpk"`
+
+	// jwk determines whether to encode PublicKey as a JSON Web Key.
+	jwk bool
 }
 
 // MarshalJSON implements [json.Marshaler] for tokenClaims.
@@ -155,6 +186,19 @@ func (c tokenClaims) MarshalJSON() ([]byte, error) {
 		return nil, errors.New("nethernet: public key is nil")
 	}
 	type Alias tokenClaims
+	if !c.jwk {
+		publicKey, err := encodePublicKey(c.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("encode public key: %w", err)
+		}
+		return json.Marshal(struct {
+			Alias
+			PublicKey string `json:"cpk"`
+		}{
+			Alias:     (Alias)(c),
+			PublicKey: publicKey,
+		})
+	}
 	return json.Marshal(struct {
 		Alias
 		PublicKey jose.JSONWebKey `json:"cpk"`
@@ -311,15 +355,19 @@ func parsePublicKey(data []byte) (*ecdsa.PublicKey, error) {
 	var publicKey crypto.PublicKey
 	switch data[0] {
 	case '{':
-		// 26.40+ clients use JWK to represent public keys.
+		// Servers on 26.40+ use a JSON Web Key (JWK) to represent public keys.
 		var key jose.JSONWebKey
 		if err := json.Unmarshal(data, &key); err != nil {
 			return nil, err
 		}
+		if !key.Valid() {
+			return nil, errors.New("nethernet: invalid JWK")
+		}
 		publicKey = key.Key
 	case '"':
-		// Pre 26.40 clients used base64-encoded DER public keys in the same format
-		// as seen in the connection request included in the Login packet.
+		// Servers before 26.40, as well as the latest clients, uses base64-encoded DER
+		// public keys in the same format as seen in the connection request included in
+		// the Login packet.
 		var s string
 		if err := json.Unmarshal(data, &s); err != nil {
 			return nil, err

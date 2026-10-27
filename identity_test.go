@@ -18,7 +18,7 @@ import (
 
 func TestIdentitySignVerifyRoundTrip(t *testing.T) {
 	privateKey := newIdentityTestKey(t)
-	identity, err := GenerateServerIdentity(privateKey, "self")
+	identity, err := ServerIdentity(privateKey, "self")
 	if err != nil {
 		t.Fatalf("GenerateServerIdentity() error = %v", err)
 	}
@@ -38,7 +38,7 @@ func TestIdentitySignVerifyRoundTrip(t *testing.T) {
 
 func TestIdentityVerifyRejectsTamperedFingerprint(t *testing.T) {
 	privateKey := newIdentityTestKey(t)
-	identity, err := GenerateServerIdentity(privateKey, "self")
+	identity, err := ServerIdentity(privateKey, "self")
 	if err != nil {
 		t.Fatalf("GenerateServerIdentity() error = %v", err)
 	}

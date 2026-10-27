@@ -162,7 +162,7 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 			conf.Log.Debug("newly generated a private key for this listener", "fingerprint", ssh.FingerprintSHA256(pub))
 		}
 		conf.IssueServerIdentity = func(ctx context.Context) (*Identity, error) {
-			return GenerateServerIdentity(privateKey, "self")
+			return ServerIdentity(privateKey, "self")
 		}
 	}
 	if conf.VerifyClientToken == nil {
