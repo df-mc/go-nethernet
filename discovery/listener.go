@@ -73,7 +73,7 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 		addresses: make(map[uint64]address),
 
 		notifiers: make(map[uint32]nethernet.Notifier),
-		responses: make(map[uint64][]byte),
+		responses: make(map[uint64]response),
 
 		closed: make(chan struct{}),
 	}
@@ -103,11 +103,8 @@ type Listener struct {
 	// and instead []byte.
 	pongData atomic.Pointer[[]byte]
 
-	// addresses stores a map whose keys are NetherNet network IDs and the value
-	// is an address struct, which stores the UDP address for the NetherNet network
-	// ID along with the timestamp for expiring inactivity addresses. It is guarded
-	// by addressesMu for atomic access in concurrent goroutines like background and
-	// handlePacket.
+	// addresses maps NetherNet network IDs to the UDP address that last sent a
+	// response or message, with its time for expiry. It is guarded by addressesMu.
 	addresses   map[uint64]address
 	addressesMu sync.RWMutex
 
@@ -118,9 +115,9 @@ type Listener struct {
 	notifiers   map[uint32]nethernet.Notifier
 	notifiersMu sync.RWMutex
 
-	// responses stores a map whose keys are NetherNet network IDs which value is an
-	// application-specific data sent as ResponsePacket from the servers in the network.
-	responses   map[uint64][]byte
+	// responses maps NetherNet network IDs to the application data each server
+	// last answered with, and when.
+	responses   map[uint64]response
 	responsesMu sync.RWMutex
 
 	// closed is a channel that is closed when the Listener closes.
@@ -142,9 +139,10 @@ func (l *Listener) Signal(ctx context.Context, signal *nethernet.Signal) error {
 			return fmt.Errorf("parse network ID as uint64: %w", err)
 		}
 
-		l.addressesMu.RLock()
+		l.addressesMu.Lock()
+		l.deleteInactiveAddressesLocked(time.Now())
 		addr, ok := l.addresses[networkID]
-		l.addressesMu.RUnlock()
+		l.addressesMu.Unlock()
 
 		if !ok {
 			return fmt.Errorf("no address found for network ID: %d", networkID)
@@ -195,14 +193,29 @@ func (l *Listener) NetworkID() string {
 	return strconv.FormatUint(l.conf.NetworkID, 10)
 }
 
-// Responses returns the responses sent from servers in the same network during LAN discovery
-// using RequestPacket with the broadcast address specified in [ListenConfig.BroadcastAddress].
+// Responses returns the application data of servers that answered a RequestPacket broadcast to
+// [ListenConfig.BroadcastAddress] within the last five seconds, as vanilla lists LAN worlds.
 func (l *Listener) Responses() map[uint64][]byte {
+	now := time.Now()
 	l.responsesMu.Lock()
 	defer l.responsesMu.Unlock()
-	// As Listener.responses are continuously supposed to be written by Listener.background,
-	// we return a clone of the map.
-	return maps.Clone(l.responses)
+	maps.DeleteFunc(l.responses, func(_ uint64, r response) bool {
+		return now.Sub(r.t) > responseLifetime
+	})
+	responses := make(map[uint64][]byte, len(l.responses))
+	for id, r := range l.responses {
+		responses[id] = r.data
+	}
+	return responses
+}
+
+// responseLifetime is how long vanilla keeps a LAN world listed after its latest response.
+const responseLifetime = 5 * time.Second
+
+// response is one server's latest application data and when it arrived.
+type response struct {
+	data []byte
+	t    time.Time
 }
 
 // listen continuously reads packets received in the conn and calls handlePacket.
@@ -245,18 +258,14 @@ func (l *Listener) handlePacket(data []byte, addr net.Addr) error {
 		return nil
 	}
 
-	l.addressesMu.Lock()
-	a, ok := l.addresses[senderID]
-	if !ok {
-		a = address{
-			networkID: senderID,
-		}
+	// Like vanilla, only responses and messages from a non-zero sender locate a peer.
+	if _, request := pk.(*RequestPacket); !request && senderID != 0 {
+		now := time.Now()
+		l.addressesMu.Lock()
+		l.deleteInactiveAddressesLocked(now)
+		l.addresses[senderID] = address{networkID: senderID, t: now, addr: addr}
+		l.addressesMu.Unlock()
 	}
-	// Update or set the address and timestamp for expiring them in deleteInactiveAddresses.
-	a.addr = addr
-	a.t = time.Now()
-	l.addresses[senderID] = a
-	l.addressesMu.Unlock()
 
 	switch pk := pk.(type) {
 	case *RequestPacket:
@@ -287,11 +296,10 @@ func (l *Listener) handleRequest(addr net.Addr) error {
 	return nil
 }
 
-// handleResponse handles a ResponsePacket sent from the servers.
-// It stores its ApplicationData to the responses atomically along with the sender ID.
+// handleResponse records a server's ApplicationData and when it arrived.
 func (l *Listener) handleResponse(pk *ResponsePacket, senderID uint64) error {
 	l.responsesMu.Lock()
-	l.responses[senderID] = pk.ApplicationData
+	l.responses[senderID] = response{data: pk.ApplicationData, t: time.Now()}
 	l.responsesMu.Unlock()
 
 	return nil
@@ -397,8 +405,7 @@ func (l *Listener) Close() (err error) {
 	return err
 }
 
-// background continuously broadcasts RequestPacket and calls deleteInactiveAddresses
-// at 2 seconds interval until the Listener closes.
+// background broadcasts a RequestPacket at vanilla's 2 second interval until the Listener closes.
 func (l *Listener) background() {
 	ticker := time.NewTicker(time.Second * 2)
 	defer ticker.Stop()
@@ -408,8 +415,6 @@ func (l *Listener) background() {
 		case <-l.closed:
 			return
 		case <-ticker.C:
-			l.deleteInactiveAddresses()
-
 			if l.conf.BroadcastAddress != nil {
 				if err := l.write(&RequestPacket{}, l.conf.BroadcastAddress); err != nil {
 					if !errors.Is(err, net.ErrClosed) {
@@ -421,15 +426,16 @@ func (l *Listener) background() {
 	}
 }
 
-// deleteInactiveAddresses deletes inactive addresses mapped to NetherNet IDs. It specifically
-// removes if the address was not known for sending packets in the last 15 seconds.
-func (l *Listener) deleteInactiveAddresses() {
-	l.addressesMu.Lock()
+// deleteInactiveAddressesLocked forgets peers silent for addressLifetime, as vanilla
+// does whenever it updates or reads its address table. addressesMu must be held.
+func (l *Listener) deleteInactiveAddressesLocked(now time.Time) {
 	maps.DeleteFunc(l.addresses, func(_ uint64, a address) bool {
-		return time.Since(a.t) > time.Second*15
+		return now.Sub(a.t) >= addressLifetime
 	})
-	l.addressesMu.Unlock()
 }
+
+// addressLifetime is how long vanilla keeps a LAN peer's address after its last response or message.
+const addressLifetime = time.Minute
 
 // address encapsulates a mapping for NetherNet IDs and the UDP address responsible for sending
 // packets. It is used for signaling a NetherNet network with an ID in [Listener.Signal].
