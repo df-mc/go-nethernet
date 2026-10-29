@@ -386,10 +386,8 @@ func (h *Handler) handleOffer(w http.ResponseWriter, req *http.Request) {
 
 	signal, err := h.negotiate(ctx, networkID, string(b))
 	if err != nil {
-		log.Error("error negotiating",
-			slog.String("offer", string(b)),
-			slog.Any("error", err),
-		)
+		// The offer is not logged: it carries the client's identity token and network addresses.
+		log.Error("error negotiating", slog.Any("error", err))
 		if errors.Is(err, errOfferNotAdmitted) {
 			writeText(w, http.StatusServiceUnavailable, "Service unavailable")
 			return
