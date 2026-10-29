@@ -82,6 +82,11 @@ type Dialer struct {
 	// a caller-controlled TURN server.
 	Credentials func(ctx context.Context) (*Credentials, error)
 
+	// NegotiationTimeout bounds the wait for the remote answer, measured from sending the offer.
+	// The dial fails with [ErrorCodeNegotiationTimeoutWaitingForResponse] when it passes. If zero,
+	// [DefaultNegotiationTimeout] is used.
+	NegotiationTimeout time.Duration
+
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
 	// When set to true, the dialer waits for ICE gathering to complete and embeds
@@ -217,12 +222,23 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	if err != nil {
 		return nil, fmt.Errorf("encode offer: %w", err)
 	}
-	if err := signaling.Signal(ctx, &Signal{
+	// Like vanilla, the answer must arrive within the negotiation timeout of setting the offer.
+	timeout := d.NegotiationTimeout
+	if timeout == 0 {
+		timeout = DefaultNegotiationTimeout
+	}
+	answerCtx, cancelAnswer := context.WithTimeoutCause(ctx, timeout, errNoAnswer)
+	defer cancelAnswer()
+	if err := signaling.Signal(answerCtx, &Signal{
 		Type:         SignalTypeOffer,
 		Data:         string(offer),
 		ConnectionID: d.ConnectionID,
 		NetworkID:    networkID,
 	}); err != nil {
+		if context.Cause(answerCtx) == errNoAnswer {
+			d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
+			return nil, wrapSignalError(fmt.Errorf("signal offer: %w", errNoAnswer), ErrorCodeNegotiationTimeoutWaitingForResponse)
+		}
 		return nil, fmt.Errorf("signal offer: %w", err)
 	}
 
@@ -236,9 +252,12 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		select {
 		case <-c.ctx.Done():
 			return nil, context.Cause(c.ctx)
-		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		case <-answerCtx.Done():
+			if context.Cause(answerCtx) == errNoAnswer || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
+			}
+			if context.Cause(answerCtx) == errNoAnswer {
+				return nil, wrapSignalError(errNoAnswer, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
 			return nil, ctx.Err()
 		case <-signaling.Context().Done():
@@ -291,27 +310,18 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 
 				go d.handleConn(c, signals)
 
-				select {
-				case <-c.ctx.Done():
-					return nil, context.Cause(c.ctx)
-				case <-ctx.Done():
-					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
-					}
+				// Like vanilla, ICE starts with the answer; remote candidates may trickle in later
+				// or never, when the server is reached through peer-reflexive checks.
+				if err := d.startTransports(ctx, c, desc); err != nil {
 					if err := context.Cause(c.ctx); err != nil {
 						return nil, err
 					}
-					return nil, ctx.Err()
-				case <-c.candidateReceived:
-					c.log.Debug("received first candidate")
-					if err := d.startTransports(ctx, c, desc); err != nil {
-						if errors.Is(err, context.DeadlineExceeded) {
-							d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
-						}
-						return nil, fmt.Errorf("start transports: %w", err)
+					if errors.Is(err, context.DeadlineExceeded) {
+						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
 					}
-					return c, nil
+					return nil, fmt.Errorf("start transports: %w", err)
 				}
+				return c, nil
 			default:
 				err = c.handleSignal(signal)
 				if err != nil {
@@ -358,6 +368,12 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 		})
 	}()
 }
+
+// DefaultNegotiationTimeout is vanilla's limit on waiting for the answer to an offer.
+const DefaultNegotiationTimeout = 10 * time.Second
+
+// errNoAnswer reports that no answer arrived within the negotiation timeout.
+var errNoAnswer = errors.New("nethernet: no answer within the negotiation timeout")
 
 // SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
 // failed dial.

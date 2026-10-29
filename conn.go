@@ -74,6 +74,8 @@ type Conn struct {
 	channels [messageReliabilityCapacity]*dataChannel
 	// channelsMu guards channels from concurrent read-write access during startup and closure.
 	channelsMu sync.RWMutex
+	// packets queues reassembled packets from both data channels for Receive.
+	packets chan []byte
 	// maxSegmentPayload is the negotiated SCTP message size minus the one-byte
 	// NetherNet fragment header.
 	maxSegmentPayload atomic.Uint32
@@ -120,9 +122,9 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 	return n, nil
 }
 
-// Receive receives a packet in fully reconstructed state combined from multiple segments
-// received from the data channel responsible for the MessageReliability. An error may be
-// returned if the Conn has been closed by [Conn.Close].
+// Receive returns the next fully reassembled packet. As in vanilla, packets from both data
+// channels share one queue, so r only selects a valid reliability. An error may be returned
+// if the Conn has been closed by [Conn.Close].
 func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	if r >= messageReliabilityCapacity {
 		return nil, fmt.Errorf("invalid message reliability: %d", r)
@@ -130,7 +132,7 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	select {
 	case <-conn.ctx.Done():
 		return nil, errors.Join(context.Cause(conn.ctx), net.ErrClosed)
-	case pk := <-conn.channel(r).packets:
+	case pk := <-conn.packets:
 		return pk, nil
 	}
 }
@@ -907,6 +909,7 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 		},
 
 		candidateReceived: make(chan struct{}),
+		packets:           make(chan []byte),
 
 		negotiator: n,
 
