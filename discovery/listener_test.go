@@ -35,14 +35,8 @@ func TestListenAcceptsClientAddressForms(t *testing.T) {
 			if localAddr.Port == DefaultPort {
 				t.Skipf("port-zero bind selected default port %d", DefaultPort)
 			}
-			if l.conf.BroadcastAddress == nil {
-				t.Fatal("BroadcastAddress is nil")
-			}
-			if !l.conf.BroadcastAddress.IP.Equal(net.IPv4bcast) {
-				t.Fatalf("BroadcastAddress.IP = %v, want %v", l.conf.BroadcastAddress.IP, net.IPv4bcast)
-			}
-			if l.conf.BroadcastAddress.Port != DefaultPort {
-				t.Fatalf("BroadcastAddress.Port = %d, want %d", l.conf.BroadcastAddress.Port, DefaultPort)
+			if l.conf.BroadcastAddress != nil || !l.directedBroadcast {
+				t.Fatalf("BroadcastAddress = %v, directed = %t; want directed broadcasts", l.conf.BroadcastAddress, l.directedBroadcast)
 			}
 		})
 	}
@@ -248,5 +242,29 @@ func TestDeleteInactiveAddressesAtOneMinute(t *testing.T) {
 	}
 	if _, ok := l.addresses[2]; ok {
 		t.Fatal("kept a peer silent for a minute")
+	}
+}
+
+// A network's directed broadcast address sets every host bit, as vanilla computes it.
+func TestDirectedBroadcast(t *testing.T) {
+	for _, tt := range []struct {
+		cidr, want string
+	}{
+		{"192.168.1.20/24", "192.168.1.255"},
+		{"10.0.3.7/22", "10.0.3.255"},
+		{"172.16.5.4/16", "172.16.255.255"},
+	} {
+		ip, network, err := net.ParseCIDR(tt.cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		network.IP = ip
+		got, ok := directedBroadcast(network)
+		if !ok || net.IP(got[:]).String() != tt.want {
+			t.Fatalf("directedBroadcast(%s) = %v, %t, want %s", tt.cidr, net.IP(got[:]), ok, tt.want)
+		}
+	}
+	if _, ok := directedBroadcast(&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}); ok {
+		t.Fatal("directedBroadcast accepted an IPv6 network")
 	}
 }

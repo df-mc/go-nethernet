@@ -22,8 +22,9 @@ type ListenConfig struct {
 	// same network. In NetherNet, it is explicitly defined as a string, but in LAN discovery it is sent as an uint8.
 	NetworkID uint64
 
-	// BroadcastAddress specifies the UDP broadcast address for sending request packets to the servers in
-	// the same network. If nil, an *net.UDPAddr with net.IPv4bcast and port 7551 will be used.
+	// BroadcastAddress specifies the UDP address request packets are sent to. If nil and the Listener
+	// is not bound to port 7551, requests go to port 7551 at the directed broadcast address of every
+	// IPv4 interface that is up, as vanilla clients send them.
 	BroadcastAddress *net.UDPAddr
 
 	// Log is used for logging messages at various levels.
@@ -56,19 +57,12 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 		return nil, fmt.Errorf("unexpected local address type %T", conn.LocalAddr())
 	}
 
-	if conf.BroadcastAddress == nil && localAddr.Port != DefaultPort {
-		// If the port for the address is 7551, it means no applications are listening on this network
-		// and server discovery using limited broadcast on net.IPv4bcast is not meaningful.
-		conf.BroadcastAddress = &net.UDPAddr{
-			IP:   net.IPv4bcast,
-			Port: DefaultPort,
-		}
-	}
-
 	l := &Listener{
 		conn: conn,
 
 		conf: conf,
+		// A Listener on port 7551 answers requests; any other port discovers servers.
+		directedBroadcast: conf.BroadcastAddress == nil && localAddr.Port != DefaultPort,
 
 		addresses: make(map[uint64]address),
 
@@ -96,6 +90,8 @@ type Listener struct {
 
 	// conf is the ListenConfig used for [ListenConfig.Listen].
 	conf ListenConfig
+	// directedBroadcast sends requests to each interface's directed broadcast address.
+	directedBroadcast bool
 
 	// pongData atomically stores the application data for responding to the clients
 	// broadcasting RequestPacket with a ResponsePacket containing the same data.
@@ -419,11 +415,12 @@ func (l *Listener) background() {
 		case <-l.closed:
 			return
 		case <-ticker.C:
-			if l.conf.BroadcastAddress != nil {
-				if err := l.write(&RequestPacket{}, l.conf.BroadcastAddress); err != nil {
-					if !errors.Is(err, net.ErrClosed) {
-						l.conf.Log.Error("error broadcasting request", slog.Any("error", err))
+			for _, addr := range l.broadcastAddresses() {
+				if err := l.write(&RequestPacket{}, addr); err != nil {
+					if errors.Is(err, net.ErrClosed) {
+						return
 					}
+					l.conf.Log.Debug("error broadcasting request", slog.Any("to", addr), slog.Any("error", err))
 				}
 			}
 		}
@@ -440,6 +437,65 @@ func (l *Listener) deleteInactiveAddressesLocked(now time.Time) {
 
 // addressLifetime is how long vanilla keeps a LAN peer's address after its last response or message.
 const addressLifetime = time.Minute
+
+// broadcastAddresses returns where the next request goes: the configured address, or port 7551
+// at every directed broadcast address.
+func (l *Listener) broadcastAddresses() []*net.UDPAddr {
+	if l.conf.BroadcastAddress != nil {
+		return []*net.UDPAddr{l.conf.BroadcastAddress}
+	}
+	if !l.directedBroadcast {
+		return nil
+	}
+	return DirectedBroadcasts(DefaultPort)
+}
+
+// DirectedBroadcasts returns port at the directed broadcast address (address | ^mask) of every IPv4
+// address on an up, broadcast-capable, non-loopback interface. It returns none while offline.
+func DirectedBroadcasts(port int) []*net.UDPAddr {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var broadcasts []*net.UDPAddr
+	seen := make(map[[4]byte]bool)
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			network, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if b, ok := directedBroadcast(network); ok && !seen[b] {
+				seen[b] = true
+				broadcasts = append(broadcasts, &net.UDPAddr{IP: net.IPv4(b[0], b[1], b[2], b[3]), Port: port})
+			}
+		}
+	}
+	return broadcasts
+}
+
+// directedBroadcast returns the broadcast address of an IPv4 network.
+func directedBroadcast(network *net.IPNet) ([4]byte, bool) {
+	ip, mask := network.IP.To4(), network.Mask
+	if ip == nil || len(mask) != net.IPv4len {
+		if len(mask) != net.IPv6len || ip == nil {
+			return [4]byte{}, false
+		}
+		mask = mask[12:]
+	}
+	var b [4]byte
+	for i := range b {
+		b[i] = ip[i] | ^mask[i]
+	}
+	return b, true
+}
 
 // address encapsulates a mapping for NetherNet IDs and the UDP address responsible for sending
 // packets. It is used for signaling a NetherNet network with an ID in [Listener.Signal].
