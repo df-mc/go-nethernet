@@ -491,7 +491,7 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 			return wrapSignalError(fmt.Errorf("verify client token: %w", err), ErrorCodeIdentityNotAllowed)
 		}
 		if publicKey == nil {
-			publicKey, err = claimPublicKey(desc.Identity.Assertion.Token, false)
+			publicKey, err = desc.Identity.PublicKey(false)
 			if err != nil {
 				return wrapSignalError(fmt.Errorf("claim public key: %w", err), ErrorCodeIdentityNotAllowed)
 			}
