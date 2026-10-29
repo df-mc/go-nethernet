@@ -196,7 +196,11 @@ func (l *Listener) NetworkID() string {
 // Responses returns the application data of servers that answered a RequestPacket broadcast to
 // [ListenConfig.BroadcastAddress] within the last five seconds, as vanilla lists LAN worlds.
 func (l *Listener) Responses() map[uint64][]byte {
-	now := time.Now()
+	return l.responsesAt(time.Now())
+}
+
+// responsesAt drops responses older than responseLifetime at now and returns the rest.
+func (l *Listener) responsesAt(now time.Time) map[uint64][]byte {
 	l.responsesMu.Lock()
 	defer l.responsesMu.Unlock()
 	maps.DeleteFunc(l.responses, func(_ uint64, r response) bool {

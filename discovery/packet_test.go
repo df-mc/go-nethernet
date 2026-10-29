@@ -80,6 +80,13 @@ func TestMarshalCapsDeclaredMessageLength(t *testing.T) {
 	if got := string(payload[messageHeaderLength:]); got != data {
 		t.Fatalf("message data length = %d, want %d", len(got), len(data))
 	}
+	pk, _, err := Unmarshal(Marshal(&MessagePacket{RecipientID: 2, Data: data}, 1))
+	if err != nil {
+		t.Fatalf("Unmarshal(capped message): %v", err)
+	}
+	if msg, ok := pk.(*MessagePacket); !ok || msg.Data != data {
+		t.Fatalf("Unmarshal(capped message) = %T, want the full %d-byte data", pk, len(data))
+	}
 
 	payload, err = decrypt(Marshal(&MessagePacket{RecipientID: 2, Data: "Ping"}, 1)[32:])
 	if err != nil {

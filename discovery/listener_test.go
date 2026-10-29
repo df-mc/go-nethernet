@@ -219,18 +219,34 @@ type discardConn struct{ net.PacketConn }
 
 func (discardConn) WriteTo(b []byte, _ net.Addr) (int, error) { return len(b), nil }
 
-// A LAN world stays listed for five seconds after its latest response, as in vanilla.
+// A LAN world stays listed while its latest response is at most five seconds old, as in vanilla.
 func TestResponsesExpireAfterFiveSeconds(t *testing.T) {
 	now := time.Now()
 	l := &Listener{responses: map[uint64]response{
-		1: {data: []byte("fresh"), t: now.Add(-responseLifetime + time.Second)},
-		2: {data: []byte("stale"), t: now.Add(-responseLifetime - time.Millisecond)},
+		1: {data: []byte("fresh"), t: now.Add(-responseLifetime)},
+		2: {data: []byte("stale"), t: now.Add(-responseLifetime - time.Nanosecond)},
 	}}
-	got := l.Responses()
+	got := l.responsesAt(now)
 	if string(got[1]) != "fresh" {
-		t.Fatalf("Responses()[1] = %q, want %q", got[1], "fresh")
+		t.Fatalf("responses[1] = %q, want %q", got[1], "fresh")
 	}
 	if _, ok := got[2]; ok {
-		t.Fatal("Responses() kept a server silent for over five seconds")
+		t.Fatal("kept a server silent for over five seconds")
+	}
+}
+
+// A peer's address is kept while under a minute old and forgotten at exactly a minute, as in vanilla.
+func TestDeleteInactiveAddressesAtOneMinute(t *testing.T) {
+	now := time.Now()
+	l := &Listener{addresses: map[uint64]address{
+		1: {networkID: 1, t: now.Add(-addressLifetime + time.Nanosecond)},
+		2: {networkID: 2, t: now.Add(-addressLifetime)},
+	}}
+	l.deleteInactiveAddressesLocked(now)
+	if _, ok := l.addresses[1]; !ok {
+		t.Fatal("forgot a peer heard from under a minute ago")
+	}
+	if _, ok := l.addresses[2]; ok {
+		t.Fatal("kept a peer silent for a minute")
 	}
 }
