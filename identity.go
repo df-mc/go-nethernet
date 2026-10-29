@@ -2,6 +2,7 @@ package nethernet
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/x509"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -293,6 +295,48 @@ func (d identityData) Valid() bool {
 	}
 	return validJWS(d.Assertion.Token) && validJWS(d.Assertion.Fingerprints) &&
 		d.IdentityProvider.Protocol == "default"
+}
+
+// verifyClient checks a client's identity assertion: verifyToken checks the token and
+// returns its key (nil takes it from the 'cpk' claim), which must have signed the fingerprints.
+func (d identityData) verifyClient(ctx context.Context, desc *description, verifyToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)) (*ecdsa.PublicKey, error) {
+	publicKey, err := verifyToken(ctx, d.Assertion.Token)
+	if err != nil {
+		return nil, fmt.Errorf("verify client token: %w", err)
+	}
+	if publicKey == nil {
+		if publicKey, err = claimPublicKey(d.Assertion.Token, false); err != nil {
+			return nil, fmt.Errorf("claim public key: %w", err)
+		}
+	}
+	if err := d.verify(desc, publicKey); err != nil {
+		return nil, fmt.Errorf("verify identity assertion: %w", err)
+	}
+	return publicKey, nil
+}
+
+// ErrNoIdentity is returned by [VerifyOfferIdentity] for an offer without an 'a=identity' attribute.
+var ErrNoIdentity = errors.New("nethernet: offer has no identity assertion")
+
+// VerifyOfferIdentity checks a client's SDP offer the way a [Listener] does and returns its
+// identity token, for code that routes or relays offers without accepting them itself.
+// verifyToken has the contract of [ListenConfig.VerifyClientToken].
+func VerifyOfferIdentity(ctx context.Context, offer string, verifyToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)) (string, error) {
+	d := &sdp.SessionDescription{}
+	if err := d.UnmarshalString(offer); err != nil {
+		return "", fmt.Errorf("decode offer: %w", err)
+	}
+	desc, err := parseDescription(d)
+	if err != nil {
+		return "", fmt.Errorf("parse offer: %w", err)
+	}
+	if desc.identity == nil {
+		return "", ErrNoIdentity
+	}
+	if _, err := desc.identity.verifyClient(ctx, desc, verifyToken); err != nil {
+		return "", err
+	}
+	return desc.identity.Assertion.Token, nil
 }
 
 // verify verifies the fingerprints signature in the identity assertion using the provided public key.

@@ -486,18 +486,9 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	c.description.dtls.Role = n.answererRole(desc.dtls.Role)
 
 	if desc.identity != nil {
-		publicKey, err := n.conf.VerifyClientToken(ctx, desc.identity.Assertion.Token)
+		publicKey, err := desc.identity.verifyClient(ctx, desc, n.conf.VerifyClientToken)
 		if err != nil {
-			return wrapSignalError(fmt.Errorf("verify client token: %w", err), ErrorCodeIdentityNotAllowed)
-		}
-		if publicKey == nil {
-			publicKey, err = claimPublicKey(desc.identity.Assertion.Token, false)
-			if err != nil {
-				return wrapSignalError(fmt.Errorf("claim public key: %w", err), ErrorCodeIdentityNotAllowed)
-			}
-		}
-		if err := desc.identity.verify(desc, publicKey); err != nil {
-			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), ErrorCodeIdentityNotAllowed)
+			return wrapSignalError(err, ErrorCodeIdentityNotAllowed)
 		}
 		c.publicKey = publicKey
 	} else if !n.conf.AllowAnonymous {
