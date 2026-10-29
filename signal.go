@@ -277,4 +277,10 @@ const (
 	// ErrorCodeIdentityNotAllowed reports that the remote identity token
 	// or its DTLS fingerprint assertion failed validation.
 	ErrorCodeIdentityNotAllowed
+	// ErrorCodeHTTPUnauthorized reports an HTTP join request answered with 401.
+	ErrorCodeHTTPUnauthorized
+	// ErrorCodeHTTPForbidden reports an HTTP join request answered with 403.
+	ErrorCodeHTTPForbidden
+	// ErrorCodeHTTPServiceUnavailable reports an HTTP join request answered with 503.
+	ErrorCodeHTTPServiceUnavailable
 )

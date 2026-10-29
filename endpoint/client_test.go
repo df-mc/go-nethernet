@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -231,4 +232,52 @@ type rejectingNotifier struct{}
 
 func (rejectingNotifier) NotifySignal(*nethernet.Signal) bool {
 	return false
+}
+
+// Any 2xx answer is accepted, and failures carry vanilla's error code for their status.
+func TestClientSignalHTTPStatuses(t *testing.T) {
+	for _, tt := range []struct {
+		status int
+		code   int
+	}{
+		{status: http.StatusCreated},
+		{status: http.StatusUnauthorized, code: nethernet.ErrorCodeHTTPUnauthorized},
+		{status: http.StatusForbidden, code: nethernet.ErrorCodeHTTPForbidden},
+		{status: http.StatusServiceUnavailable, code: nethernet.ErrorCodeHTTPServiceUnavailable},
+		{status: http.StatusNotFound, code: nethernet.ErrorCodeSignalingFailedToSend},
+		{status: http.StatusMultipleChoices, code: nethernet.ErrorCodeSignalingFailedToSend},
+	} {
+		t.Run(strconv.Itoa(tt.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte("v=0\r\ns=-\r\n"))
+			}))
+			defer server.Close()
+			client := NewClient()
+			signals := make(chan *nethernet.Signal, 1)
+			defer client.Notify(notifierFunc(func(signal *nethernet.Signal) { signals <- signal }))()
+
+			err := client.Signal(context.Background(), &nethernet.Signal{
+				Type: nethernet.SignalTypeOffer, ConnectionID: 1, NetworkID: server.URL, Data: "offer",
+			})
+			if tt.code == 0 {
+				if err != nil || len(signals) != 1 {
+					t.Fatalf("Signal() = %v with %d answers, want one answer", err, len(signals))
+				}
+				return
+			}
+			var statusErr *StatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode != tt.status || statusErr.Code != tt.code {
+				t.Fatalf("Signal() error = %v, want HTTP %d with code %d", err, tt.status, tt.code)
+			}
+		})
+	}
+}
+
+// The HTTP error codes continue vanilla's numbering after identity rejection.
+func TestHTTPErrorCodes(t *testing.T) {
+	if nethernet.ErrorCodeHTTPUnauthorized != 38 || nethernet.ErrorCodeHTTPForbidden != 39 || nethernet.ErrorCodeHTTPServiceUnavailable != 40 {
+		t.Fatalf("HTTP error codes = %d, %d, %d, want 38, 39, 40",
+			nethernet.ErrorCodeHTTPUnauthorized, nethernet.ErrorCodeHTTPForbidden, nethernet.ErrorCodeHTTPServiceUnavailable)
+	}
 }

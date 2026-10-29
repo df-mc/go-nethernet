@@ -205,8 +205,8 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return &StatusError{StatusCode: resp.StatusCode, Code: statusErrorCode(resp.StatusCode)}
 		}
 		b, err := io.ReadAll(io.LimitReader(resp.Body, maxSDPBodySize+1))
 		if err != nil {
@@ -238,6 +238,32 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		return errors.New("nethernet/endpoint: trickle ICE is not supported")
 	default:
 		return fmt.Errorf("nethernet/endpoint: unknown signal type: %s", signal.Type)
+	}
+}
+
+// StatusError reports a join request the server answered with a non-2xx status.
+type StatusError struct {
+	// StatusCode is the HTTP status of the response.
+	StatusCode int
+	// Code is the NetherNet error code vanilla reports for that status.
+	Code int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("nethernet/endpoint: join request failed with HTTP %d (error code %d)", e.StatusCode, e.Code)
+}
+
+// statusErrorCode maps a failed join status to the error code vanilla reports for it.
+func statusErrorCode(status int) int {
+	switch status {
+	case http.StatusUnauthorized:
+		return nethernet.ErrorCodeHTTPUnauthorized
+	case http.StatusForbidden:
+		return nethernet.ErrorCodeHTTPForbidden
+	case http.StatusServiceUnavailable:
+		return nethernet.ErrorCodeHTTPServiceUnavailable
+	default:
+		return nethernet.ErrorCodeSignalingFailedToSend
 	}
 }
 
