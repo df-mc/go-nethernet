@@ -7,29 +7,33 @@ import (
 	"time"
 )
 
-// A dial fails with code 14 and tells the server when no answer arrives within the
-// negotiation timeout, even though the caller's context has no deadline.
+// A dial fails once no answer arrives within the negotiation timeout, well before the caller's
+// deadline, and does not signal an error to the server.
 func TestDialFailsWithoutAnswerWithinNegotiationTimeout(t *testing.T) {
 	const timeout = 200 * time.Millisecond
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	signaling := &recordingSignaling{id: "client", ctx: t.Context(), signals: make(chan *Signal, 64)}
 	start := time.Now()
-	_, err := (Dialer{NegotiationTimeout: timeout}).DialContext(t.Context(), "server", signaling)
+	_, err := (Dialer{NegotiationTimeout: timeout}).DialContext(ctx, "server", signaling)
+	if !errors.Is(err, errNoAnswer) {
+		t.Fatalf("DialContext() error = %v, want %v", err, errNoAnswer)
+	}
 	var signalErr *signalError
-	if !errors.As(err, &signalErr) || signalErr.code != ErrorCodeNegotiationTimeoutWaitingForResponse {
-		t.Fatalf("DialContext() error = %v, want code %d", err, ErrorCodeNegotiationTimeoutWaitingForResponse)
+	if errors.As(err, &signalErr) {
+		t.Fatalf("DialContext() error = %v, want no code signaled to the server", err)
 	}
 	if elapsed := time.Since(start); elapsed < timeout {
 		t.Fatalf("dial failed after %s, before the %s timeout", elapsed, timeout)
 	}
-	deadline := time.After(5 * time.Second)
 	for {
 		select {
 		case signal := <-signaling.signals:
-			if signal.Type == SignalTypeError && signal.Data == "14" {
-				return
+			if signal.Type == SignalTypeError {
+				t.Fatalf("signaled error %s to the server", signal.Data)
 			}
-		case <-deadline:
-			t.Fatal("no CONNECTERROR 14 sent to the server")
+		default:
+			return
 		}
 	}
 }
@@ -85,9 +89,13 @@ type recordingSignaling struct {
 	signals chan *Signal
 }
 
-func (s *recordingSignaling) Signal(_ context.Context, signal *Signal) error {
-	s.signals <- signal
-	return nil
+func (s *recordingSignaling) Signal(ctx context.Context, signal *Signal) error {
+	select {
+	case s.signals <- signal:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
 
 func (*recordingSignaling) Notify(Notifier) func()                            { return func() {} }

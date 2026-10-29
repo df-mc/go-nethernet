@@ -83,7 +83,7 @@ type Dialer struct {
 	Credentials func(ctx context.Context) (*Credentials, error)
 
 	// NegotiationTimeout bounds the wait for the remote answer, measured from sending the offer.
-	// The dial fails with [ErrorCodeNegotiationTimeoutWaitingForResponse] when it passes. If zero,
+	// The dial fails when it passes, without signaling an error to the remote network. If zero,
 	// [DefaultNegotiationTimeout] is used.
 	NegotiationTimeout time.Duration
 
@@ -235,9 +235,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		ConnectionID: d.ConnectionID,
 		NetworkID:    networkID,
 	}); err != nil {
-		if context.Cause(answerCtx) == errNoAnswer {
-			d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
-			return nil, wrapSignalError(fmt.Errorf("signal offer: %w", errNoAnswer), ErrorCodeNegotiationTimeoutWaitingForResponse)
+		if errors.Is(context.Cause(answerCtx), errNoAnswer) {
+			err = errNoAnswer
 		}
 		return nil, fmt.Errorf("signal offer: %w", err)
 	}
@@ -253,11 +252,12 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		case <-c.ctx.Done():
 			return nil, context.Cause(c.ctx)
 		case <-answerCtx.Done():
-			if context.Cause(answerCtx) == errNoAnswer || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
+			if errors.Is(context.Cause(answerCtx), errNoAnswer) {
+				// Like vanilla, the remote network is not told about this timeout.
+				return nil, errNoAnswer
 			}
-			if context.Cause(answerCtx) == errNoAnswer {
-				return nil, wrapSignalError(errNoAnswer, ErrorCodeNegotiationTimeoutWaitingForResponse)
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
 			return nil, ctx.Err()
 		case <-signaling.Context().Done():

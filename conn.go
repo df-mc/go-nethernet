@@ -101,7 +101,7 @@ type Conn struct {
 	cancel context.CancelCauseFunc
 }
 
-// Read receives a message from the 'ReliableDataChannel'. The bytes of the message data are copied to
+// Read receives a message from either data channel. The bytes of the message data are copied to
 // the given data. An error may be returned if the Conn has been closed by [Conn.Close].
 func (conn *Conn) Read(b []byte) (n int, err error) {
 	conn.readMu.Lock()
@@ -137,7 +137,7 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	}
 }
 
-// ReadPacket receives a message from the 'ReliableDataChannel' and returns the bytes. It is
+// ReadPacket receives a message from either data channel and returns the bytes. It is
 // implemented for Minecraft read operations to avoid some bugs related to the Read method in
 // their decoder.
 func (conn *Conn) ReadPacket() ([]byte, error) {
