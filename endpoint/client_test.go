@@ -241,6 +241,7 @@ func TestClientSignalHTTPStatuses(t *testing.T) {
 		code   int
 	}{
 		{status: http.StatusCreated},
+		{status: 299},
 		{status: http.StatusUnauthorized, code: nethernet.ErrorCodeHTTPUnauthorized},
 		{status: http.StatusForbidden, code: nethernet.ErrorCodeHTTPForbidden},
 		{status: http.StatusServiceUnavailable, code: nethernet.ErrorCodeHTTPServiceUnavailable},
@@ -270,14 +271,18 @@ func TestClientSignalHTTPStatuses(t *testing.T) {
 			if !errors.As(err, &statusErr) || statusErr.StatusCode != tt.status || statusErr.Code != tt.code {
 				t.Fatalf("Signal() error = %v, want HTTP %d with code %d", err, tt.status, tt.code)
 			}
+			if len(signals) != 0 {
+				t.Fatalf("Signal() delivered an answer for HTTP %d", tt.status)
+			}
 		})
 	}
 }
 
-// The HTTP error codes continue vanilla's numbering after identity rejection.
+// The join failure codes keep vanilla's numbers.
 func TestHTTPErrorCodes(t *testing.T) {
-	if nethernet.ErrorCodeHTTPUnauthorized != 38 || nethernet.ErrorCodeHTTPForbidden != 39 || nethernet.ErrorCodeHTTPServiceUnavailable != 40 {
-		t.Fatalf("HTTP error codes = %d, %d, %d, want 38, 39, 40",
+	if nethernet.ErrorCodeSignalingFailedToSend != 26 || nethernet.ErrorCodeHTTPUnauthorized != 38 ||
+		nethernet.ErrorCodeHTTPForbidden != 39 || nethernet.ErrorCodeHTTPServiceUnavailable != 40 {
+		t.Fatalf("join error codes = %d, %d, %d, %d, want 26, 38, 39, 40", nethernet.ErrorCodeSignalingFailedToSend,
 			nethernet.ErrorCodeHTTPUnauthorized, nethernet.ErrorCodeHTTPForbidden, nethernet.ErrorCodeHTTPServiceUnavailable)
 	}
 }
