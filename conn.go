@@ -843,7 +843,7 @@ func (desc Description) Encode() ([]byte, error) {
 }
 
 // connectionRole returns a [sdp.ConnectionRole] indicating the local DTLS role. It is called
-// by Encode to include the role into the media Description of local [sdp.SessionDescription]
+// by Encode to include the role into the media description of local [sdp.SessionDescription]
 // as a [sdp.Attribute] of 'setup'.
 func (desc Description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole {
 	switch role {
