@@ -199,7 +199,7 @@ func TestDescriptionDefaultCandidate(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := (description{candidates: test.candidates}).defaultCandidate()
+			got, ok := (Description{Candidates: test.candidates}).defaultCandidate()
 			if ok != test.wantOK {
 				t.Fatalf("defaultCandidate() selection = %t, want %t", ok, test.wantOK)
 			}
@@ -227,13 +227,13 @@ func TestTypePreference(t *testing.T) {
 }
 
 func TestDescriptionEncodeKeepsDummyAddressForHostnameCandidate(t *testing.T) {
-	data, err := (description{
-		ice: webrtc.ICEParameters{UsernameFragment: "ufrag", Password: "password"},
-		dtls: webrtc.DTLSParameters{Fingerprints: []webrtc.DTLSFingerprint{{
+	data, err := (Description{
+		ICE: webrtc.ICEParameters{UsernameFragment: "ufrag", Password: "password"},
+		DTLS: webrtc.DTLSParameters{Fingerprints: []webrtc.DTLSFingerprint{{
 			Algorithm: "sha-256",
 			Value:     "fingerprint",
 		}}},
-		candidates: []webrtc.ICECandidate{
+		Candidates: []webrtc.ICECandidate{
 			{
 				Protocol:  webrtc.ICEProtocolUDP,
 				Component: uint16(webrtc.ICEComponentRTP),
@@ -249,7 +249,7 @@ func TestDescriptionEncodeKeepsDummyAddressForHostnameCandidate(t *testing.T) {
 				Port:      40001,
 			},
 		},
-	}).encode()
+	}).Encode()
 	if err != nil {
 		t.Fatalf("encode() error = %v", err)
 	}
@@ -277,7 +277,7 @@ func TestParseDescriptionRejectsMessageSizesWithoutFragmentPayload(t *testing.T)
 			media.WithValueAttribute("setup", "actpass")
 			media.WithValueAttribute("max-message-size", max)
 
-			_, err := parseDescription(&sdp.SessionDescription{
+			_, err := ParseDescription(&sdp.SessionDescription{
 				MediaDescriptions: []*sdp.MediaDescription{media},
 			})
 			if err == nil {

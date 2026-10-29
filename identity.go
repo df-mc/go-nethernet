@@ -39,34 +39,33 @@ type Identity struct {
 	Domain string
 }
 
-// sign signs the DTLS fingerprints included in the given local description using
-// the [Identity.PrivateKey], and returns an identityData that can be embedded
-// to the description.
-func (i Identity) sign(desc *description) error {
+// Sign signs the DTLS fingerprints included in the given local Description using
+// the [Identity.PrivateKey], and returns an RemoteIdentity that can be embedded
+// to the Description.
+func (i Identity) Sign(desc *Description) (*RemoteIdentity, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: i.PrivateKey}, nil)
 	if err != nil {
-		return fmt.Errorf("create signer: %w", err)
+		return nil, fmt.Errorf("create signer: %w", err)
 	}
-	payload := generateFingerprints(desc.dtls.Fingerprints)
+	payload := generateFingerprints(desc.DTLS.Fingerprints)
 	signature, err := signer.Sign(payload)
 	if err != nil {
-		return fmt.Errorf("sign DTLS fingerprints: %w", err)
+		return nil, fmt.Errorf("sign DTLS fingerprints: %w", err)
 	}
 	detached, err := signature.DetachedCompactSerialize()
 	if err != nil {
-		return fmt.Errorf("generate DTLS fingerprints assertion: %w", err)
+		return nil, fmt.Errorf("generate DTLS fingerprints assertion: %w", err)
 	}
-	desc.identity = &identityData{
-		Assertion: identityAssertion{
+	return &RemoteIdentity{
+		Assertion: IdentityAssertion{
 			Fingerprints: detached,
 			Token:        i.Token,
 		},
-		IdentityProvider: identityProvider{
+		Provider: IdentityProvider{
 			Domain:   i.Domain,
 			Protocol: "default",
 		},
-	}
-	return nil
+	}, nil
 }
 
 // claimPublicKey extracts and validates the public key from the 'cpk' claim in the JWT token.
@@ -171,6 +170,70 @@ func GenerateServerIdentity(privateKey *ecdsa.PrivateKey, domain string) (*Ident
 	return ServerIdentity(privateKey, domain)
 }
 
+// IdentityClaims contains the essential JWT claims for both client and server identity tokens.
+type IdentityClaims struct {
+	jwt.Claims
+	PublicKey *ecdsa.PublicKey `json:"cpk"`
+
+	// jwk determines whether to encode PublicKey as a JSON Web Key.
+	jwk bool
+}
+
+// MarshalJSON implements [json.Marshaler] for tokenClaims.
+// It performs additional handling for encoding the cpk claim in base64.
+func (c IdentityClaims) MarshalJSON() ([]byte, error) {
+	if c.PublicKey == nil {
+		return nil, errors.New("nethernet: public key is nil")
+	}
+	type Alias tokenClaims
+	if !c.jwk {
+		publicKey, err := encodePublicKey(c.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("encode public key: %w", err)
+		}
+		return json.Marshal(struct {
+			Alias
+			PublicKey string `json:"cpk"`
+		}{
+			Alias:     (Alias)(c),
+			PublicKey: publicKey,
+		})
+	}
+	return json.Marshal(struct {
+		Alias
+		PublicKey jose.JSONWebKey `json:"cpk"`
+	}{
+		Alias:     (Alias)(c),
+		PublicKey: jose.JSONWebKey{Key: c.PublicKey},
+	})
+}
+
+// UnmarshalJSON implements [json.Unmarshaler] for tokenClaims.
+// It performs additional handling for decoding the cpk claim in base64.
+func (c *IdentityClaims) UnmarshalJSON(b []byte) (err error) {
+	type Alias tokenClaims
+	data := struct {
+		*Alias
+		PublicKey json.RawMessage `json:"cpk"`
+	}{Alias: (*Alias)(c)}
+	if err = json.Unmarshal(b, &data); err != nil {
+		return err
+	}
+	c.PublicKey, err = parsePublicKey(data.PublicKey)
+	if err != nil {
+		return fmt.Errorf("parse cpk: %w", err)
+	}
+	return nil
+}
+
+// Validate checks the validity of the JWT claims populated in this struct.
+func (c IdentityClaims) Validate(e jwt.Expected) error {
+	if c.PublicKey == nil {
+		return errors.New("nethernet: cpk is nil")
+	}
+	return c.Claims.Validate(e)
+}
+
 // tokenClaims contains the essential JWT claims for both client and server identity tokens.
 type tokenClaims struct {
 	jwt.Claims
@@ -255,18 +318,18 @@ func generateFingerprints(fingerprints []webrtc.DTLSFingerprint) []byte {
 }
 
 type (
-	// identityData represents the complete identity assertion structure embedded in SDP
+	// RemoteIdentity represents the complete identity assertion structure embedded in SDP
 	// as the 'a=identity' attribute.
-	identityData struct {
+	RemoteIdentity struct {
 		// Assertion contains the JWT token and the detached JWS signature that is used
 		// to bind the WebRTC peer connection to this identity.
-		Assertion identityAssertion `json:"assertion"`
-		// IdentityProvider contains the information about the issuer of the token included
+		Assertion IdentityAssertion `json:"assertion"`
+		// Provider contains the information about the issuer of the token included
 		// in the assertion.
-		IdentityProvider identityProvider `json:"idp"`
+		Provider IdentityProvider `json:"idp"`
 	}
-	// identityAssertion contains the cryptographic components of an identity assertion.
-	identityAssertion struct {
+	// IdentityAssertion contains the cryptographic components of an identity assertion.
+	IdentityAssertion struct {
 		// Fingerprints is the detached JWS signature which covers the DTLS fingerprints
 		// attached to the remote description of the peer connection.
 		Fingerprints string `json:"fingerprints"`
@@ -274,9 +337,9 @@ type (
 		// It corresponds to [Identity.Token].
 		Token string `json:"token"`
 	}
-	// identityProvider contains information about the identity provider that issued
+	// IdentityProvider contains information about the identity provider that issued
 	// the token included in the identity assertion.
-	identityProvider struct {
+	IdentityProvider struct {
 		// Domain is the domain name of the identity provider, may be displayed to players in first-use prompts.
 		// For client connections, this locates the issuer which issued the multiplayer token, such as "https://authorization.franchise.minecraft-services.net".
 		// For server connections, this is either "self" or the domain that issued the identity.
@@ -287,20 +350,27 @@ type (
 )
 
 // Valid reports whether the identityData is valid.
-func (d identityData) Valid() bool {
+func (d RemoteIdentity) Valid() bool {
 	validJWS := func(s string) bool {
 		return s != "" && strings.Count(s, ".") == 2
 	}
 	return validJWS(d.Assertion.Token) && validJWS(d.Assertion.Fingerprints) &&
-		d.IdentityProvider.Protocol == "default"
+		d.Provider.Protocol == "default"
 }
 
-// verify verifies the fingerprints signature in the identity assertion using the provided public key.
-// It reconstructs the canonical JSON payload from the description's DTLS fingerprints
+// PublicKey extracts the 'cpk' claim of the assertion token included in RemoteIdentity.
+// The selfSigned parameter may be set to false if the identity was self-signed by the
+// remote connection, such as servers or offline clients.
+func (d RemoteIdentity) PublicKey(selfSigned bool) (*ecdsa.PublicKey, error) {
+	return claimPublicKey(d.Assertion.Token, selfSigned)
+}
+
+// Verify verifies the fingerprints signature in the identity assertion using the provided public key.
+// It reconstructs the canonical JSON payload from the Description's DTLS fingerprints
 // and validates the detached JWS signature.
-// verify returns an error if the signature is invalid or malformed.
-func (d identityData) verify(desc *description, publicKey *ecdsa.PublicKey) error {
-	payload := generateFingerprints(desc.dtls.Fingerprints)
+// Verify returns an error if the signature is invalid or malformed.
+func (d RemoteIdentity) Verify(desc *Description, publicKey *ecdsa.PublicKey) error {
+	payload := generateFingerprints(desc.DTLS.Fingerprints)
 	signature, err := jose.ParseDetached(d.Assertion.Fingerprints, payload, []jose.SignatureAlgorithm{jose.ES384})
 	if err != nil {
 		return fmt.Errorf("parse fingerprints assertion: %w", err)
@@ -313,8 +383,8 @@ func (d identityData) verify(desc *description, publicKey *ecdsa.PublicKey) erro
 
 // MarshalJSON implements [json.Marshaler] for identityAssertion.
 // It encodes the assertion to JSON then wraps the result as a JSON string.
-func (a identityAssertion) MarshalJSON() ([]byte, error) {
-	type Alias identityAssertion
+func (a IdentityAssertion) MarshalJSON() ([]byte, error) {
+	type Alias IdentityAssertion
 	b, err := json.Marshal((Alias)(a))
 	if err != nil {
 		return nil, err
@@ -324,12 +394,12 @@ func (a identityAssertion) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements [json.Unmarshaler] for identityAssertion.
 // It decodes the input as a JSON string then decodes the nested struct.
-func (a *identityAssertion) UnmarshalJSON(b []byte) error {
+func (a *IdentityAssertion) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
 		return err
 	}
-	type Alias identityAssertion
+	type Alias IdentityAssertion
 	return json.Unmarshal([]byte(s), (*Alias)(a))
 }
 

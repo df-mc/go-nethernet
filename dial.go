@@ -43,20 +43,20 @@ type Dialer struct {
 	//
 	// When set to nil, no identity assertion is included in the offer.
 	Identity *Identity
-	// VerifyServerToken verifies the token contained in a server's identity
+	// VerifyServerIdentity verifies the token contained in a server's identity
 	// assertion and returns the public key populated in its 'cpk' claim.
 	//
 	// The returned public key is used to verify the fingerprint assertion
 	// carried in the server answer's 'a=identity' attribute.
 	//
-	// When [Dialer.AllowIdentitylessServer] is set to true, VerifyServerToken may never be called.
+	// When [Dialer.AllowIdentitylessServer] is set to true, VerifyServerIdentity may never be called.
 	//
 	// By default, this is set to a function that only extracts the public key
 	// from the token's 'cpk' claim and trusts it unconditionally.
 	//
 	// If the returned public key is nil, it will be automatically extracted
 	// from the JWT token's payload.
-	VerifyServerToken func(ctx context.Context, token, domain string) (*ecdsa.PublicKey, error)
+	VerifyServerIdentity func(ctx context.Context, identity *RemoteIdentity) (*ecdsa.PublicKey, error)
 
 	// AllowIdentitylessServer specifies whether to allow answer SDPs without an
 	// 'a=identity' attribute.
@@ -151,13 +151,13 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
-	if d.VerifyServerToken == nil {
-		d.VerifyServerToken = func(ctx context.Context, token, domain string) (*ecdsa.PublicKey, error) {
-			publicKey, err := claimPublicKey(token, true)
+	if d.VerifyServerIdentity == nil {
+		d.VerifyServerIdentity = func(ctx context.Context, identity *RemoteIdentity) (*ecdsa.PublicKey, error) {
+			publicKey, err := identity.PublicKey(true)
 			if err != nil {
 				return nil, err
 			}
-			d.Log.Debug("trusting server identity", "domain", domain)
+			d.Log.Debug("trusting server identity", "domain", identity.Provider.Domain)
 			return publicKey, nil
 		}
 	}
@@ -191,7 +191,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		}
 	}()
 	if d.Identity != nil {
-		if err := d.Identity.sign(c.description); err != nil {
+		c.description.Identity, err = d.Identity.Sign(c.description)
+		if err != nil {
 			return nil, fmt.Errorf("generate identity assertion: %w", err)
 		}
 	}
@@ -205,14 +206,14 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 
 	disableTrickleICE := shouldDisableTrickleICE(d.DisableTrickleICE, signaling)
 	if disableTrickleICE {
-		c.description.candidates, err = c.gatherCandidates(ctx)
+		c.description.Candidates, err = c.gatherCandidates(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("gather local candidates (non-trickle ICE): %w", err)
 		}
 	}
 
 	// Encode an offer using the local parameters!
-	offer, err := c.description.encode()
+	offer, err := c.description.Encode()
 	if err != nil {
 		return nil, fmt.Errorf("encode offer: %w", err)
 	}
@@ -253,25 +254,25 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("decode answer: %w", err)
 				}
-				desc, err := parseDescription(s)
+				desc, err := ParseDescription(s)
 				if err != nil {
 					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("parse answer: %w", err)
 				}
-				if desc.identity != nil {
-					publicKey, err := d.VerifyServerToken(ctx, desc.identity.Assertion.Token, desc.identity.IdentityProvider.Domain)
+				if desc.Identity != nil {
+					publicKey, err := d.VerifyServerIdentity(ctx, desc.Identity)
 					if err != nil {
 						d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 						return nil, fmt.Errorf("verify server identity token: %w", err)
 					}
 					if publicKey == nil {
-						publicKey, err = claimPublicKey(desc.identity.Assertion.Token, true)
+						publicKey, err = claimPublicKey(desc.Identity.Assertion.Token, true)
 						if err != nil {
 							d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 							return nil, fmt.Errorf("claim public key: %w", err)
 						}
 					}
-					if err := desc.identity.verify(desc, publicKey); err != nil {
+					if err := desc.Identity.Verify(desc, publicKey); err != nil {
 						d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 						return nil, fmt.Errorf("verify server identity: %w", err)
 					}
@@ -280,7 +281,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 					return nil, errors.New("identityless answer SDP not allowed")
 				}
-				for _, candidate := range desc.candidates {
+				for _, candidate := range desc.Candidates {
 					// Non-trickle ICE connection such as Realms may include candidates in a single SDP.
 					if err := c.addRemoteCandidate(candidate); err != nil {
 						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
@@ -363,23 +364,23 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 const SignalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
-// then starts DTLS and SCTP using the parameters from the remote description.
+// then starts DTLS and SCTP using the parameters from the remote Description.
 // After SCTP is established, it creates the 'ReliableDataChannel' and
 // 'UnreliableDataChannel'. All operations respect the provided [context.Context].
-func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *description) error {
+func (d Dialer) startTransports(ctx context.Context, conn *Conn, desc *Description) error {
 	conn.log.Debug("starting ICE transport as controller")
 	iceRole := webrtc.ICERoleControlling
-	if err := conn.ice.StartContext(ctx, nil, desc.ice, &iceRole); err != nil {
+	if err := conn.ice.StartContext(ctx, nil, desc.ICE, &iceRole); err != nil {
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
-	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", desc.dtls.Role.String()))
-	if err := conn.dtls.StartContext(ctx, desc.dtls); err != nil {
+	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", desc.DTLS.Role.String()))
+	if err := conn.dtls.StartContext(ctx, desc.DTLS); err != nil {
 		return fmt.Errorf("start DTLS: %w", err)
 	}
 
 	conn.log.Debug("starting SCTP transport")
-	if err := conn.sctp.StartContext(ctx, desc.sctp); err != nil {
+	if err := conn.sctp.StartContext(ctx, desc.SCTP); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
 	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
