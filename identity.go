@@ -41,34 +41,33 @@ type Identity struct {
 	Domain string
 }
 
-// sign signs the DTLS fingerprints included in the given local description using
-// the [Identity.PrivateKey], and returns an identityData that can be embedded
-// to the description.
-func (i Identity) sign(desc *description) error {
+// Sign signs the DTLS fingerprints included in the given local Description using
+// the [Identity.PrivateKey], and returns an RemoteIdentity that can be embedded
+// to the Description.
+func (i Identity) Sign(desc *Description) (*RemoteIdentity, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: i.PrivateKey}, nil)
 	if err != nil {
-		return fmt.Errorf("create signer: %w", err)
+		return nil, fmt.Errorf("create signer: %w", err)
 	}
-	payload := generateFingerprints(desc.dtls.Fingerprints)
+	payload := generateFingerprints(desc.DTLS.Fingerprints)
 	signature, err := signer.Sign(payload)
 	if err != nil {
-		return fmt.Errorf("sign DTLS fingerprints: %w", err)
+		return nil, fmt.Errorf("sign DTLS fingerprints: %w", err)
 	}
 	detached, err := signature.DetachedCompactSerialize()
 	if err != nil {
-		return fmt.Errorf("generate DTLS fingerprints assertion: %w", err)
+		return nil, fmt.Errorf("generate DTLS fingerprints assertion: %w", err)
 	}
-	desc.identity = &identityData{
-		Assertion: identityAssertion{
+	return &RemoteIdentity{
+		Assertion: IdentityAssertion{
 			Fingerprints: detached,
 			Token:        i.Token,
 		},
-		IdentityProvider: identityProvider{
+		Provider: IdentityProvider{
 			Domain:   i.Domain,
 			Protocol: "default",
 		},
-	}
-	return nil
+	}, nil
 }
 
 // claimPublicKey extracts and validates the public key from the 'cpk' claim in the JWT token.
@@ -257,18 +256,18 @@ func generateFingerprints(fingerprints []webrtc.DTLSFingerprint) []byte {
 }
 
 type (
-	// identityData represents the complete identity assertion structure embedded in SDP
+	// RemoteIdentity represents the complete identity assertion structure embedded in SDP
 	// as the 'a=identity' attribute.
-	identityData struct {
+	RemoteIdentity struct {
 		// Assertion contains the JWT token and the detached JWS signature that is used
 		// to bind the WebRTC peer connection to this identity.
-		Assertion identityAssertion `json:"assertion"`
-		// IdentityProvider contains the information about the issuer of the token included
+		Assertion IdentityAssertion `json:"assertion"`
+		// Provider contains the information about the issuer of the token included
 		// in the assertion.
-		IdentityProvider identityProvider `json:"idp"`
+		Provider IdentityProvider `json:"idp"`
 	}
-	// identityAssertion contains the cryptographic components of an identity assertion.
-	identityAssertion struct {
+	// IdentityAssertion contains the cryptographic components of an identity assertion.
+	IdentityAssertion struct {
 		// Fingerprints is the detached JWS signature which covers the DTLS fingerprints
 		// attached to the remote description of the peer connection.
 		Fingerprints string `json:"fingerprints"`
@@ -276,9 +275,9 @@ type (
 		// It corresponds to [Identity.Token].
 		Token string `json:"token"`
 	}
-	// identityProvider contains information about the identity provider that issued
+	// IdentityProvider contains information about the identity provider that issued
 	// the token included in the identity assertion.
-	identityProvider struct {
+	IdentityProvider struct {
 		// Domain is the domain name of the identity provider, may be displayed to players in first-use prompts.
 		// For client connections, this locates the issuer which issued the multiplayer token, such as "https://authorization.franchise.minecraft-services.net".
 		// For server connections, this is either "self" or the domain that issued the identity.
@@ -289,62 +288,27 @@ type (
 )
 
 // Valid reports whether the identityData is valid.
-func (d identityData) Valid() bool {
+func (d RemoteIdentity) Valid() bool {
 	validJWS := func(s string) bool {
 		return s != "" && strings.Count(s, ".") == 2
 	}
 	return validJWS(d.Assertion.Token) && validJWS(d.Assertion.Fingerprints) &&
-		d.IdentityProvider.Protocol == "default"
+		d.Provider.Protocol == "default"
 }
 
-// verifyClient checks a client's identity assertion: verifyToken checks the token and
-// returns its key (nil takes it from the 'cpk' claim), which must have signed the fingerprints.
-func (d identityData) verifyClient(ctx context.Context, desc *description, verifyToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)) (*ecdsa.PublicKey, error) {
-	publicKey, err := verifyToken(ctx, d.Assertion.Token)
-	if err != nil {
-		return nil, fmt.Errorf("verify client token: %w", err)
-	}
-	if publicKey == nil {
-		if publicKey, err = claimPublicKey(d.Assertion.Token, false); err != nil {
-			return nil, fmt.Errorf("claim public key: %w", err)
-		}
-	}
-	if err := d.verify(desc, publicKey); err != nil {
-		return nil, fmt.Errorf("verify identity assertion: %w", err)
-	}
-	return publicKey, nil
+// PublicKey extracts the 'cpk' claim of the assertion token included in RemoteIdentity.
+// The selfSigned parameter may be set to false if the identity was self-signed by the
+// remote connection, such as servers or offline clients.
+func (d RemoteIdentity) PublicKey(selfSigned bool) (*ecdsa.PublicKey, error) {
+	return claimPublicKey(d.Assertion.Token, selfSigned)
 }
 
-// ErrNoIdentity is returned by [VerifyOfferIdentity] for an offer without an 'a=identity' attribute.
-var ErrNoIdentity = errors.New("nethernet: offer has no identity assertion")
-
-// VerifyOfferIdentity checks a client's SDP offer the way a [Listener] does and returns its
-// identity token, for code that routes or relays offers without accepting them itself.
-// verifyToken has the contract of [ListenConfig.VerifyClientToken].
-func VerifyOfferIdentity(ctx context.Context, offer string, verifyToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)) (string, error) {
-	d := &sdp.SessionDescription{}
-	if err := d.UnmarshalString(offer); err != nil {
-		return "", fmt.Errorf("decode offer: %w", err)
-	}
-	desc, err := parseDescription(d)
-	if err != nil {
-		return "", fmt.Errorf("parse offer: %w", err)
-	}
-	if desc.identity == nil {
-		return "", ErrNoIdentity
-	}
-	if _, err := desc.identity.verifyClient(ctx, desc, verifyToken); err != nil {
-		return "", err
-	}
-	return desc.identity.Assertion.Token, nil
-}
-
-// verify verifies the fingerprints signature in the identity assertion using the provided public key.
-// It reconstructs the canonical JSON payload from the description's DTLS fingerprints
+// Verify verifies the fingerprints signature in the identity assertion using the provided public key.
+// It reconstructs the canonical JSON payload from the Description's DTLS fingerprints
 // and validates the detached JWS signature.
-// verify returns an error if the signature is invalid or malformed.
-func (d identityData) verify(desc *description, publicKey *ecdsa.PublicKey) error {
-	payload := generateFingerprints(desc.dtls.Fingerprints)
+// Verify returns an error if the signature is invalid or malformed.
+func (d RemoteIdentity) Verify(desc *Description, publicKey *ecdsa.PublicKey) error {
+	payload := generateFingerprints(desc.DTLS.Fingerprints)
 	signature, err := jose.ParseDetached(d.Assertion.Fingerprints, payload, []jose.SignatureAlgorithm{jose.ES384})
 	if err != nil {
 		return fmt.Errorf("parse fingerprints assertion: %w", err)
@@ -357,8 +321,8 @@ func (d identityData) verify(desc *description, publicKey *ecdsa.PublicKey) erro
 
 // MarshalJSON implements [json.Marshaler] for identityAssertion.
 // It encodes the assertion to JSON then wraps the result as a JSON string.
-func (a identityAssertion) MarshalJSON() ([]byte, error) {
-	type Alias identityAssertion
+func (a IdentityAssertion) MarshalJSON() ([]byte, error) {
+	type Alias IdentityAssertion
 	b, err := json.Marshal((Alias)(a))
 	if err != nil {
 		return nil, err
@@ -368,12 +332,12 @@ func (a identityAssertion) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements [json.Unmarshaler] for identityAssertion.
 // It decodes the input as a JSON string then decodes the nested struct.
-func (a *identityAssertion) UnmarshalJSON(b []byte) error {
+func (a *IdentityAssertion) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
 		return err
 	}
-	type Alias identityAssertion
+	type Alias IdentityAssertion
 	return json.Unmarshal([]byte(s), (*Alias)(a))
 }
 
@@ -434,4 +398,45 @@ func parsePublicKey(data []byte) (*ecdsa.PublicKey, error) {
 	}
 	// Additional validation is left to the JOSE implementation.
 	return key, nil
+}
+
+// verifyClient checks a client's identity the way a [Listener] does: verify has the contract of
+// [ListenConfig.VerifyClientIdentity], and the key it returns must have signed the fingerprints.
+func (d *RemoteIdentity) verifyClient(ctx context.Context, desc *Description, verify func(context.Context, *RemoteIdentity) (*ecdsa.PublicKey, error)) (*ecdsa.PublicKey, error) {
+	publicKey, err := verify(ctx, d)
+	if err != nil {
+		return nil, fmt.Errorf("verify client token: %w", err)
+	}
+	if publicKey == nil {
+		if publicKey, err = d.PublicKey(false); err != nil {
+			return nil, fmt.Errorf("claim public key: %w", err)
+		}
+	}
+	if err := d.Verify(desc, publicKey); err != nil {
+		return nil, fmt.Errorf("verify identity assertion: %w", err)
+	}
+	return publicKey, nil
+}
+
+// ErrNoIdentity is returned by [VerifyOfferIdentity] for an offer without an 'a=identity' attribute.
+var ErrNoIdentity = errors.New("nethernet: offer has no identity assertion")
+
+// VerifyOfferIdentity parses a client's SDP offer and checks its identity the way a [Listener]
+// does, for code that routes or relays offers without accepting them itself.
+func VerifyOfferIdentity(ctx context.Context, offer string, verify func(context.Context, *RemoteIdentity) (*ecdsa.PublicKey, error)) (*Description, error) {
+	d := &sdp.SessionDescription{}
+	if err := d.UnmarshalString(offer); err != nil {
+		return nil, fmt.Errorf("decode offer: %w", err)
+	}
+	desc, err := ParseDescription(d)
+	if err != nil {
+		return nil, fmt.Errorf("parse offer: %w", err)
+	}
+	if desc.Identity == nil {
+		return nil, ErrNoIdentity
+	}
+	if _, err := desc.Identity.verifyClient(ctx, desc, verify); err != nil {
+		return nil, err
+	}
+	return desc, nil
 }
