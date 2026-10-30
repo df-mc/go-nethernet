@@ -194,8 +194,8 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		if segmentSize == 0 {
 			segmentSize = maxMessageSize
 		}
-		// A header-prefixed segment must fit the send queue budget or it could never leave.
-		segmentSize = min(segmentSize, maxSendBufferedAmount-1)
+		// Like vanilla, never exceed the local max-message-size, even if the remote allows more.
+		segmentSize = min(segmentSize, maxMessageSize)
 		if reliability == MessageReliabilityUnreliable && len(data) > segmentSize {
 			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", segmentSize, len(data))
 		}

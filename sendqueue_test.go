@@ -361,20 +361,20 @@ func TestConnWriteQueuesWhileDataChannelIsFull(t *testing.T) {
 	}
 }
 
-func TestConnSendClampsSegmentsToSendQueueBudget(t *testing.T) {
+// A remote max-message-size above the local one must not enlarge segments.
+func TestConnSendCapsSegmentsAtLocalMaxMessageSize(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
 	fake := newFakeSendChannel()
-	fake.budget = maxSendBufferedAmount
 	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 	defer q.close(net.ErrClosed)
 
 	conn := &Conn{ctx: ctx}
-	conn.maxSegmentPayload.Store(2 * maxSendBufferedAmount)
+	conn.maxSegmentPayload.Store(1<<20 - 1)
 	conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
 
-	data := make([]byte, maxSendBufferedAmount+10)
+	data := make([]byte, maxMessageSize+10)
 	n, err := conn.Write(data)
 	if err != nil {
 		t.Fatalf("Write error = %v, want nil", err)
@@ -384,18 +384,12 @@ func TestConnSendClampsSegmentsToSendQueueBudget(t *testing.T) {
 	}
 
 	frag := wait(t, fake.sentCh, "first fragment")
-	if len(frag) != maxSendBufferedAmount || frag[0] != 1 {
-		t.Fatalf("first fragment = %d bytes with prefix %d, want %d bytes with prefix 1", len(frag), frag[0], maxSendBufferedAmount)
+	if len(frag) != maxMessageSize+1 || frag[0] != 1 {
+		t.Fatalf("first fragment = %d bytes with prefix %d, want %d bytes with prefix 1", len(frag), frag[0], maxMessageSize+1)
 	}
-	fake.release(uint64(len(frag)))
 	frag = wait(t, fake.sentCh, "last fragment")
-	if len(frag) != 12 || frag[0] != 0 {
-		t.Fatalf("last fragment = %d bytes with prefix %d, want 12 bytes with prefix 0", len(frag), frag[0])
-	}
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if fake.violations != 0 {
-		t.Fatalf("%d sends exceeded the buffered-amount budget", fake.violations)
+	if len(frag) != 11 || frag[0] != 0 {
+		t.Fatalf("last fragment = %d bytes with prefix %d, want 11 bytes with prefix 0", len(frag), frag[0])
 	}
 }
 
