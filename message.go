@@ -85,10 +85,7 @@ func (r MessageReliability) compareOptional(a, b *uint16) bool {
 func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability, conn *Conn, onOpen func()) *dataChannel {
 	ch := &dataChannel{
 		DataChannel: channel,
-		out: newSendQueue(conn.ctx, channel, maxSendBufferedAmount, func(err error) {
-			// Closing stops the transports, so keep it off the sending goroutine.
-			go conn.close(fmt.Errorf("nethernet: send on data channel %q: %w", channel.Label(), err))
-		}),
+		out:         newSendQueue(conn.ctx, channel, maxSendBufferedAmount),
 		reliability: reliability,
 		// Previously, message.data was pre-allocated for all possible segments.
 		// Since most messages are smaller than 256KB and don't require fragmentation,

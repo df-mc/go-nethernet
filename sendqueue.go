@@ -30,8 +30,6 @@ const maxSendBufferedAmount = 16 << 20
 type sendQueue struct {
 	channel     sendChannel
 	maxBuffered uint64
-	// fail is called once if the channel rejects a send.
-	fail func(error)
 
 	// flushMu serializes flushes so messages reach the channel in queue order.
 	flushMu sync.Mutex
@@ -42,11 +40,10 @@ type sendQueue struct {
 }
 
 // newSendQueue returns a queue that closes with the cause of ctx once ctx is done.
-func newSendQueue(ctx context.Context, channel sendChannel, maxBuffered uint64, fail func(error)) *sendQueue {
+func newSendQueue(ctx context.Context, channel sendChannel, maxBuffered uint64) *sendQueue {
 	q := &sendQueue{
 		channel:     channel,
 		maxBuffered: maxBuffered,
-		fail:        fail,
 	}
 	channel.OnBufferedAmountLow(q.retry)
 	context.AfterFunc(ctx, func() { q.close(context.Cause(ctx)) })
@@ -107,7 +104,7 @@ func (q *sendQueue) flush() error {
 		case webrtc.DataChannelStateConnecting:
 			return nil
 		default:
-			// The channel never reopens. Its close handler closes the connection, so fail is not called.
+			// The channel never reopens; its close handler closes the connection.
 			err := fmt.Errorf("data channel %s: %w", state, io.ErrClosedPipe)
 			q.close(err)
 			return err
@@ -121,10 +118,9 @@ func (q *sendQueue) flush() error {
 			}
 		}
 		if err := q.channel.Send(b); err != nil {
+			// Send fails only once the channel or its association has ended, even while the
+			// channel still reads open; the close handlers own the connection's cause.
 			q.close(err)
-			if q.fail != nil {
-				q.fail(err)
-			}
 			return err
 		}
 
