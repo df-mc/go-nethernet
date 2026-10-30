@@ -179,9 +179,9 @@ func (conn *Conn) Write(b []byte) (n int, err error) {
 	return conn.Send(b, MessageReliabilityReliable)
 }
 
-// Send writes the data to the data channel for the given MessageReliability, split into
-// segments of at most the negotiated size. Segments the channel has no room for yet are
-// queued and sent in order as it opens or gains room, so a nil error does not mean delivery.
+// Send writes the data to the data channel for the given MessageReliability, split into segments of
+// at most the smaller of the negotiated and local max message size. Segments the channel has no room
+// for yet are queued and sent in order as it opens or gains room, so a nil error does not mean delivery.
 func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err error) {
 	select {
 	case <-conn.ctx.Done():

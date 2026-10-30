@@ -13,11 +13,8 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// fakeSendChannel implements sendChannel deterministically for tests. Its
-// buffered amount grows on Send and is released manually with release, which
-// invokes the OnBufferedAmountLow callback with the same edge-triggered
-// semantics as Pion: only when the buffered amount crosses from above the
-// threshold to at or below it.
+// fakeSendChannel is a deterministic sendChannel whose buffered amount drains only on release,
+// which fires the low callback like Pion: only when it crosses down to the threshold.
 type fakeSendChannel struct {
 	mu        sync.Mutex
 	buffered  uint64
@@ -27,8 +24,7 @@ type fakeSendChannel struct {
 	sendErr   error
 	sent      [][]byte
 
-	// budget, when non-zero, is the buffered-amount budget every Send must
-	// respect; violations counts sends that would exceed it.
+	// budget, if non-zero, is a buffered-amount cap; violations counts sends that exceed it.
 	budget     uint64
 	violations int
 
