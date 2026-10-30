@@ -758,6 +758,36 @@ func TestAcceptedConnClosesOnDuplicateDataChannel(t *testing.T) {
 	}
 }
 
+// A duplicate data channel must not count as opened, or it could complete channelsReady before accept.
+func TestAcceptDataChannelDuplicateDoesNotCountAsOpened(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, clientConn, serverConn := dialAcceptedListener(t, client, server)
+
+	// The listener's own count is spent once accepted, so count with a fresh hook.
+	opened := make(chan struct{}, 1)
+	serverConn.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
+		acceptDataChannel(serverConn, channel, func() { opened <- struct{}{} })
+	})
+	handled := make(chan struct{}, 1)
+	serverConn.sctp.OnDataChannelOpened(func(*webrtc.DataChannel) {
+		select {
+		case handled <- struct{}{}:
+		default:
+		}
+	})
+	if _, err := webrtc.NewAPI().NewDataChannel(clientConn.sctp, MessageReliabilityReliable.Parameters()); err != nil {
+		t.Fatalf("NewDataChannel() error = %v", err)
+	}
+	wait(t, handled, "duplicate data channel")
+	select {
+	case <-opened:
+		t.Fatal("duplicate data channel ran the open hook")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestListenerIgnoresMalformedDeferredSignals(t *testing.T) {
 	for _, kind := range []string{SignalTypeCandidate, SignalTypeError} {
 		t.Run(kind, func(t *testing.T) {
