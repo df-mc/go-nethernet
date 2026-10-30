@@ -1,6 +1,7 @@
 package nethernet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -15,6 +16,66 @@ func TestDialListenerTrickleICE(t *testing.T) {
 
 func TestDialListenerNonTrickleICE(t *testing.T) {
 	testDialListener(t, true)
+}
+
+// A write past the send budget to a stalled receiver is held in the queue and delivered in order once it reads.
+func TestSendQueueDrainsBeyondWebRTCBufferedAmountBudget(t *testing.T) {
+	client, server := newMemorySignalingPair("1", "2")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, conn, serverConn := dialAcceptedListener(t, client, server)
+
+	// The server does not read this yet, so its read loop blocks and the
+	// payload behind it can only fill the SCTP receive window.
+	stall := []byte("stall")
+	if _, err := conn.Write(stall); err != nil {
+		t.Fatalf("Write(stall) error = %v", err)
+	}
+	// Exceed the budget by more than Pion's default 1 MiB receive window.
+	payload := make([]byte, maxSendBufferedAmount+4<<20)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	if n, err := conn.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("Write(payload) = (%d, %v), want (%d, nil)", n, err, len(payload))
+	}
+
+	ch := conn.channel(MessageReliabilityReliable)
+	if got := ch.BufferedAmount(); got > maxSendBufferedAmount {
+		t.Fatalf("buffered amount = %d, want at most %d", got, maxSendBufferedAmount)
+	}
+	ch.out.mu.Lock()
+	held := len(ch.out.queue)
+	ch.out.mu.Unlock()
+	if held == 0 {
+		t.Fatal("no segments held back while the receiver is stalled")
+	}
+
+	packets := make(chan []byte, 2)
+	readErr := make(chan error, 1)
+	go func() {
+		for range 2 {
+			packet, err := serverConn.ReadPacket()
+			if err != nil {
+				readErr <- err
+				return
+			}
+			packets <- packet
+		}
+	}()
+	timeout := time.After(30 * time.Second)
+	for i, want := range [][]byte{stall, payload} {
+		select {
+		case got := <-packets:
+			if !bytes.Equal(got, want) {
+				t.Fatalf("packet #%d = %d bytes, want %d matching bytes", i, len(got), len(want))
+			}
+		case err := <-readErr:
+			t.Fatalf("ReadPacket() error = %v", err)
+		case <-timeout:
+			t.Fatalf("timed out waiting for packet #%d with %d segments held back", i, held)
+		}
+	}
 }
 
 func TestDialedConnSurvivesSignalingCloseAfterNegotiation(t *testing.T) {

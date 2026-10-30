@@ -523,23 +523,12 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 		channelsReady = make(chan struct{})
 	)
 	c.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
-		for r := range messageReliabilityCapacity {
-			if r.Valid(channel) {
-				ch := wrapDataChannel(channel, r, c)
-				if existing := c.storeChannel(r, ch); existing != nil {
-					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
-					return
-				}
-				channel.OnOpen(sync.OnceFunc(func() {
-					// If all data channels have been opened by remote peer, we can signal that the connection is ready.
-					if opened.Add(1) == uint32(messageReliabilityCapacity) {
-						close(channelsReady)
-					}
-				}))
-				return
+		acceptDataChannel(c, channel, func() {
+			// If all data channels have been opened by remote peer, we can signal that the connection is ready.
+			if opened.Add(1) == uint32(messageReliabilityCapacity) {
+				close(channelsReady)
 			}
-		}
-		go c.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
+		})
 	})
 
 	// Encode an answer using the local parameters!
@@ -590,6 +579,26 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	}
 	established = true
 	return nil
+}
+
+// acceptDataChannel stores a data channel opened by the remote peer on conn; opened runs once it opens.
+// A duplicate or unknown channel closes conn instead and never runs opened.
+func acceptDataChannel(conn *Conn, channel *webrtc.DataChannel, opened func()) {
+	for r := range messageReliabilityCapacity {
+		if r.Valid(channel) {
+			ch := wrapDataChannel(channel, r, conn, sync.OnceFunc(opened))
+			if existing := conn.storeChannel(r, ch); existing != nil {
+				cause := fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label)
+				// Cancel first: closing the duplicate fires its close handler, which would race this cause.
+				conn.cancel(cause)
+				// Closing the duplicate before Pion opens it keeps its open hook from running.
+				_ = ch.Close()
+				go conn.close(cause)
+			}
+			return
+		}
+	}
+	go conn.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
 }
 
 // answererRole returns the local [webrtc.DTLSRole] for an answer based on the

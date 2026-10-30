@@ -175,15 +175,14 @@ func (conn *Conn) Context() context.Context {
 	return conn.ctx
 }
 
-// Write writes the data into the 'ReliableDataChannel'. If the data exceeds 10000 bytes, it is split into
-// multiple segments. An error may be returned while writing a segment or if the Conn has been closed by [Conn.Close].
+// Write writes the data to the 'ReliableDataChannel'. See [Conn.Send].
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	return conn.Send(b, MessageReliabilityReliable)
 }
 
-// Send writes the data into the data channel responsible for the given MessageReliability.
-// If the data exceeds 10,000 bytes, it is split into multiple segments. An error may be
-// returned while writing one or more segments or the Conn has been closed by [Conn.Close].
+// Send writes the data to the data channel for the given MessageReliability, split into segments of
+// at most the smaller of the negotiated and local max message size. Segments the channel has no room
+// for yet are queued and sent in order as it opens or gains room, so a nil error does not mean delivery.
 func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err error) {
 	select {
 	case <-conn.ctx.Done():
@@ -196,6 +195,8 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		if segmentSize == 0 {
 			segmentSize = maxMessageSize
 		}
+		// Like vanilla, never exceed the local max-message-size, even if the remote allows more.
+		segmentSize = min(segmentSize, maxMessageSize)
 		if reliability == MessageReliabilityUnreliable && len(data) > segmentSize {
 			return 0, fmt.Errorf("data larger than %d (received: %d) cannot be sent over UnreliableDataChannel", segmentSize, len(data))
 		}
@@ -219,7 +220,11 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		remaining := totalSegments - 1
 		for i := 0; i < len(data); i += segmentSize {
 			frag := data[i:min(len(data), i+segmentSize)]
-			if err := d.Send(append([]byte{uint8(remaining)}, frag...)); err != nil {
+			if err := d.out.push(append([]byte{uint8(remaining)}, frag...)); err != nil {
+				// close cancels with its cause before closing the channels, so a write racing it reports that cause.
+				if cause := context.Cause(conn.ctx); cause != nil {
+					err = cause
+				}
 				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, closedWriteError(err))
 			}
 			n += len(frag)
