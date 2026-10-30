@@ -18,8 +18,7 @@ func TestDialListenerNonTrickleICE(t *testing.T) {
 	testDialListener(t, true)
 }
 
-// A write past the 16 MiB send budget to a stalled receiver is held back in
-// the queue, then delivered in order once the receiver reads again.
+// A write past the send budget to a stalled receiver is held in the queue and delivered in order once it reads.
 func TestSendQueueDrainsBeyondWebRTCBufferedAmountBudget(t *testing.T) {
 	client, server := newMemorySignalingPair("1", "2")
 	t.Cleanup(client.close)
