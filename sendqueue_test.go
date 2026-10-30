@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -44,6 +45,10 @@ func newFakeSendChannel() *fakeSendChannel {
 
 func (f *fakeSendChannel) Send(b []byte) error {
 	f.mu.Lock()
+	if f.state != webrtc.DataChannelStateOpen {
+		f.mu.Unlock()
+		return io.ErrClosedPipe // Like Pion.
+	}
 	if f.sendErr != nil {
 		f.mu.Unlock()
 		return f.sendErr
@@ -308,6 +313,36 @@ func TestSendQueueSendErrorClosesQueue(t *testing.T) {
 
 	if err := q.push([]byte("next")); !errors.Is(err, sendErr) {
 		t.Fatalf("push after send failure error = %v, want %v", err, sendErr)
+	}
+}
+
+// A channel closed under a racing Write fails it instead of queuing data that can never be sent.
+func TestConnWriteFailsOnClosingDataChannel(t *testing.T) {
+	for _, state := range []webrtc.DataChannelState{webrtc.DataChannelStateClosing, webrtc.DataChannelStateClosed} {
+		t.Run(state.String(), func(t *testing.T) {
+			fake := newFakeSendChannel()
+			fake.state = state
+			failed := make(chan error, 1)
+			q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, func(err error) { failed <- err })
+
+			conn := &Conn{ctx: t.Context()}
+			conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
+
+			if _, err := conn.Write([]byte("late")); !errors.Is(err, io.ErrClosedPipe) || !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("Write error = %v, want io.ErrClosedPipe and net.ErrClosed", err)
+			}
+			if err := q.push([]byte("next")); !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatalf("push after failed Write error = %v, want io.ErrClosedPipe", err)
+			}
+			if n := fake.sentCount(); n != 0 {
+				t.Fatalf("Send called %d times, want 0", n)
+			}
+			select {
+			case err := <-failed:
+				t.Fatalf("fail called with %v; the channel's close handler owns closing the connection", err)
+			default:
+			}
+		})
 	}
 }
 

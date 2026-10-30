@@ -3,6 +3,7 @@ package nethernet
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -29,7 +30,7 @@ const maxSendBufferedAmount = 16 << 20
 type sendQueue struct {
 	channel     sendChannel
 	maxBuffered uint64
-	// fail is called once with the error that made the channel unusable.
+	// fail is called once if the channel rejects a send.
 	fail func(error)
 
 	// flushMu serializes flushes so messages reach the channel in queue order.
@@ -101,8 +102,15 @@ func (q *sendQueue) flush() error {
 		b := q.queue[0]
 		q.mu.Unlock()
 
-		if q.channel.ReadyState() != webrtc.DataChannelStateOpen {
+		switch state := q.channel.ReadyState(); state {
+		case webrtc.DataChannelStateOpen:
+		case webrtc.DataChannelStateConnecting:
 			return nil
+		default:
+			// The channel never reopens. Its close handler closes the connection, so fail is not called.
+			err := fmt.Errorf("data channel %s: %w", state, io.ErrClosedPipe)
+			q.close(err)
+			return err
 		}
 		// Arm the low-water callback before checking so a drop between the
 		// two cannot be missed.
