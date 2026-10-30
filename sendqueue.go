@@ -112,12 +112,13 @@ func (q *sendQueue) flush() error {
 			q.close(err)
 			return err
 		}
-		// Arm the low-water callback before checking so a drop between the
-		// two cannot be missed.
-		threshold := q.maxBuffered - uint64(len(b))
-		q.channel.SetBufferedAmountLowThreshold(threshold)
-		if q.channel.BufferedAmount() > threshold {
-			return nil
+		if size := uint64(len(b)); q.channel.BufferedAmount()+size > q.maxBuffered {
+			// Arm the low-water callback, then re-check so a drop in between is not missed.
+			threshold := q.maxBuffered - size
+			q.channel.SetBufferedAmountLowThreshold(threshold)
+			if q.channel.BufferedAmount() > threshold {
+				return nil
+			}
 		}
 		if err := q.channel.Send(b); err != nil {
 			q.close(err)
