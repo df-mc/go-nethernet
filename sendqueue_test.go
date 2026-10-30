@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/sctp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -140,6 +141,13 @@ func (f *fakeSendChannel) bufferedAmountLowThreshold() uint64 {
 	return f.threshold
 }
 
+// swapSendChannel replaces the channel of a live queue between flushes.
+func swapSendChannel(q *sendQueue, ch sendChannel) {
+	q.flushMu.Lock()
+	defer q.flushMu.Unlock()
+	q.channel = ch
+}
+
 // wait fails the test if ch does not become ready in time.
 func wait[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
@@ -155,7 +163,7 @@ func wait[T any](t *testing.T, ch <-chan T, what string) T {
 func TestSendQueueBufferedAmountBudget(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
-	q := newSendQueue(t.Context(), fake, 100)
+	q := newSendQueue(t.Context(), fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
 	msgs := make([][]byte, 5)
@@ -203,7 +211,7 @@ func TestSendQueueRechecksAfterArmingThreshold(t *testing.T) {
 	fake.setBuffered(200) // Over the budget: the message must wait.
 	// Acknowledged against the old threshold of 0, so no low-water event fires.
 	fake.beforeArm = func() { fake.release(180) }
-	q := newSendQueue(t.Context(), fake, 100)
+	q := newSendQueue(t.Context(), fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
 	if err := q.push(make([]byte, 40)); err != nil {
@@ -218,7 +226,7 @@ func TestSendQueueFullSizeMessageResumesAtCapacity(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = maxSendBufferedAmount
 	fake.setBuffered(maxSendBufferedAmount)
-	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 	defer q.close(net.ErrClosed)
 
 	msg := make([]byte, maxMessageSize+1)
@@ -238,7 +246,7 @@ func TestSendQueueFullSizeMessageResumesAtCapacity(t *testing.T) {
 func TestSendQueueWaitsForOpen(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.state = webrtc.DataChannelStateConnecting
-	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 	defer q.close(net.ErrClosed)
 
 	if err := q.push([]byte("queued")); err != nil {
@@ -306,7 +314,7 @@ func TestSendQueueRetainsMessagesBeyondBufferedAmountBudget(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
 	fake.setBuffered(200) // Over the budget: nothing can be sent yet.
-	q := newSendQueue(t.Context(), fake, 100)
+	q := newSendQueue(t.Context(), fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
 	msgs := [][]byte{
@@ -342,7 +350,7 @@ func TestSendQueueRetainsMessagesBeyondBufferedAmountBudget(t *testing.T) {
 // A message the channel has room for reaches it before push returns.
 func TestSendQueuePushSendsBeforeReturning(t *testing.T) {
 	fake := newFakeSendChannel()
-	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 
 	if err := q.push([]byte("last")); err != nil {
 		t.Fatalf("push error = %v, want nil", err)
@@ -356,7 +364,7 @@ func TestSendQueuePushSendsBeforeReturning(t *testing.T) {
 func TestSendQueueCloseDropsPendingMessages(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.setBuffered(200) // Over the budget: nothing can be sent yet.
-	q := newSendQueue(t.Context(), fake, 100)
+	q := newSendQueue(t.Context(), fake, 100, nil)
 
 	if err := q.push(make([]byte, 40)); err != nil {
 		t.Fatalf("push(40 bytes) error = %v, want nil", err)
@@ -377,7 +385,7 @@ func TestSendQueueSendErrorClosesQueue(t *testing.T) {
 	sendErr := errors.New("send failed")
 	fake.sendErr = sendErr
 
-	q := newSendQueue(t.Context(), fake, 100)
+	q := newSendQueue(t.Context(), fake, 100, nil)
 	if err := q.push([]byte("doomed")); !errors.Is(err, sendErr) {
 		t.Fatalf("push error = %v, want %v", err, sendErr)
 	}
@@ -386,7 +394,7 @@ func TestSendQueueSendErrorClosesQueue(t *testing.T) {
 	}
 }
 
-// A send failing after the association ended must not race the close handlers for the Conn's cause.
+// A send failure other than a peer restart leaves the Conn's cause to the close handlers.
 func TestConnSendFailureLeavesCloseCauseToHandlers(t *testing.T) {
 	client, server := newMemorySignalingPair("client", "server")
 	t.Cleanup(client.close)
@@ -396,7 +404,7 @@ func TestConnSendFailureLeavesCloseCauseToHandlers(t *testing.T) {
 	// The association is gone, but the channel still reads open.
 	gone := newFakeSendChannel()
 	gone.sendErr = errors.New("association closed")
-	serverConn.channel(MessageReliabilityReliable).out.channel = gone
+	swapSendChannel(serverConn.channel(MessageReliabilityReliable).out, gone)
 	if _, err := serverConn.Write([]byte("late")); !errors.Is(err, gone.sendErr) {
 		t.Fatalf("Write error = %v, want %v", err, gone.sendErr)
 	}
@@ -412,13 +420,37 @@ func TestConnSendFailureLeavesCloseCauseToHandlers(t *testing.T) {
 	}
 }
 
+// A peer restart fires no close handler, so a send it interrupts must close the Conn itself.
+func TestConnSendInterruptedByRestartClosesConn(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, _, serverConn := dialAcceptedListener(t, client, server)
+
+	restarted := newFakeSendChannel()
+	restarted.sendErr = sctp.ErrAssociationRestarted
+	swapSendChannel(serverConn.channel(MessageReliabilityReliable).out, restarted)
+	if _, err := serverConn.Write([]byte("racing")); !errors.Is(err, sctp.ErrAssociationRestarted) || !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write error = %v, want %v and net.ErrClosed", err, sctp.ErrAssociationRestarted)
+	}
+
+	select {
+	case <-serverConn.Context().Done():
+		if cause := context.Cause(serverConn.Context()); !errors.Is(cause, sctp.ErrAssociationRestarted) {
+			t.Fatalf("connection cause = %v, want %v", cause, sctp.ErrAssociationRestarted)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection stayed open after a send interrupted by a peer restart")
+	}
+}
+
 // A channel closed under a racing Write fails it instead of queuing data that can never be sent.
 func TestConnWriteFailsOnClosingDataChannel(t *testing.T) {
 	for _, state := range []webrtc.DataChannelState{webrtc.DataChannelStateClosing, webrtc.DataChannelStateClosed} {
 		t.Run(state.String(), func(t *testing.T) {
 			fake := newFakeSendChannel()
 			fake.state = state
-			q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+			q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 
 			conn := &Conn{ctx: t.Context()}
 			conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
@@ -442,7 +474,7 @@ func TestConnWriteRacingCloseReportsCause(t *testing.T) {
 	cause := errors.New("closed mid-write")
 	fake := newFakeSendChannel()
 	// The queue must not see the cause through its context, as when Close beats its AfterFunc.
-	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 	conn := &Conn{ctx: ctx}
 	conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
 
@@ -462,7 +494,7 @@ func TestConnSendFragmentsInOrder(t *testing.T) {
 
 	fake := newFakeSendChannel()
 	fake.budget = maxSendBufferedAmount
-	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 	defer q.close(net.ErrClosed)
 
 	conn := &Conn{ctx: ctx}
@@ -504,7 +536,7 @@ func TestConnWriteQueuesWhileDataChannelIsFull(t *testing.T) {
 
 	fake := newFakeSendChannel()
 	fake.setBuffered(200) // Over the budget: nothing can be sent yet.
-	q := newSendQueue(t.Context(), fake, 100)
+	q := newSendQueue(t.Context(), fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
 	conn := &Conn{ctx: ctx}
@@ -526,7 +558,7 @@ func TestConnSendCapsSegmentsAtLocalMaxMessageSize(t *testing.T) {
 	defer cancel(nil)
 
 	fake := newFakeSendChannel()
-	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
 	defer q.close(net.ErrClosed)
 
 	conn := &Conn{ctx: ctx}
@@ -567,7 +599,7 @@ func TestSendQueueStopsWhenConnectionCloses(t *testing.T) {
 			if alreadyClosed {
 				cancel(cause)
 			}
-			q := newSendQueue(ctx, fake, 100)
+			q := newSendQueue(ctx, fake, 100, nil)
 			defer q.close(net.ErrClosed)
 			if !alreadyClosed {
 				if err := q.push([]byte("pending")); err != nil {

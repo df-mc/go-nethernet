@@ -2,10 +2,12 @@ package nethernet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 
+	"github.com/pion/sctp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -30,6 +32,7 @@ const maxSendBufferedAmount = 16 << 20
 type sendQueue struct {
 	channel     sendChannel
 	maxBuffered uint64
+	fail        func(error)
 
 	// flushMu serializes flushes so messages reach the channel in queue order.
 	flushMu sync.Mutex
@@ -40,10 +43,12 @@ type sendQueue struct {
 }
 
 // newSendQueue returns a queue that closes with the cause of ctx once ctx is done.
-func newSendQueue(ctx context.Context, channel sendChannel, maxBuffered uint64) *sendQueue {
+// fail, if non-nil, receives a send error that no close handler will report.
+func newSendQueue(ctx context.Context, channel sendChannel, maxBuffered uint64, fail func(error)) *sendQueue {
 	q := &sendQueue{
 		channel:     channel,
 		maxBuffered: maxBuffered,
+		fail:        fail,
 	}
 	channel.OnBufferedAmountLow(q.retry)
 	context.AfterFunc(ctx, func() { q.close(context.Cause(ctx)) })
@@ -118,9 +123,12 @@ func (q *sendQueue) flush() error {
 			}
 		}
 		if err := q.channel.Send(b); err != nil {
-			// Send fails only once the channel or its association has ended, even while the
-			// channel still reads open; the close handlers own the connection's cause.
 			q.close(err)
+			// Send fails once the channel or its association has ended, and their close handlers
+			// close the connection. A peer restart keeps both open, so no handler fires.
+			if errors.Is(err, sctp.ErrAssociationRestarted) && q.fail != nil {
+				q.fail(err)
+			}
 			return err
 		}
 
