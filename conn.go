@@ -220,6 +220,10 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 		for i := 0; i < len(data); i += segmentSize {
 			frag := data[i:min(len(data), i+segmentSize)]
 			if err := d.out.push(append([]byte{uint8(remaining)}, frag...)); err != nil {
+				// close cancels with its cause before closing the channels, so a write racing it reports that cause.
+				if cause := context.Cause(conn.ctx); cause != nil {
+					err = cause
+				}
 				return n, fmt.Errorf("write segment #%d: %w", totalSegments-1-remaining, closedWriteError(err))
 			}
 			n += len(frag)

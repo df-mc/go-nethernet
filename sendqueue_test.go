@@ -34,6 +34,8 @@ type fakeSendChannel struct {
 
 	// sentCh receives each message as it is passed to Send.
 	sentCh chan []byte
+	// beforeSend, if set, runs at the start of each Send.
+	beforeSend func()
 }
 
 func newFakeSendChannel() *fakeSendChannel {
@@ -44,6 +46,12 @@ func newFakeSendChannel() *fakeSendChannel {
 }
 
 func (f *fakeSendChannel) Send(b []byte) error {
+	f.mu.Lock()
+	beforeSend := f.beforeSend
+	f.mu.Unlock()
+	if beforeSend != nil {
+		beforeSend()
+	}
 	f.mu.Lock()
 	if f.state != webrtc.DataChannelStateOpen {
 		f.mu.Unlock()
@@ -356,6 +364,26 @@ func TestConnWriteFailsOnClosingDataChannel(t *testing.T) {
 				t.Fatalf("Send called %d times, want 0", n)
 			}
 		})
+	}
+}
+
+// A Write racing Close fails with the Conn's close cause, not a bare net.ErrClosed.
+func TestConnWriteRacingCloseReportsCause(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := errors.New("closed mid-write")
+	fake := newFakeSendChannel()
+	// The queue must not see the cause through its context, as when Close beats its AfterFunc.
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount)
+	conn := &Conn{ctx: ctx}
+	conn.storeChannel(MessageReliabilityReliable, &dataChannel{out: q})
+
+	// Close lands after Write checked the context: cancel with the cause, then close the channel.
+	fake.beforeSend = func() {
+		cancel(cause)
+		q.close(net.ErrClosed)
+	}
+	if _, err := conn.Write([]byte("racing")); !errors.Is(err, cause) || !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write error = %v, want %v and net.ErrClosed", err, cause)
 	}
 }
 
