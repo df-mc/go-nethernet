@@ -56,11 +56,8 @@ func newSendQueue(ctx context.Context, channel sendChannel, maxBuffered uint64, 
 }
 
 // push queues b and sends whatever the channel has room for before returning.
-// It returns the closing error once the queue is closed.
+// It returns the closing error once the queue is closed. b must fit maxBuffered.
 func (q *sendQueue) push(b []byte) error {
-	if size := uint64(len(b)); size > q.maxBuffered {
-		return fmt.Errorf("message exceeds data channel send buffer: %d > %d", size, q.maxBuffered)
-	}
 	q.mu.Lock()
 	if q.closed != nil {
 		defer q.mu.Unlock()
