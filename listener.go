@@ -519,9 +519,12 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 					}
 				}))
 				if existing := c.storeChannel(r, ch); existing != nil {
-					// The duplicate is not tracked by the Conn, so close it here.
+					cause := fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label)
+					// Cancel first: closing the duplicate fires its close handler, which would race this cause.
+					c.cancel(cause)
+					// Closing the duplicate stops its open hook counting toward channelsReady.
 					_ = ch.Close()
-					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
+					go c.close(cause)
 				}
 				return
 			}

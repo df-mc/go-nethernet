@@ -737,6 +737,27 @@ func TestAcceptedConnUsesNegotiatedMessageSize(t *testing.T) {
 	checkConnPayload(t, serverConn, clientConn, bytes.Repeat([]byte{0x5a}, 2048))
 }
 
+// A second data channel for the same reliability closes the Conn with the duplicate as its cause.
+func TestAcceptedConnClosesOnDuplicateDataChannel(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, clientConn, serverConn := dialAcceptedListener(t, client, server)
+
+	if _, err := webrtc.NewAPI().NewDataChannel(clientConn.sctp, MessageReliabilityReliable.Parameters()); err != nil {
+		t.Fatalf("NewDataChannel() error = %v", err)
+	}
+	select {
+	case <-serverConn.Context().Done():
+		want := `data channel created for same reliability parameters: "ReliableDataChannel"`
+		if got := context.Cause(serverConn.Context()).Error(); got != want {
+			t.Fatalf("connection cause = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("duplicate data channel did not close the connection")
+	}
+}
+
 func TestListenerIgnoresMalformedDeferredSignals(t *testing.T) {
 	for _, kind := range []string{SignalTypeCandidate, SignalTypeError} {
 		t.Run(kind, func(t *testing.T) {
