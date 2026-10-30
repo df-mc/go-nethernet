@@ -36,6 +36,8 @@ type fakeSendChannel struct {
 	sentCh chan []byte
 	// beforeSend, if set, runs at the start of each Send.
 	beforeSend func()
+	// beforeArm, if set, runs once before the next threshold takes effect.
+	beforeArm func()
 }
 
 func newFakeSendChannel() *fakeSendChannel {
@@ -78,6 +80,13 @@ func (f *fakeSendChannel) BufferedAmount() uint64 {
 }
 
 func (f *fakeSendChannel) SetBufferedAmountLowThreshold(th uint64) {
+	f.mu.Lock()
+	beforeArm := f.beforeArm
+	f.beforeArm = nil
+	f.mu.Unlock()
+	if beforeArm != nil {
+		beforeArm()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.threshold = th
@@ -189,6 +198,23 @@ func TestSendQueueBufferedAmountBudget(t *testing.T) {
 		if !bytes.Equal(fake.sent[i], want) {
 			t.Fatalf("sent[%d] = %v, want %v", i, fake.sent[i][0], want[0])
 		}
+	}
+}
+
+// Room freed after the budget check but before the threshold is armed fires no event, so flush must re-check.
+func TestSendQueueRechecksAfterArmingThreshold(t *testing.T) {
+	fake := newFakeSendChannel()
+	fake.setBuffered(200) // Over the budget: the message must wait.
+	// Acknowledged against the old threshold of 0, so no low-water event fires.
+	fake.beforeArm = func() { fake.release(180) }
+	q := newSendQueue(t.Context(), fake, 100)
+	defer q.close(net.ErrClosed)
+
+	if err := q.push(make([]byte, 40)); err != nil {
+		t.Fatalf("push error = %v, want nil", err)
+	}
+	if got := fake.sentCount(); got != 1 {
+		t.Fatalf("sent count = %d, want 1", got)
 	}
 }
 
