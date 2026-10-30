@@ -233,6 +233,53 @@ func TestSendQueueWaitsForOpen(t *testing.T) {
 	}
 }
 
+// A data channel's open hook drains what was queued while it was connecting.
+func TestDataChannelDrainsQueueOnOpen(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, clientConn, serverConn := dialAcceptedListener(t, client, server)
+
+	wrapped := make(chan *dataChannel, 1)
+	serverConn.sctp.OnDataChannel(func(channel *webrtc.DataChannel) {
+		// Pion opens a remote channel only after this handler returns.
+		ch := wrapDataChannel(channel, MessageReliabilityReliable, serverConn, nil)
+		// The acknowledged open handshake fires the low-water event; mute it so only the open hook drains.
+		channel.OnBufferedAmountLow(func() {})
+		if err := ch.out.push([]byte("queued")); err != nil {
+			t.Errorf("push error = %v, want nil", err)
+		}
+		ch.out.mu.Lock()
+		if held := len(ch.out.queue); held != 1 {
+			t.Errorf("queued messages before open = %d, want 1", held)
+		}
+		ch.out.mu.Unlock()
+		wrapped <- ch
+	})
+	if _, err := webrtc.NewAPI().NewDataChannel(clientConn.sctp, &webrtc.DataChannelParameters{Label: "probe", Ordered: true}); err != nil {
+		t.Fatalf("NewDataChannel() error = %v", err)
+	}
+	ch := wait(t, wrapped, "remote data channel")
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		ch.out.mu.Lock()
+		held := len(ch.out.queue)
+		ch.out.mu.Unlock()
+		if held == 0 {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("queued messages after the channel opened = %d, want 0", held)
+		case <-tick.C:
+		}
+	}
+}
+
 func TestSendQueueRetainsMessagesBeyondBufferedAmountBudget(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
