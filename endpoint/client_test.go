@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -231,4 +232,45 @@ type rejectingNotifier struct{}
 
 func (rejectingNotifier) NotifySignal(*nethernet.Signal) bool {
 	return false
+}
+
+// Any 2xx answer is accepted; any other status fails without delivering an answer.
+func TestClientSignalHTTPStatuses(t *testing.T) {
+	for _, tt := range []struct {
+		status int
+		ok     bool
+	}{
+		{status: http.StatusOK, ok: true},
+		{status: http.StatusCreated, ok: true},
+		{status: 299, ok: true},
+		{status: http.StatusMultipleChoices},
+		{status: http.StatusUnauthorized},
+		{status: http.StatusForbidden},
+		{status: http.StatusNotFound},
+		{status: http.StatusServiceUnavailable},
+	} {
+		t.Run(strconv.Itoa(tt.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte("v=0\r\ns=-\r\n"))
+			}))
+			defer server.Close()
+			client := NewClient()
+			signals := make(chan *nethernet.Signal, 1)
+			defer client.Notify(notifierFunc(func(signal *nethernet.Signal) { signals <- signal }))()
+
+			err := client.Signal(context.Background(), &nethernet.Signal{
+				Type: nethernet.SignalTypeOffer, ConnectionID: 1, NetworkID: server.URL, Data: "offer",
+			})
+			if tt.ok {
+				if err != nil || len(signals) != 1 {
+					t.Fatalf("Signal() = %v with %d answers, want one answer", err, len(signals))
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), strconv.Itoa(tt.status)) || len(signals) != 0 {
+				t.Fatalf("Signal() = %v with %d answers, want an HTTP %d error and no answer", err, len(signals), tt.status)
+			}
+		})
+	}
 }

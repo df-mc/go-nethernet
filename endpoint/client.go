@@ -205,7 +205,7 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
 			return fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
 		}
 		b, err := io.ReadAll(io.LimitReader(resp.Body, maxSDPBodySize+1))
