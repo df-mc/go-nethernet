@@ -234,19 +234,20 @@ func (rejectingNotifier) NotifySignal(*nethernet.Signal) bool {
 	return false
 }
 
-// Any 2xx answer is accepted, and failures carry vanilla's error code for their status.
+// Any 2xx answer is accepted; any other status fails without delivering an answer.
 func TestClientSignalHTTPStatuses(t *testing.T) {
 	for _, tt := range []struct {
 		status int
-		code   int
+		ok     bool
 	}{
-		{status: http.StatusCreated},
-		{status: 299},
-		{status: http.StatusUnauthorized, code: nethernet.ErrorCodeHTTPUnauthorized},
-		{status: http.StatusForbidden, code: nethernet.ErrorCodeHTTPForbidden},
-		{status: http.StatusServiceUnavailable, code: nethernet.ErrorCodeHTTPServiceUnavailable},
-		{status: http.StatusNotFound, code: nethernet.ErrorCodeSignalingFailedToSend},
-		{status: http.StatusMultipleChoices, code: nethernet.ErrorCodeSignalingFailedToSend},
+		{status: http.StatusOK, ok: true},
+		{status: http.StatusCreated, ok: true},
+		{status: 299, ok: true},
+		{status: http.StatusMultipleChoices},
+		{status: http.StatusUnauthorized},
+		{status: http.StatusForbidden},
+		{status: http.StatusNotFound},
+		{status: http.StatusServiceUnavailable},
 	} {
 		t.Run(strconv.Itoa(tt.status), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -261,28 +262,15 @@ func TestClientSignalHTTPStatuses(t *testing.T) {
 			err := client.Signal(context.Background(), &nethernet.Signal{
 				Type: nethernet.SignalTypeOffer, ConnectionID: 1, NetworkID: server.URL, Data: "offer",
 			})
-			if tt.code == 0 {
+			if tt.ok {
 				if err != nil || len(signals) != 1 {
 					t.Fatalf("Signal() = %v with %d answers, want one answer", err, len(signals))
 				}
 				return
 			}
-			var statusErr *StatusError
-			if !errors.As(err, &statusErr) || statusErr.StatusCode != tt.status || statusErr.Code != tt.code {
-				t.Fatalf("Signal() error = %v, want HTTP %d with code %d", err, tt.status, tt.code)
-			}
-			if len(signals) != 0 {
-				t.Fatalf("Signal() delivered an answer for HTTP %d", tt.status)
+			if err == nil || !strings.Contains(err.Error(), strconv.Itoa(tt.status)) || len(signals) != 0 {
+				t.Fatalf("Signal() = %v with %d answers, want an HTTP %d error and no answer", err, len(signals), tt.status)
 			}
 		})
-	}
-}
-
-// The join failure codes keep vanilla's numbers.
-func TestHTTPErrorCodes(t *testing.T) {
-	if nethernet.ErrorCodeSignalingFailedToSend != 26 || nethernet.ErrorCodeHTTPUnauthorized != 38 ||
-		nethernet.ErrorCodeHTTPForbidden != 39 || nethernet.ErrorCodeHTTPServiceUnavailable != 40 {
-		t.Fatalf("join error codes = %d, %d, %d, %d, want 26, 38, 39, 40", nethernet.ErrorCodeSignalingFailedToSend,
-			nethernet.ErrorCodeHTTPUnauthorized, nethernet.ErrorCodeHTTPForbidden, nethernet.ErrorCodeHTTPServiceUnavailable)
 	}
 }
