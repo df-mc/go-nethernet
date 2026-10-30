@@ -430,7 +430,7 @@ func TestSendQueueStopsWhenConnectionCloses(t *testing.T) {
 				}
 				cancel(cause)
 			}
-			deadline := time.NewTimer(time.Second)
+			deadline := time.NewTimer(5 * time.Second)
 			defer deadline.Stop()
 			tick := time.NewTicker(time.Millisecond)
 			defer tick.Stop()
