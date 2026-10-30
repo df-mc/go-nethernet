@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"strconv"
 
 	"github.com/df-mc/go-nethernet"
 )
@@ -26,10 +26,14 @@ func ExampleClient() {
 	fmt.Printf("connected, latency: %s", conn.Latency())
 }
 
-// ExampleServer demonstrates how to expose a NetherNet listener using HTTP/TLS server
+// ExampleHandler demonstrates how to expose a NetherNet listener using HTTP/TLS server
 // for signaling.
-func ExampleServer() {
-	handler := NewHandler()
+func ExampleHandler() {
+	handler, err := Serve(":19132")
+	if err != nil {
+		panic(fmt.Sprintf("error listening on HTTP: %s", err))
+	}
+	defer handler.Close()
 
 	// Set up a NetherNet listener.
 	var cfg nethernet.ListenConfig
@@ -39,22 +43,30 @@ func ExampleServer() {
 	}
 	defer l.Close()
 
-	// Start accepting NetherNet connections in a goroutine.
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			slog.Info("connected",
-				"remoteAddr", conn.RemoteAddr(),
-				"localAddr", conn.LocalAddr(),
-				"latency", conn.(*nethernet.Conn).Latency(),
-			)
+	// Start accepting NetherNet connections.
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return
 		}
-	}()
+		slog.Info("connected",
+			"remoteAddr", conn.RemoteAddr(),
+			"localAddr", conn.LocalAddr(),
+			"latency", conn.(*nethernet.Conn).Latency(),
+		)
+	}
+}
 
-	// Start listening on HTTP/TLS. This will block until the server stops.
-	// In production, it is recommended to create an [http.Server] and call its Close() method when it's done.
-	_ = http.ListenAndServeTLS(":19132", "/path/to/cert-file", "/path/to/key-file", handler)
+// ExampleClient_Status demonstrates how to retrieve a status for a NetherNet server.
+func ExampleClient_Status() {
+	// Create a client.
+	client := NewClient()
+
+	// Query the server status at the specific address. The address can be an HTTP or HTTPS URL with a port number.
+	status, err := client.Status(context.TODO(), "http://127.0.0.1:19132")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(strconv.Quote(status.ServerName)) // "Dedicated Server"
 }

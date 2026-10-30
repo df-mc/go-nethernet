@@ -276,16 +276,16 @@ func (s *blockingCredentialsSignaling) close() { s.cancel() }
 // testOffer returns a valid offer that reaches the credential lookup step.
 func testOffer(t *testing.T) string {
 	t.Helper()
-	b, err := (description{
-		ice: webrtc.ICEParameters{UsernameFragment: "user", Password: "password"},
-		dtls: webrtc.DTLSParameters{
+	b, err := (Description{
+		ICE: webrtc.ICEParameters{UsernameFragment: "user", Password: "password"},
+		DTLS: webrtc.DTLSParameters{
 			Role: webrtc.DTLSRoleAuto,
 			Fingerprints: []webrtc.DTLSFingerprint{{
 				Algorithm: "sha-256",
 				Value:     "00",
 			}},
 		},
-	}).encode()
+	}).Encode()
 	if err != nil {
 		t.Fatalf("encode offer: %v", err)
 	}
@@ -457,10 +457,8 @@ func TestListenerRemoteCancellationReleasesPendingOffers(t *testing.T) {
 	t.Cleanup(base.close)
 	responses := make(chan Signal, maxListenerNegotiations)
 	l, err := (ListenConfig{
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		NegotiationContext: func(parent context.Context) (context.Context, context.CancelFunc) {
-			return context.WithCancel(parent)
-		},
+		Log:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		NegotiationContext: context.WithCancel,
 	}).Listen(listenerResponseSignaling{base, responses})
 	if err != nil {
 		t.Fatal(err)

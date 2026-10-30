@@ -75,8 +75,6 @@ func main() {
 		if enableTLS {
 			err = srv.ServeTLS(tcp, certFile, keyFile)
 		} else {
-			// We still support listening on plain HTTP to allow use of reverse proxy like Caddy.
-			slog.Warn("listening on plain HTTP. vanilla clients may not be able to connect this server as it always attempt to connect with HTTPS")
 			err = srv.Serve(tcp)
 		}
 		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {

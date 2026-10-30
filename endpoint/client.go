@@ -2,6 +2,7 @@ package endpoint
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,43 @@ type ClientConfig struct {
 	// It is included to the URL path of requests sent to servers.
 	// If empty, a random uint64 is generated and used.
 	NetworkID string
+
+	// ClientInfo contains additional information about the client.
+	// If all fields have non-zero values, it is used to populate URL
+	// query parameters in requests sent by [Client.PingContext] or
+	// [Client.Status].
+	ClientInfo ClientInfo
+}
+
+// ClientInfo represents additional information about the client connecting to servers.
+type ClientInfo struct {
+	// Version identifies the game version of the client.
+	Version string
+	// Protocol identifies the protocol version of the client.
+	Protocol int
+	// Platform identifies the build platform of the client.
+	Platform int
+}
+
+// Valid reports whether all fields in ClientInfo have non-zero values.
+func (c ClientInfo) Valid() bool {
+	return c.Version != "" && c.Protocol != 0 && c.Platform != 0
+}
+
+// zero reports whether all fields in ClientInfo have zero values.
+// It is used to check for malformed or half-complete ClientInfo in [Client.Status].
+func (c ClientInfo) zero() bool {
+	return c.Version == "" && c.Protocol == 0 && c.Platform == 0
+}
+
+// Query returns [url.Values] containing the URL query parameters
+// corresponding to each field in ClientInfo.
+func (c ClientInfo) Query() url.Values {
+	q := make(url.Values)
+	q.Set("version", c.Version)
+	q.Set("protocol", strconv.Itoa(c.Protocol))
+	q.Set("platform", strconv.Itoa(c.Platform))
+	return q
 }
 
 // New returns a new [Client] from the configuration.
@@ -73,17 +111,82 @@ type Client struct {
 	notifiersMu sync.RWMutex
 }
 
+// PingContext sends a ping request to the given address and returns the
+// pong data in the same format used with RakNet transport. It is useful
+// for older code that still expects that format.
+func (c *Client) PingContext(ctx context.Context, address string) ([]byte, error) {
+	status, err := c.Status(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	return status.RakNet(), nil
+}
+
+// Status sends a ping request to the given address and returns the
+// Status reported by the server. The returned Status can also be converted
+// to RakNet-compatible pong data via [Status.RakNet], for use with
+// older code that still expects that format.
+func (c *Client) Status(ctx context.Context, address string) (Status, error) {
+	u, err := parseURL(address)
+	if err != nil {
+		return Status{}, fmt.Errorf("parse address: %w", err)
+	}
+	requestURL := u.JoinPath("/v1/join")
+
+	info := c.conf.ClientInfo
+	if !info.zero() && !info.Valid() {
+		return Status{}, errors.New("nethernet/endpoint: malformed ClientConfig.ClientInfo")
+	}
+	if info.Valid() {
+		q := info.Query()
+		q.Set("id", c.NetworkID())
+		requestURL.RawQuery = q.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return Status{}, fmt.Errorf("make request: %w", err)
+	}
+	req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
+
+	resp, err := c.conf.HTTPClient.Do(req)
+	if err != nil {
+		return Status{}, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var status Status
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			return Status{}, fmt.Errorf("decode response body: %w", err)
+		}
+		return status, nil
+	default:
+		return Status{}, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+	}
+}
+
+// parseURL parses the given network ID as a URL used for making requests
+// to remote servers.
+func parseURL(s string) (*url.URL, error) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, fmt.Errorf("parse network ID as URL: %w", err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
+		return nil, fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", s)
+	}
+	return u, nil
+}
+
 // Signal sends a Signal to the remote endpoint.
 //
 // Only [nethernet.SignalTypeOffer] is supported. The returned SDP answer is delivered
 // to the Dialers registered to this Client.
 func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
-	u, err := url.Parse(signal.NetworkID)
+	u, err := parseURL(signal.NetworkID)
 	if err != nil {
-		return fmt.Errorf("parse network ID as URL: %w", err)
-	}
-	if (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" || u.Port() == "" {
-		return fmt.Errorf("network ID must be a HTTP/HTTPS URL with port: %s", signal.NetworkID)
+		return err
 	}
 
 	switch signal.Type {

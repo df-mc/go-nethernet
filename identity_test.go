@@ -18,7 +18,7 @@ import (
 
 func TestIdentitySignVerifyRoundTrip(t *testing.T) {
 	privateKey := newIdentityTestKey(t)
-	identity, err := GenerateServerIdentity(privateKey, "self")
+	identity, err := ServerIdentity(privateKey, "self")
 	if err != nil {
 		t.Fatalf("GenerateServerIdentity() error = %v", err)
 	}
@@ -28,17 +28,17 @@ func TestIdentitySignVerifyRoundTrip(t *testing.T) {
 	}
 
 	desc := newIdentityTestDescription()
-	if err := identity.sign(desc); err != nil {
+	if desc.Identity, err = identity.Sign(desc); err != nil {
 		t.Fatalf("sign() error = %v", err)
 	}
-	if err := desc.identity.verify(desc, publicKey); err != nil {
+	if err := desc.Identity.Verify(desc, publicKey); err != nil {
 		t.Fatalf("verify() error = %v", err)
 	}
 }
 
 func TestIdentityVerifyRejectsTamperedFingerprint(t *testing.T) {
 	privateKey := newIdentityTestKey(t)
-	identity, err := GenerateServerIdentity(privateKey, "self")
+	identity, err := ServerIdentity(privateKey, "self")
 	if err != nil {
 		t.Fatalf("GenerateServerIdentity() error = %v", err)
 	}
@@ -48,11 +48,11 @@ func TestIdentityVerifyRejectsTamperedFingerprint(t *testing.T) {
 	}
 
 	desc := newIdentityTestDescription()
-	if err := identity.sign(desc); err != nil {
+	if desc.Identity, err = identity.Sign(desc); err != nil {
 		t.Fatalf("sign() error = %v", err)
 	}
-	desc.dtls.Fingerprints[0].Value = "FF:FF:FF:FF"
-	if err := desc.identity.verify(desc, publicKey); err == nil {
+	desc.DTLS.Fingerprints[0].Value = "FF:FF:FF:FF"
+	if err := desc.Identity.Verify(desc, publicKey); err == nil {
 		t.Fatal("verify() succeeded for tampered fingerprint")
 	}
 }
@@ -184,9 +184,9 @@ func TestParsePublicKeyReportsKeyType(t *testing.T) {
 	}
 }
 
-func newIdentityTestDescription() *description {
-	return &description{
-		dtls: webrtc.DTLSParameters{
+func newIdentityTestDescription() *Description {
+	return &Description{
+		DTLS: webrtc.DTLSParameters{
 			Fingerprints: []webrtc.DTLSFingerprint{{
 				Algorithm: "sha-256",
 				Value:     "00:11:22:33:44:55:66:77",

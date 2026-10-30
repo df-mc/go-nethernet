@@ -365,7 +365,6 @@ func (l *Listener) PongData(b []byte) {
 		Hardcore:              false,
 		AcceptsOnlineAuth:     true,
 		AcceptsSelfSignedAuth: true,
-		TransportLayer:        TransportLayerNetherNet,
 		ConnectionType:        4,
 	}
 	l.ServerData(d)

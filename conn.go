@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,7 +49,7 @@ type Conn struct {
 
 	// description is the local session description for the Conn.
 	// newConn builds it from the local parameters of each underlying transport.
-	description *description
+	description *Description
 
 	// publicKey is the public key which identifies the remote entity behind this Conn.
 	publicKey *ecdsa.PublicKey
@@ -497,13 +498,13 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 // matching the 'a=max-message-size' value in the SDP sent by vanilla peer connections.
 const maxMessageSize = 262143
 
-// parseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
-// It transforms the fields of the [sdp.SessionDescription] into a description, which can be
+// ParseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
+// It transforms the fields of the [sdp.SessionDescription] into a Description, which can be
 // used to start ICE, DTLS, and SCTP transports for a Conn.
 //
 // The function ensures for required attributes: 'ice-ufrag', 'ice-pwd','fingerprint', 'setup'
 // and 'max-message-size'. An error may be returned if any of these attributes are missing or invalid.
-func parseDescription(d *sdp.SessionDescription) (*description, error) {
+func ParseDescription(d *sdp.SessionDescription) (*Description, error) {
 	if len(d.MediaDescriptions) != 1 {
 		return nil, fmt.Errorf("unexpected number of media descriptions: %d, expected 1", len(d.MediaDescriptions))
 	}
@@ -531,7 +532,7 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 	}
 	fingerprintAlgorithm, fingerprintValue := fingerprint[0], fingerprint[1]
 
-	var identity *identityData
+	var identity *RemoteIdentity
 	if attr, ok := d.Attribute("identity"); ok {
 		b, err := base64.StdEncoding.DecodeString(attr)
 		if err != nil {
@@ -585,12 +586,12 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 		candidates = append(candidates, candidate)
 	}
 
-	return &description{
-		ice: webrtc.ICEParameters{
+	return &Description{
+		ICE: webrtc.ICEParameters{
 			UsernameFragment: ufrag,
 			Password:         pwd,
 		},
-		dtls: webrtc.DTLSParameters{
+		DTLS: webrtc.DTLSParameters{
 			Role: role,
 			Fingerprints: []webrtc.DTLSFingerprint{
 				{
@@ -599,11 +600,11 @@ func parseDescription(d *sdp.SessionDescription) (*description, error) {
 				},
 			},
 		},
-		sctp: webrtc.SCTPCapabilities{
+		SCTP: webrtc.SCTPCapabilities{
 			MaxMessageSize: uint32(maxMessageSize),
 		},
-		identity:   identity,
-		candidates: candidates,
+		Identity:   identity,
+		Candidates: candidates,
 	}, nil
 }
 
@@ -654,7 +655,7 @@ func (conn *Conn) trickleCandidates(signaling Signaling) error {
 		}
 		// Signal the local candidate in a goroutine so candidate gathering is never blocked by signaling.
 		// It uses [Conn.Context] as the parent context so signaling stops once the connection is closed.
-		go conn.trickleCandidate(signaling, formatICECandidate(int(candidateIndex.Add(1)-1), *candidate, conn.description.ice))
+		go conn.trickleCandidate(signaling, formatICECandidate(int(candidateIndex.Add(1)-1), *candidate, conn.description.ICE, true))
 	})
 	return conn.gatherer.Gather()
 }
@@ -691,28 +692,80 @@ func (conn *Conn) trickleCandidate(signaling Signaling, data string) {
 	}
 }
 
-// description contains parameters necessary for starting ICE, DTLS, and SCTP transport within a Conn.
+// Description contains parameters necessary for starting ICE, DTLS, and SCTP transport within a Conn.
 //
 // It can be created either by parsing a remote [sdp.SessionDescription] or by
 // filling it with local transport parameters before encoding.
 //
 // A negotiator (Listener or Dialer) uses parseDescription after decoding a
 // SignalTypeOffer or SignalTypeAnswer payload into an [sdp.SessionDescription].
-type description struct {
-	ice  webrtc.ICEParameters
-	dtls webrtc.DTLSParameters
-	sctp webrtc.SCTPCapabilities
+type Description struct {
+	ICE  webrtc.ICEParameters
+	DTLS webrtc.DTLSParameters
+	SCTP webrtc.SCTPCapabilities
 
-	identity *identityData
+	Identity *RemoteIdentity
 
-	// candidates are inline ICE candidates included as SDP attributes.
-	candidates []webrtc.ICECandidate
+	// Candidates are inline ICE candidates included as SDP attributes.
+	Candidates []webrtc.ICECandidate
 }
 
-// encode transforms the description into a [sdp.SessionDescription] and encodes them using the [sdp.SessionDescription.Marshal]
+// defaultCandidate returns the ICE candidate to be used as the connection address for the media section in SDP.
+// It returns a zero candidate with false when trickle ICE is enabled or none of the candidates are suitable.
+// See https://webrtc.googlesource.com/src/+/refs/heads/main/api/jsep.cc#43.
+func (desc Description) defaultCandidate() (candidate webrtc.ICECandidate, _ bool) {
+	if len(desc.Candidates) == 0 {
+		return candidate, false
+	}
+	var (
+		currentFamily     uint8
+		currentPreference uint16
+		selected          bool
+	)
+	for _, c := range desc.Candidates {
+		if c.Protocol != webrtc.ICEProtocolUDP || c.Component != uint16(webrtc.ICEComponentRTP) {
+			continue
+		}
+		var family uint8
+		if ip, err := netip.ParseAddr(c.Address); err == nil {
+			if ip.Is4() {
+				family = 4
+			} else {
+				family = 6
+			}
+		}
+		pref := typePreference(c)
+		if (pref <= currentPreference && currentFamily == family) ||
+			(currentFamily == 4 && family == 6) {
+			// Do not use a candidate with a lower or equal preference from the same address family,
+			// or an IPv6 candidate when the current candidate is IPv4.
+			continue
+		}
+		candidate, currentFamily, currentPreference, selected = c, family, pref, true
+	}
+	return candidate, selected
+}
+
+// typePreference returns libwebrtc's default-candidate preference for the given [webrtc.ICECandidate].
+// This preference ranks likely reachability and is distinct from the candidate's ICE priority.
+// See https://webrtc.googlesource.com/src/+/refs/heads/main/api/candidate.h#141.
+func typePreference(candidate webrtc.ICECandidate) uint16 {
+	switch candidate.Typ {
+	case webrtc.ICECandidateTypeHost:
+		return 1
+	case webrtc.ICECandidateTypeSrflx:
+		return 2
+	case webrtc.ICECandidateTypeRelay:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// Encode transforms the Description into a [sdp.SessionDescription] and encodes them using the [sdp.SessionDescription.Marshal]
 // method. It is called by a negotiator (Listener or Dialer) to signal an offer or answer to the remote connection with the local
 // parameters of each transport within a Conn.
-func (desc description) encode() ([]byte, error) {
+func (desc Description) Encode() ([]byte, error) {
 	d := &sdp.SessionDescription{
 		Version: 0x0,
 		Origin: sdp.Origin{
@@ -733,8 +786,8 @@ func (desc description) encode() ([]byte, error) {
 			{Key: sdp.AttrKeyMsidSemantic, Value: " WMS"},
 		},
 	}
-	if desc.identity != nil {
-		b, err := json.Marshal(desc.identity)
+	if desc.Identity != nil {
+		b, err := json.Marshal(desc.Identity)
 		if err != nil {
 			return nil, fmt.Errorf("encode identity assertion: %w", err)
 		}
@@ -757,24 +810,36 @@ func (desc description) encode() ([]byte, error) {
 		},
 	}
 
+	// Use the default candidate's address as the connection address for
+	// the media description whenever possible.
+	if candidate, ok := desc.defaultCandidate(); ok {
+		if ip, err := netip.ParseAddr(candidate.Address); err == nil {
+			if ip.Is6() {
+				media.ConnectionInformation.AddressType = "IP6"
+			}
+			media.MediaName.Port = sdp.RangedPort{Value: int(candidate.Port)}
+			media.ConnectionInformation.Address = &sdp.Address{Address: candidate.Address}
+		}
+	}
+
 	// When Trickle ICE is disabled, local ICE candidates are embedded directly in
 	// the SDP instead of being sent later as separate candidate signals.
 	//
 	// This behavior can be only seen on dedicated servers with the
 	// 'nethernet-disable-trickle-ice' setting property set to 'true' (including Realms).
-	for i, candidate := range desc.candidates {
+	for i, candidate := range desc.Candidates {
 		media.Attributes = append(media.Attributes, sdp.Attribute{
 			Key:   sdp.AttrKeyCandidate,
-			Value: formatICECandidate(i, candidate, desc.ice),
+			Value: formatICECandidate(i, candidate, desc.ICE, false),
 		})
 	}
 
-	media.WithICECredentials(desc.ice.UsernameFragment, desc.ice.Password)
+	media.WithICECredentials(desc.ICE.UsernameFragment, desc.ICE.Password)
 	media.WithValueAttribute(sdp.AttrKeyICEOptions, "trickle") // ice-options:trickle is always present even if the connection is non-trickle
-	for _, fingerprint := range desc.dtls.Fingerprints {
+	for _, fingerprint := range desc.DTLS.Fingerprints {
 		media.WithFingerprint(fingerprint.Algorithm, fingerprint.Value)
 	}
-	media.WithValueAttribute(sdp.AttrKeyConnectionSetup, desc.connectionRole(desc.dtls.Role).String())
+	media.WithValueAttribute(sdp.AttrKeyConnectionSetup, desc.connectionRole(desc.DTLS.Role).String())
 	media.WithValueAttribute(sdp.AttrKeyMID, "0")
 	media.WithValueAttribute("sctp-port", "5000")
 	media.WithValueAttribute("max-message-size", strconv.FormatUint(maxMessageSize+1, 10))
@@ -783,9 +848,9 @@ func (desc description) encode() ([]byte, error) {
 }
 
 // connectionRole returns a [sdp.ConnectionRole] indicating the local DTLS role. It is called
-// by encode to include the role into the media description of local [sdp.SessionDescription]
+// by Encode to include the role into the media description of local [sdp.SessionDescription]
 // as a [sdp.Attribute] of 'setup'.
-func (desc description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole {
+func (desc Description) connectionRole(role webrtc.DTLSRole) sdp.ConnectionRole {
 	switch role {
 	case webrtc.DTLSRoleClient:
 		// The server will send ClientHello to the client.
@@ -829,6 +894,9 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 	if len(dtlsParams.Fingerprints) == 0 {
 		return nil, wrapSignalError(errors.New("local DTLS parameters has no fingerprints"), localDescriptionErrorCode)
 	}
+	for i, fingerprint := range dtlsParams.Fingerprints {
+		dtlsParams.Fingerprints[i].Value = strings.ToUpper(fingerprint.Value)
+	}
 	sctpCapabilities := sctpTransport.GetCapabilities()
 
 	c := &Conn{
@@ -837,10 +905,10 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 		sctp:     sctpTransport,
 		gatherer: gatherer,
 
-		description: &description{
-			ice:  iceParams,
-			dtls: dtlsParams,
-			sctp: sctpCapabilities,
+		description: &Description{
+			ICE:  iceParams,
+			DTLS: dtlsParams,
+			SCTP: sctpCapabilities,
 		},
 
 		candidateReceived: make(chan struct{}),

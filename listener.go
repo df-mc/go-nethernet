@@ -62,7 +62,7 @@ type ListenConfig struct {
 	// It may be called concurrently for different connections.
 	IssueServerIdentity func(ctx context.Context) (*Identity, error)
 
-	// VerifyClientToken verifies the token contained in a client's identity
+	// VerifyClientIdentity verifies the token contained in a client's identity
 	// assertion and returns the public key populated in its 'cpk' claim.
 	// The returned public key is used to verify the fingerprint assertion
 	// carried in the client offer's 'a=identity' attribute.
@@ -92,7 +92,7 @@ type ListenConfig struct {
 	// issuance.
 	//
 	// It may be called concurrently for different connections.
-	VerifyClientToken func(ctx context.Context, token string) (*ecdsa.PublicKey, error)
+	VerifyClientIdentity func(ctx context.Context, identity *RemoteIdentity) (*ecdsa.PublicKey, error)
 
 	// AllowAnonymous determines whether SDP offers without an 'a=identity'
 	// attribute are accepted.
@@ -132,6 +132,14 @@ type ListenConfig struct {
 
 // Listen listens on the local network ID specified by the Signaling implementation. It returns a Listener
 // that may be used to accept established connections from [Listener.Accept]. Signaling will be used to notify
+// incoming Signals from remote connections. It is equivalent to calling ListenConfig{}.Listen.
+func Listen(signaling Signaling) (*Listener, error) {
+	var c ListenConfig
+	return c.Listen(signaling)
+}
+
+// Listen listens on the local network ID specified by the Signaling implementation. It returns a Listener
+// that may be used to accept established connections from [Listener.Accept]. Signaling will be used to notify
 // incoming Signals from remote connections.
 func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 	if conf.Log == nil {
@@ -154,16 +162,16 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 			conf.Log.Debug("newly generated a private key for this listener", "fingerprint", ssh.FingerprintSHA256(pub))
 		}
 		conf.IssueServerIdentity = func(ctx context.Context) (*Identity, error) {
-			return GenerateServerIdentity(privateKey, "self")
+			return ServerIdentity(privateKey, "self")
 		}
 	}
-	if conf.VerifyClientToken == nil {
-		conf.VerifyClientToken = func(ctx context.Context, token string) (*ecdsa.PublicKey, error) {
+	if conf.VerifyClientIdentity == nil {
+		conf.VerifyClientIdentity = func(ctx context.Context, identity *RemoteIdentity) (*ecdsa.PublicKey, error) {
 			// We intentionally do not verify the JWT signature here and instead
 			// delegate that to the Minecraft protocol layer. Bedrock listeners should
 			// verify the GameServerToken included in the Login packet and ensure that
 			// its 'cpk' claim contains the same public key.
-			return claimPublicKey(token, false)
+			return identity.PublicKey(false)
 		}
 	}
 
@@ -407,14 +415,14 @@ func (n *listenerNegotiator) unregister() {
 }
 
 // handleOffer handles an incoming Signal of SignalTypeOffer. It parses the data of Signal into [sdp.SessionDescription]
-// and transforms into remote description for later use in negotiation. An answer will be created from local parameters of
+// and transforms into remote Description for later use in negotiation. An answer will be created from local parameters of
 // each transport and signaled back to the remote connection referenced in the offer.
 func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	d := &sdp.SessionDescription{}
 	if err := d.UnmarshalString(signal.Data); err != nil {
 		return wrapSignalError(fmt.Errorf("decode offer: %w", err), ErrorCodeFailedToSetRemoteDescription)
 	}
-	desc, err := parseDescription(d)
+	desc, err := ParseDescription(d)
 	if err != nil {
 		return wrapSignalError(fmt.Errorf("parse offer: %w", err), ErrorCodeFailedToSetRemoteDescription)
 	}
@@ -460,31 +468,35 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	}()
 	disableTrickleICE := shouldDisableTrickleICE(n.conf.DisableTrickleICE, n.signaling)
 	if disableTrickleICE {
-		c.description.candidates, err = c.gatherCandidates(ctx)
+		c.description.Candidates, err = c.gatherCandidates(ctx)
 		if err != nil {
 			return wrapSignalError(fmt.Errorf("gather local candidates: %w", err), ErrorCodeICE)
 		}
+		if len(c.description.Candidates) == 0 {
+			// We may have run out of UDP ports configured in the WebRTC API.
+			return wrapSignalError(errors.New("no local candidates were gathered"), ErrorCodeICE)
+		}
 	}
-	for _, candidate := range desc.candidates {
+	for _, candidate := range desc.Candidates {
 		// Non-trickle ICE connection may include candidates in a single SDP.
 		if err := c.addRemoteCandidate(candidate); err != nil {
 			return wrapSignalError(fmt.Errorf("add inline candidate: %w", err), ErrorCodeFailedToSetRemoteDescription)
 		}
 	}
-	c.description.dtls.Role = n.answererRole(desc.dtls.Role)
+	c.description.DTLS.Role = n.answererRole(desc.DTLS.Role)
 
-	if desc.identity != nil {
-		publicKey, err := n.conf.VerifyClientToken(ctx, desc.identity.Assertion.Token)
+	if desc.Identity != nil {
+		publicKey, err := n.conf.VerifyClientIdentity(ctx, desc.Identity)
 		if err != nil {
 			return wrapSignalError(fmt.Errorf("verify client token: %w", err), ErrorCodeIdentityNotAllowed)
 		}
 		if publicKey == nil {
-			publicKey, err = claimPublicKey(desc.identity.Assertion.Token, false)
+			publicKey, err = desc.Identity.PublicKey(false)
 			if err != nil {
 				return wrapSignalError(fmt.Errorf("claim public key: %w", err), ErrorCodeIdentityNotAllowed)
 			}
 		}
-		if err := desc.identity.verify(desc, publicKey); err != nil {
+		if err := desc.Identity.Verify(desc, publicKey); err != nil {
 			return wrapSignalError(fmt.Errorf("verify identity assertion: %w", err), ErrorCodeIdentityNotAllowed)
 		}
 		c.publicKey = publicKey
@@ -499,7 +511,8 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	if err != nil {
 		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
 	}
-	if err := identity.sign(c.description); err != nil {
+	c.description.Identity, err = identity.Sign(c.description)
+	if err != nil {
 		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
 	}
 
@@ -519,7 +532,7 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 	})
 
 	// Encode an answer using the local parameters!
-	answer, err := c.description.encode()
+	answer, err := c.description.Encode()
 	if err != nil {
 		return wrapSignalError(fmt.Errorf("encode answer: %w", err), ErrorCodeFailedToCreateAnswer)
 	}
@@ -620,9 +633,9 @@ func (n *listenerNegotiator) log() *slog.Logger {
 }
 
 // finaliseConn finalises the Conn. Once an ICE candidate for the Conn has been signaled from the remote
-// connection, it starts the transports of the Conn using the remote description and a [context.Context]
+// connection, it starts the transports of the Conn using the remote Description and a [context.Context]
 // returned from [ListenConfig.ConnContext].
-func (n *listenerNegotiator) finaliseConn(conn *Conn, d *description, channelsReady <-chan struct{}) (err error) {
+func (n *listenerNegotiator) finaliseConn(conn *Conn, d *Description, channelsReady <-chan struct{}) (err error) {
 	var (
 		ctx    context.Context
 		parent = n.Context()
@@ -682,27 +695,23 @@ func (n *listenerNegotiator) finaliseConn(conn *Conn, d *description, channelsRe
 }
 
 // startTransports starts ICE as [webrtc.ICERoleControlled], then starts DTLS
-// and SCTP using the remote description. It blocks until the remote peer has
+// and SCTP using the remote Description. It blocks until the remote peer has
 // created both 'ReliableDataChannel' and 'UnreliableDataChannel'. The provided
 // [context.Context] is used to control the deadline.
-func (n *listenerNegotiator) startTransports(ctx context.Context, conn *Conn, d *description, channelsReady <-chan struct{}) error {
+func (n *listenerNegotiator) startTransports(ctx context.Context, conn *Conn, d *Description, channelsReady <-chan struct{}) error {
 	conn.log.Debug("starting ICE transport as controlled")
 	iceRole := webrtc.ICERoleControlled
-	if err := conn.ice.StartContext(ctx, nil, d.ice, &iceRole); err != nil {
+	if err := conn.ice.StartContext(ctx, nil, d.ICE, &iceRole); err != nil {
 		return fmt.Errorf("start ICE: %w", err)
 	}
 
-	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", d.dtls.Role.String()))
-	if err := conn.dtls.StartContext(ctx, d.dtls); err != nil {
+	conn.log.Debug("starting DTLS transport", slog.String("remoteRole", d.DTLS.Role.String()))
+	if err := conn.dtls.StartContext(ctx, d.DTLS); err != nil {
 		return fmt.Errorf("start DTLS: %w", err)
 	}
 
 	conn.log.Debug("starting SCTP transport")
-	if err := withContextCancel(ctx, func() error {
-		return conn.sctp.Start(d.sctp)
-	}, func() {
-		_ = conn.sctp.Stop()
-	}); err != nil {
+	if err := conn.sctp.StartContext(ctx, d.SCTP); err != nil {
 		return fmt.Errorf("start SCTP: %w", err)
 	}
 	conn.maxSegmentPayload.Store(conn.sctp.GetCapabilities().MaxMessageSize - 1)
@@ -741,7 +750,15 @@ func (l *Listener) Accept() (net.Conn, error) {
 }
 
 // Addr returns an Addr that represents the local network ID of the Listener.
+// If the Signaling implements an Addr() method, it will return that value instead.
 func (l *Listener) Addr() net.Addr {
+	if a, ok := l.signaling.(interface {
+		Addr() net.Addr
+	}); ok {
+		if addr := a.Addr(); addr != nil {
+			return addr
+		}
+	}
 	return &Addr{NetworkID: l.networkID}
 }
 
@@ -830,7 +847,7 @@ func (l *Listener) NotifySignal(signal *Signal) bool {
 		n, ok := l.negotiations[key]
 		if !ok {
 			if signal.Type != SignalTypeOffer {
-				l.conf.Log.Error("received non-offer signal for a non-existing negotiation", "signal", signal.String(), "networkID", signal.NetworkID)
+				l.conf.Log.Debug("received non-offer signal for a non-existing negotiation", "signal", signal.String(), "networkID", signal.NetworkID)
 				l.negotiationsMu.Unlock()
 				return false
 			}
@@ -866,26 +883,6 @@ func (l *Listener) monitorSignaling() {
 	case <-l.signaling.Context().Done():
 		l.conf.Log.Warn("signaling context canceled", slog.Any("error", context.Cause(l.signaling.Context())))
 		_ = l.Close()
-	}
-}
-
-// withContextCancel calls f in a goroutine and returns early when ctx is done.
-// If cancel is non-nil, it is called when ctx is done to help unblock f.
-func withContextCancel(ctx context.Context, f func() error, cancel func()) error {
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- f()
-	}()
-	select {
-	case <-ctx.Done():
-		if cancel != nil {
-			cancel()
-		}
-		// Ensure the goroutine can complete without blocking even if it returns later.
-		go func() { <-errCh }()
-		return ctx.Err()
-	case err := <-errCh:
-		return err
 	}
 }
 
