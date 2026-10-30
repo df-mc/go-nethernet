@@ -257,8 +257,7 @@ func TestSendQueueRetainsMessagesBeyondBufferedAmountBudget(t *testing.T) {
 	}
 }
 
-// A message the channel has room for reaches it before push returns, so an
-// immediate close cannot drop it.
+// A message the channel has room for reaches it before push returns.
 func TestSendQueuePushSendsBeforeReturning(t *testing.T) {
 	fake := newFakeSendChannel()
 	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
