@@ -155,11 +155,11 @@ func TestSendQueueBufferedAmountBudget(t *testing.T) {
 	}
 
 	// Acknowledging 40 bytes crosses the threshold (80 -> 40) and resumes
-	// draining for exactly one more message.
+	// sending for exactly one more message.
 	fake.release(40)
 	wait(t, fake.sentCh, "message #2")
 
-	// Acknowledging the rest (80 -> 0) resumes draining for the remainder.
+	// Acknowledging the rest (80 -> 0) resumes sending for the remainder.
 	fake.release(80)
 	wait(t, fake.sentCh, "message #3")
 	wait(t, fake.sentCh, "message #4")
@@ -214,7 +214,7 @@ func TestSendQueueWaitsForOpen(t *testing.T) {
 	}
 
 	fake.open()
-	q.signal()
+	q.retry()
 	if got := wait(t, fake.sentCh, "queued message"); !bytes.Equal(got, []byte("queued")) {
 		t.Fatalf("sent %q, want queued", got)
 	}
@@ -223,7 +223,7 @@ func TestSendQueueWaitsForOpen(t *testing.T) {
 func TestSendQueueRetainsMessagesBeyondBufferedAmountBudget(t *testing.T) {
 	fake := newFakeSendChannel()
 	fake.budget = 100
-	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
+	fake.setBuffered(200) // Over the budget: nothing can be sent yet.
 	q := newSendQueue(t.Context(), fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
@@ -257,9 +257,24 @@ func TestSendQueueRetainsMessagesBeyondBufferedAmountBudget(t *testing.T) {
 	}
 }
 
+// A message the channel has room for reaches it before push returns, so an
+// immediate close cannot drop it.
+func TestSendQueuePushSendsBeforeReturning(t *testing.T) {
+	fake := newFakeSendChannel()
+	q := newSendQueue(t.Context(), fake, maxSendBufferedAmount, nil)
+
+	if err := q.push([]byte("last")); err != nil {
+		t.Fatalf("push error = %v, want nil", err)
+	}
+	q.close(net.ErrClosed)
+	if got := fake.sentCount(); got != 1 {
+		t.Fatalf("sent count = %d, want 1", got)
+	}
+}
+
 func TestSendQueueCloseDropsPendingMessages(t *testing.T) {
 	fake := newFakeSendChannel()
-	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
+	fake.setBuffered(200) // Over the budget: nothing can be sent yet.
 	q := newSendQueue(t.Context(), fake, 100, nil)
 
 	if err := q.push(make([]byte, 40)); err != nil {
@@ -285,8 +300,8 @@ func TestSendQueueSendErrorClosesQueue(t *testing.T) {
 	q := newSendQueue(t.Context(), fake, 100, func(err error) {
 		failed <- err
 	})
-	if err := q.push([]byte("doomed")); err != nil {
-		t.Fatalf("push error = %v, want nil", err)
+	if err := q.push([]byte("doomed")); !errors.Is(err, sendErr) {
+		t.Fatalf("push error = %v, want %v", err, sendErr)
 	}
 	if err := wait(t, failed, "failure callback"); !errors.Is(err, sendErr) {
 		t.Fatalf("failure callback error = %v, want %v", err, sendErr)
@@ -344,7 +359,7 @@ func TestConnWriteQueuesWhileDataChannelIsFull(t *testing.T) {
 	defer cancel(nil)
 
 	fake := newFakeSendChannel()
-	fake.setBuffered(200) // Over the budget: the drainer pauses immediately.
+	fake.setBuffered(200) // Over the budget: nothing can be sent yet.
 	q := newSendQueue(t.Context(), fake, 100, nil)
 	defer q.close(net.ErrClosed)
 
@@ -394,10 +409,10 @@ func TestConnSendCapsSegmentsAtLocalMaxMessageSize(t *testing.T) {
 }
 
 func TestSendQueueStopsWhenConnectionCloses(t *testing.T) {
-	for _, beforeStart := range []bool{false, true} {
+	for _, alreadyClosed := range []bool{false, true} {
 		name := "while waiting for channel"
-		if beforeStart {
-			name = "before queue starts"
+		if alreadyClosed {
+			name = "created after connection closed"
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(t.Context())
@@ -405,12 +420,12 @@ func TestSendQueueStopsWhenConnectionCloses(t *testing.T) {
 			defer cancel(cause)
 			fake := newFakeSendChannel()
 			fake.state = webrtc.DataChannelStateConnecting
-			if beforeStart {
+			if alreadyClosed {
 				cancel(cause)
 			}
 			q := newSendQueue(ctx, fake, 100, nil)
 			defer q.close(net.ErrClosed)
-			if !beforeStart {
+			if !alreadyClosed {
 				if err := q.push([]byte("pending")); err != nil {
 					t.Fatal(err)
 				}

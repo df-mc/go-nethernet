@@ -174,14 +174,14 @@ func (conn *Conn) Context() context.Context {
 	return conn.ctx
 }
 
-// Write queues the data on the 'ReliableDataChannel'. See [Conn.Send].
+// Write writes the data to the 'ReliableDataChannel'. See [Conn.Send].
 func (conn *Conn) Write(b []byte) (n int, err error) {
 	return conn.Send(b, MessageReliabilityReliable)
 }
 
-// Send queues the data on the data channel for the given MessageReliability, split into
-// segments of at most the negotiated size. Delivery is asynchronous: a nil error means the
-// data was accepted in order, and it is sent as the channel opens and gains room.
+// Send writes the data to the data channel for the given MessageReliability, split into
+// segments of at most the negotiated size. Segments the channel has no room for yet are
+// queued and sent in order as it opens or gains room, so a nil error does not mean delivery.
 func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err error) {
 	select {
 	case <-conn.ctx.Done():

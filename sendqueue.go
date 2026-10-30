@@ -31,80 +31,63 @@ type sendQueue struct {
 	maxBuffered uint64
 	// fail is called once with the error that made the channel unusable.
 	fail func(error)
-	// wake nudges the drain goroutine; it never blocks the sender.
-	wake chan struct{}
+
+	// flushMu serializes flushes so messages reach the channel in queue order.
+	flushMu sync.Mutex
 
 	mu     sync.Mutex
 	queue  [][]byte
 	closed error
 }
 
-// newSendQueue starts a queue owned by ctx.
+// newSendQueue returns a queue that closes with the cause of ctx once ctx is done.
 func newSendQueue(ctx context.Context, channel sendChannel, maxBuffered uint64, fail func(error)) *sendQueue {
 	q := &sendQueue{
 		channel:     channel,
 		maxBuffered: maxBuffered,
 		fail:        fail,
-		wake:        make(chan struct{}, 1),
 	}
-	channel.OnBufferedAmountLow(q.signal)
-	go q.run(ctx)
+	channel.OnBufferedAmountLow(q.retry)
+	context.AfterFunc(ctx, func() { q.close(context.Cause(ctx)) })
 	return q
 }
 
-// push queues b for delivery. It returns the closing error once the queue is closed.
+// push queues b and sends whatever the channel has room for before returning.
+// It returns the closing error once the queue is closed.
 func (q *sendQueue) push(b []byte) error {
 	if size := uint64(len(b)); size > q.maxBuffered {
 		return fmt.Errorf("message exceeds data channel send buffer: %d > %d", size, q.maxBuffered)
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.closed != nil {
+		defer q.mu.Unlock()
 		return q.closed
 	}
 	q.queue = append(q.queue, b)
-	q.signal()
-	return nil
+	q.mu.Unlock()
+	return q.flush()
 }
 
-// signal asks the drain goroutine to retry, e.g. when the channel opened or
-// its buffered amount dropped.
-func (q *sendQueue) signal() {
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
-}
-
-// run drains queued messages until the queue or its owner closes.
-func (q *sendQueue) run(ctx context.Context) {
-	stop := context.AfterFunc(ctx, func() { q.close(context.Cause(ctx)) })
-	defer stop()
-	for range q.wake {
-		if q.drain() != nil {
-			return
-		}
-	}
+// retry flushes the queue once the channel opened or its buffered amount dropped.
+func (q *sendQueue) retry() {
+	_ = q.flush()
 }
 
 // close drops queued messages and makes further pushes return cause.
 func (q *sendQueue) close(cause error) {
 	q.mu.Lock()
-	q.closeLocked(cause)
-	q.mu.Unlock()
-	q.signal()
-}
-
-func (q *sendQueue) closeLocked(cause error) {
+	defer q.mu.Unlock()
 	if q.closed == nil {
 		q.closed = cause
 	}
 	q.queue = nil
 }
 
-// drain sends queued messages in order while the channel is open and the next
+// flush sends queued messages in order while the channel is open and the next
 // message fits its send buffer. It returns the closing error once closed.
-func (q *sendQueue) drain() error {
+func (q *sendQueue) flush() error {
+	q.flushMu.Lock()
+	defer q.flushMu.Unlock()
 	for {
 		q.mu.Lock()
 		if q.closed != nil {

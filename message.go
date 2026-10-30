@@ -86,7 +86,7 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 	ch := &dataChannel{
 		DataChannel: channel,
 		out: newSendQueue(conn.ctx, channel, maxSendBufferedAmount, func(err error) {
-			// Closing tears down this queue too, so do it off the drain goroutine.
+			// Closing stops the transports, so keep it off the sending goroutine.
 			go conn.close(fmt.Errorf("nethernet: send on data channel %q: %w", channel.Label(), err))
 		}),
 		reliability: reliability,
@@ -98,7 +98,7 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 		close:   make(chan struct{}),
 	}
 	ch.OnOpen(func() {
-		ch.out.signal()
+		ch.out.retry()
 		if onOpen != nil {
 			onOpen()
 		}

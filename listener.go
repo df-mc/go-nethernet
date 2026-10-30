@@ -519,7 +519,7 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 					}
 				}))
 				if existing := c.storeChannel(r, ch); existing != nil {
-					// The duplicate is not tracked by the Conn, so release its queue here.
+					// The duplicate is not tracked by the Conn, so close it here.
 					_ = ch.Close()
 					go c.close(fmt.Errorf("data channel created for same reliability parameters: %q", r.Parameters().Label))
 				}
