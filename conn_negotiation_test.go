@@ -18,81 +18,64 @@ func TestDialListenerNonTrickleICE(t *testing.T) {
 	testDialListener(t, true)
 }
 
+// A write past the 16 MiB send budget to a stalled receiver is held back in
+// the queue, then delivered in order once the receiver reads again.
 func TestSendQueueDrainsBeyondWebRTCBufferedAmountBudget(t *testing.T) {
 	client, server := newMemorySignalingPair("1", "2")
-	defer client.close()
-	defer server.close()
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, conn, serverConn := dialAcceptedListener(t, client, server)
 
-	l, err := (ListenConfig{AllowAnonymous: true}).Listen(server)
-	if err != nil {
-		t.Fatalf("Listen() error = %v", err)
+	// The server does not read this yet, so its read loop blocks and the
+	// payload behind it can only fill the SCTP receive window.
+	stall := []byte("stall")
+	if _, err := conn.Write(stall); err != nil {
+		t.Fatalf("Write(stall) error = %v", err)
 	}
-	defer l.Close()
-
-	accepted := make(chan net.Conn, 1)
-	acceptErr := make(chan error, 1)
-	go func() {
-		conn, err := l.Accept()
-		if err != nil {
-			acceptErr <- err
-			return
-		}
-		accepted <- conn
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
-	defer cancel()
-
-	conn, err := (Dialer{}).DialContext(ctx, server.NetworkID(), client)
-	if err != nil {
-		t.Fatalf("DialContext() error = %v", err)
-	}
-	defer conn.Close()
-
-	var serverConn *Conn
-	select {
-	case acceptedConn := <-accepted:
-		serverConn = acceptedConn.(*Conn)
-	case err := <-acceptErr:
-		t.Fatalf("Accept() error = %v", err)
-	case <-ctx.Done():
-		t.Fatalf("Accept() timed out: %v", ctx.Err())
-	}
-	defer serverConn.Close()
-
-	payload := make([]byte, maxSendBufferedAmount+maxMessageSize)
+	// Exceed the budget by more than Pion's default 1 MiB receive window.
+	payload := make([]byte, maxSendBufferedAmount+4<<20)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
+	if n, err := conn.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("Write(payload) = (%d, %v), want (%d, nil)", n, err, len(payload))
+	}
 
-	received := make(chan []byte, 1)
+	ch := conn.channel(MessageReliabilityReliable)
+	if got := ch.BufferedAmount(); got > maxSendBufferedAmount {
+		t.Fatalf("buffered amount = %d, want at most %d", got, maxSendBufferedAmount)
+	}
+	ch.out.mu.Lock()
+	held := len(ch.out.queue)
+	ch.out.mu.Unlock()
+	if held == 0 {
+		t.Fatal("no segments held back while the receiver is stalled")
+	}
+
+	packets := make(chan []byte, 2)
 	readErr := make(chan error, 1)
 	go func() {
-		packet, err := serverConn.ReadPacket()
-		if err != nil {
-			readErr <- err
-			return
+		for range 2 {
+			packet, err := serverConn.ReadPacket()
+			if err != nil {
+				readErr <- err
+				return
+			}
+			packets <- packet
 		}
-		received <- packet
 	}()
-
-	n, err := conn.Write(payload)
-	if err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-	if n != len(payload) {
-		t.Fatalf("Write() = %d, want %d", n, len(payload))
-	}
-
-	select {
-	case got := <-received:
-		if !bytes.Equal(got, payload) {
-			t.Fatalf("ReadPacket() returned %d corrupted bytes", len(got))
+	timeout := time.After(30 * time.Second)
+	for i, want := range [][]byte{stall, payload} {
+		select {
+		case got := <-packets:
+			if !bytes.Equal(got, want) {
+				t.Fatalf("packet #%d = %d bytes, want %d matching bytes", i, len(got), len(want))
+			}
+		case err := <-readErr:
+			t.Fatalf("ReadPacket() error = %v", err)
+		case <-timeout:
+			t.Fatalf("timed out waiting for packet #%d with %d segments held back", i, held)
 		}
-	case err := <-readErr:
-		t.Fatalf("ReadPacket() error = %v", err)
-	case <-ctx.Done():
-		t.Fatalf("ReadPacket() timed out: %v", ctx.Err())
 	}
 }
 
