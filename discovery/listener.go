@@ -22,8 +22,14 @@ type ListenConfig struct {
 	// same network. In NetherNet, it is explicitly defined as a string, but in LAN discovery it is sent as an uint8.
 	NetworkID uint64
 
-	// BroadcastAddress specifies the UDP broadcast address for sending request packets to the servers in
-	// the same network. If nil, an *net.UDPAddr with net.IPv4bcast and port 7551 will be used.
+	// BroadcastAddress specifies the UDP address request packets are sent to. If nil and the Listener
+	// is not bound to port 7551, requests go out the way vanilla clients send them: to port 7551 at the
+	// directed broadcast address of every up IPv4 interface, and to the IPv6 all-nodes link-local
+	// multicast group [ff02::1]:7551 on every up, multicast-capable IPv6 interface. A Listener bound to
+	// port 7551 only answers requests and opens no IPv6 socket.
+	//
+	// Receiving IPv6 multicast on Android requires a MulticastLock held by the app; this package cannot
+	// acquire one, so inbound IPv6 discovery there is the consumer's responsibility.
 	BroadcastAddress *net.UDPAddr
 
 	// Log is used for logging messages at various levels.
@@ -56,30 +62,30 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 		return nil, fmt.Errorf("unexpected local address type %T", conn.LocalAddr())
 	}
 
-	if conf.BroadcastAddress == nil && localAddr.Port != DefaultPort {
-		// If the port for the address is 7551, it means no applications are listening on this network
-		// and server discovery using limited broadcast on net.IPv4bcast is not meaningful.
-		conf.BroadcastAddress = &net.UDPAddr{
-			IP:   net.IPv4bcast,
-			Port: DefaultPort,
-		}
-	}
-
 	l := &Listener{
 		conn: conn,
 
 		conf: conf,
+		// A Listener on port 7551 answers requests; any other port discovers servers.
+		directedBroadcast: conf.BroadcastAddress == nil && localAddr.Port != DefaultPort,
 
 		addresses: make(map[uint64]address),
 
 		notifiers: make(map[uint32]nethernet.Notifier),
-		responses: make(map[uint64][]byte),
+		responses: make(map[uint64]response),
 
 		closed: make(chan struct{}),
+	}
+	// A discovering Listener also multicasts over IPv6 as vanilla does; the responder role does not.
+	if l.directedBroadcast {
+		l.conn6 = openMulticast6(conf.Log)
 	}
 
 	go l.listen()
 	go l.background()
+	if l.conn6 != nil {
+		go l.listen6()
+	}
 
 	return l, nil
 }
@@ -96,6 +102,11 @@ type Listener struct {
 
 	// conf is the ListenConfig used for [ListenConfig.Listen].
 	conf ListenConfig
+	// directedBroadcast sends requests to each interface's directed broadcast address.
+	directedBroadcast bool
+	// conn6 is the IPv6 socket a discovering Listener multicasts requests to and reads responses on.
+	// It is nil in the responder role and when the host has no usable IPv6.
+	conn6 multicast6Conn
 
 	// pongData atomically stores the application data for responding to the clients
 	// broadcasting RequestPacket with a ResponsePacket containing the same data.
@@ -103,11 +114,8 @@ type Listener struct {
 	// and instead []byte.
 	pongData atomic.Pointer[[]byte]
 
-	// addresses stores a map whose keys are NetherNet network IDs and the value
-	// is an address struct, which stores the UDP address for the NetherNet network
-	// ID along with the timestamp for expiring inactivity addresses. It is guarded
-	// by addressesMu for atomic access in concurrent goroutines like background and
-	// handlePacket.
+	// addresses maps NetherNet network IDs to the UDP address that last sent a
+	// response or message, with its time for expiry. It is guarded by addressesMu.
 	addresses   map[uint64]address
 	addressesMu sync.RWMutex
 
@@ -118,9 +126,9 @@ type Listener struct {
 	notifiers   map[uint32]nethernet.Notifier
 	notifiersMu sync.RWMutex
 
-	// responses stores a map whose keys are NetherNet network IDs which value is an
-	// application-specific data sent as ResponsePacket from the servers in the network.
-	responses   map[uint64][]byte
+	// responses maps NetherNet network IDs to the application data each server
+	// last answered with, and when.
+	responses   map[uint64]response
 	responsesMu sync.RWMutex
 
 	// closed is a channel that is closed when the Listener closes.
@@ -142,9 +150,10 @@ func (l *Listener) Signal(ctx context.Context, signal *nethernet.Signal) error {
 			return fmt.Errorf("parse network ID as uint64: %w", err)
 		}
 
-		l.addressesMu.RLock()
+		l.addressesMu.Lock()
+		l.deleteInactiveAddressesLocked(time.Now())
 		addr, ok := l.addresses[networkID]
-		l.addressesMu.RUnlock()
+		l.addressesMu.Unlock()
 
 		if !ok {
 			return fmt.Errorf("no address found for network ID: %d", networkID)
@@ -195,14 +204,33 @@ func (l *Listener) NetworkID() string {
 	return strconv.FormatUint(l.conf.NetworkID, 10)
 }
 
-// Responses returns the responses sent from servers in the same network during LAN discovery
-// using RequestPacket with the broadcast address specified in [ListenConfig.BroadcastAddress].
+// Responses returns the application data of servers that answered a RequestPacket broadcast to
+// [ListenConfig.BroadcastAddress] within the last five seconds, as vanilla lists LAN worlds.
 func (l *Listener) Responses() map[uint64][]byte {
+	return l.responsesAt(time.Now())
+}
+
+// responsesAt drops responses older than responseLifetime at now and returns the rest.
+func (l *Listener) responsesAt(now time.Time) map[uint64][]byte {
 	l.responsesMu.Lock()
 	defer l.responsesMu.Unlock()
-	// As Listener.responses are continuously supposed to be written by Listener.background,
-	// we return a clone of the map.
-	return maps.Clone(l.responses)
+	maps.DeleteFunc(l.responses, func(_ uint64, r response) bool {
+		return now.Sub(r.t) > responseLifetime
+	})
+	responses := make(map[uint64][]byte, len(l.responses))
+	for id, r := range l.responses {
+		responses[id] = r.data
+	}
+	return responses
+}
+
+// responseLifetime is how long vanilla keeps a LAN world listed after its latest response.
+const responseLifetime = 5 * time.Second
+
+// response is one server's latest application data and when it arrived.
+type response struct {
+	data []byte
+	t    time.Time
 }
 
 // listen continuously reads packets received in the conn and calls handlePacket.
@@ -226,9 +254,15 @@ func (l *Listener) listen() {
 // maxUDPPacketSize is 65,535 bytes, the maximum UDP payload size.
 const maxUDPPacketSize = 65535
 
-// write writes the packet to the destination address using the network ID of Listener.
+// write writes the packet to the destination address using the network ID of Listener. An IPv6
+// destination goes out the IPv6 socket when one is open, so a peer discovered over multicast is
+// answered on the same transport that found it.
 func (l *Listener) write(pk Packet, addr net.Addr) error {
 	b := Marshal(pk, l.conf.NetworkID)
+	if l.conn6 != nil && isIPv6Addr(addr) {
+		_, err := l.conn6.WriteTo(b, nil, addr)
+		return err
+	}
 	_, err := l.conn.WriteTo(b, addr)
 	return err
 }
@@ -245,18 +279,14 @@ func (l *Listener) handlePacket(data []byte, addr net.Addr) error {
 		return nil
 	}
 
-	l.addressesMu.Lock()
-	a, ok := l.addresses[senderID]
-	if !ok {
-		a = address{
-			networkID: senderID,
-		}
+	// Like vanilla, only responses and messages from a non-zero sender locate a peer.
+	if _, request := pk.(*RequestPacket); !request && senderID != 0 {
+		now := time.Now()
+		l.addressesMu.Lock()
+		l.deleteInactiveAddressesLocked(now)
+		l.addresses[senderID] = address{networkID: senderID, t: now, addr: addr}
+		l.addressesMu.Unlock()
 	}
-	// Update or set the address and timestamp for expiring them in deleteInactiveAddresses.
-	a.addr = addr
-	a.t = time.Now()
-	l.addresses[senderID] = a
-	l.addressesMu.Unlock()
 
 	switch pk := pk.(type) {
 	case *RequestPacket:
@@ -287,11 +317,10 @@ func (l *Listener) handleRequest(addr net.Addr) error {
 	return nil
 }
 
-// handleResponse handles a ResponsePacket sent from the servers.
-// It stores its ApplicationData to the responses atomically along with the sender ID.
+// handleResponse records a server's ApplicationData and when it arrived.
 func (l *Listener) handleResponse(pk *ResponsePacket, senderID uint64) error {
 	l.responsesMu.Lock()
-	l.responses[senderID] = pk.ApplicationData
+	l.responses[senderID] = response{data: pk.ApplicationData, t: time.Now()}
 	l.responsesMu.Unlock()
 
 	return nil
@@ -389,6 +418,11 @@ func (l *Listener) Close() (err error) {
 	l.once.Do(func() {
 		close(l.closed)
 		err = l.conn.Close()
+		if l.conn6 != nil {
+			if cerr := l.conn6.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
+		}
 
 		l.notifiersMu.Lock()
 		clear(l.notifiers)
@@ -397,8 +431,7 @@ func (l *Listener) Close() (err error) {
 	return err
 }
 
-// background continuously broadcasts RequestPacket and calls deleteInactiveAddresses
-// at 2 seconds interval until the Listener closes.
+// background broadcasts a RequestPacket at vanilla's 2 second interval until the Listener closes.
 func (l *Listener) background() {
 	ticker := time.NewTicker(time.Second * 2)
 	defer ticker.Stop()
@@ -408,27 +441,89 @@ func (l *Listener) background() {
 		case <-l.closed:
 			return
 		case <-ticker.C:
-			l.deleteInactiveAddresses()
-
-			if l.conf.BroadcastAddress != nil {
-				if err := l.write(&RequestPacket{}, l.conf.BroadcastAddress); err != nil {
-					if !errors.Is(err, net.ErrClosed) {
-						l.conf.Log.Error("error broadcasting request", slog.Any("error", err))
+			for _, addr := range l.broadcastAddresses() {
+				if err := l.write(&RequestPacket{}, addr); err != nil {
+					if errors.Is(err, net.ErrClosed) {
+						return
 					}
+					l.conf.Log.Debug("error broadcasting request", slog.Any("to", addr), slog.Any("error", err))
 				}
+			}
+			if l.conn6 != nil {
+				l.broadcastRequest6()
 			}
 		}
 	}
 }
 
-// deleteInactiveAddresses deletes inactive addresses mapped to NetherNet IDs. It specifically
-// removes if the address was not known for sending packets in the last 15 seconds.
-func (l *Listener) deleteInactiveAddresses() {
-	l.addressesMu.Lock()
+// deleteInactiveAddressesLocked forgets peers silent for addressLifetime, as vanilla
+// does whenever it updates or reads its address table. addressesMu must be held.
+func (l *Listener) deleteInactiveAddressesLocked(now time.Time) {
 	maps.DeleteFunc(l.addresses, func(_ uint64, a address) bool {
-		return time.Since(a.t) > time.Second*15
+		return now.Sub(a.t) >= addressLifetime
 	})
-	l.addressesMu.Unlock()
+}
+
+// addressLifetime is how long vanilla keeps a LAN peer's address after its last response or message.
+const addressLifetime = time.Minute
+
+// broadcastAddresses returns where the next request goes: the configured address, or port 7551
+// at every directed broadcast address.
+func (l *Listener) broadcastAddresses() []*net.UDPAddr {
+	if l.conf.BroadcastAddress != nil {
+		return []*net.UDPAddr{l.conf.BroadcastAddress}
+	}
+	if !l.directedBroadcast {
+		return nil
+	}
+	return DirectedBroadcasts(DefaultPort)
+}
+
+// DirectedBroadcasts returns port at the directed broadcast address (address | ^mask) of every IPv4
+// address on an up, broadcast-capable, non-loopback interface. It returns none while offline.
+func DirectedBroadcasts(port int) []*net.UDPAddr {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var broadcasts []*net.UDPAddr
+	seen := make(map[[4]byte]bool)
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			network, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			if b, ok := directedBroadcast(network); ok && !seen[b] {
+				seen[b] = true
+				broadcasts = append(broadcasts, &net.UDPAddr{IP: net.IPv4(b[0], b[1], b[2], b[3]), Port: port})
+			}
+		}
+	}
+	return broadcasts
+}
+
+// directedBroadcast returns the broadcast address of an IPv4 network.
+func directedBroadcast(network *net.IPNet) ([4]byte, bool) {
+	ip, mask := network.IP.To4(), network.Mask
+	if ip == nil || len(mask) != net.IPv4len {
+		if len(mask) != net.IPv6len || ip == nil {
+			return [4]byte{}, false
+		}
+		mask = mask[12:]
+	}
+	var b [4]byte
+	for i := range b {
+		b[i] = ip[i] | ^mask[i]
+	}
+	return b, true
 }
 
 // address encapsulates a mapping for NetherNet IDs and the UDP address responsible for sending
