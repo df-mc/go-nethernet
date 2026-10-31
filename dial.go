@@ -227,7 +227,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	if timeout == 0 {
 		timeout = DefaultNegotiationTimeout
 	}
-	answerCtx, cancelAnswer := context.WithTimeoutCause(ctx, timeout, errNoAnswer)
+	answerCtx, cancelAnswer := context.WithTimeoutCause(ctx, timeout, ErrNoAnswer)
 	defer cancelAnswer()
 	if err := signaling.Signal(answerCtx, &Signal{
 		Type:         SignalTypeOffer,
@@ -235,8 +235,8 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		ConnectionID: d.ConnectionID,
 		NetworkID:    networkID,
 	}); err != nil {
-		if errors.Is(context.Cause(answerCtx), errNoAnswer) {
-			err = errNoAnswer
+		if errors.Is(context.Cause(answerCtx), ErrNoAnswer) {
+			err = ErrNoAnswer
 		}
 		return nil, fmt.Errorf("signal offer: %w", err)
 	}
@@ -252,9 +252,9 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		case <-c.ctx.Done():
 			return nil, context.Cause(c.ctx)
 		case <-answerCtx.Done():
-			if errors.Is(context.Cause(answerCtx), errNoAnswer) {
+			if errors.Is(context.Cause(answerCtx), ErrNoAnswer) {
 				// Like vanilla, the remote network is not told about this timeout.
-				return nil, errNoAnswer
+				return nil, ErrNoAnswer
 			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
@@ -372,8 +372,10 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 // DefaultNegotiationTimeout is vanilla's limit on waiting for the answer to an offer.
 const DefaultNegotiationTimeout = 10 * time.Second
 
-// errNoAnswer reports that no answer arrived within the negotiation timeout.
-var errNoAnswer = errors.New("nethernet: no answer within the negotiation timeout")
+// ErrNoAnswer is returned from a dial when no answer arrives within the negotiation timeout: the
+// remote network was unreachable over WebRTC, so a caller may fall back to another transport. The
+// timeout is deliberately not signaled to the remote network.
+var ErrNoAnswer = errors.New("nethernet: no answer within the negotiation timeout")
 
 // SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
 // failed dial.

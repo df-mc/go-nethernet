@@ -80,6 +80,10 @@ type Conn struct {
 	// NetherNet fragment header.
 	maxSegmentPayload atomic.Uint32
 
+	// iceConnected records whether the ICE transport ever reached a connected state, so a later
+	// failure is told apart from one that never connected.
+	iceConnected atomic.Bool
+
 	readMu  sync.Mutex
 	readBuf []byte
 
@@ -369,6 +373,12 @@ func (conn *Conn) Close() (err error) {
 	return conn.close(net.ErrClosed)
 }
 
+// ErrICEConnectFailed is the cause a Conn is closed with when its ICE transport gives up finding a
+// working path: the remote network was unreachable over WebRTC, so a dial returns it and a caller
+// may fall back to another transport. A remote rejection, a transport failure after ICE connected,
+// or a local close is not a reachability failure and does not carry it.
+var ErrICEConnectFailed = errors.New("nethernet: ICE transport failed to connect to the remote network")
+
 // isTerminalICEState reports whether an ICE transport can no longer recover.
 func isTerminalICEState(state webrtc.ICETransportState) bool {
 	return state == webrtc.ICETransportStateClosed || state == webrtc.ICETransportStateFailed
@@ -379,10 +389,22 @@ func isTerminalICEState(state webrtc.ICETransportState) bool {
 // error has occurred in any of the underlying transports and data channels.
 func (conn *Conn) handleTransports() {
 	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
-		if isTerminalICEState(state) {
-			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
-			go conn.close(fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state))
+		if state == webrtc.ICETransportStateConnected || state == webrtc.ICETransportStateCompleted {
+			conn.iceConnected.Store(true)
+			return
 		}
+		if !isTerminalICEState(state) {
+			return
+		}
+		// A failed agent that never connected never reached the remote network, so a dial carries
+		// ErrICEConnectFailed and a caller may fall back. A close, or a failure after ICE connected,
+		// is not an initial reachability failure.
+		var cause error = fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state)
+		if state == webrtc.ICETransportStateFailed && !conn.iceConnected.Load() {
+			cause = ErrICEConnectFailed
+		}
+		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
+		go conn.close(cause)
 	})
 	conn.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
 		switch state {
