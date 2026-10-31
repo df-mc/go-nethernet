@@ -23,8 +23,13 @@ type ListenConfig struct {
 	NetworkID uint64
 
 	// BroadcastAddress specifies the UDP address request packets are sent to. If nil and the Listener
-	// is not bound to port 7551, requests go to port 7551 at the directed broadcast address of every
-	// IPv4 interface that is up, as vanilla clients send them.
+	// is not bound to port 7551, requests go out the way vanilla clients send them: to port 7551 at the
+	// directed broadcast address of every up IPv4 interface, and to the IPv6 all-nodes link-local
+	// multicast group [ff02::1]:7551 on every up, multicast-capable IPv6 interface. A Listener bound to
+	// port 7551 only answers requests and opens no IPv6 socket.
+	//
+	// Receiving IPv6 multicast on Android requires a MulticastLock held by the app; this package cannot
+	// acquire one, so inbound IPv6 discovery there is the consumer's responsibility.
 	BroadcastAddress *net.UDPAddr
 
 	// Log is used for logging messages at various levels.
@@ -71,9 +76,16 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		closed: make(chan struct{}),
 	}
+	// A discovering Listener also multicasts over IPv6 as vanilla does; the responder role does not.
+	if l.directedBroadcast {
+		l.conn6 = openMulticast6(conf.Log)
+	}
 
 	go l.listen()
 	go l.background()
+	if l.conn6 != nil {
+		go l.listen6()
+	}
 
 	return l, nil
 }
@@ -92,6 +104,9 @@ type Listener struct {
 	conf ListenConfig
 	// directedBroadcast sends requests to each interface's directed broadcast address.
 	directedBroadcast bool
+	// conn6 is the IPv6 socket a discovering Listener multicasts requests to and reads responses on.
+	// It is nil in the responder role and when the host has no usable IPv6.
+	conn6 multicast6Conn
 
 	// pongData atomically stores the application data for responding to the clients
 	// broadcasting RequestPacket with a ResponsePacket containing the same data.
@@ -239,9 +254,15 @@ func (l *Listener) listen() {
 // maxUDPPacketSize is 65,535 bytes, the maximum UDP payload size.
 const maxUDPPacketSize = 65535
 
-// write writes the packet to the destination address using the network ID of Listener.
+// write writes the packet to the destination address using the network ID of Listener. An IPv6
+// destination goes out the IPv6 socket when one is open, so a peer discovered over multicast is
+// answered on the same transport that found it.
 func (l *Listener) write(pk Packet, addr net.Addr) error {
 	b := Marshal(pk, l.conf.NetworkID)
+	if l.conn6 != nil && isIPv6Addr(addr) {
+		_, err := l.conn6.WriteTo(b, nil, addr)
+		return err
+	}
 	_, err := l.conn.WriteTo(b, addr)
 	return err
 }
@@ -397,6 +418,11 @@ func (l *Listener) Close() (err error) {
 	l.once.Do(func() {
 		close(l.closed)
 		err = l.conn.Close()
+		if l.conn6 != nil {
+			if cerr := l.conn6.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
+		}
 
 		l.notifiersMu.Lock()
 		clear(l.notifiers)
@@ -422,6 +448,9 @@ func (l *Listener) background() {
 					}
 					l.conf.Log.Debug("error broadcasting request", slog.Any("to", addr), slog.Any("error", err))
 				}
+			}
+			if l.conn6 != nil {
+				l.broadcastRequest6()
 			}
 		}
 	}
