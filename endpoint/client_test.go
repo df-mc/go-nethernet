@@ -274,3 +274,71 @@ func TestClientSignalHTTPStatuses(t *testing.T) {
 		})
 	}
 }
+
+func TestClientProbeRequest(t *testing.T) {
+	for name, test := range map[string]struct {
+		info      ClientInfo
+		wantQuery string
+	}{
+		"client info":  {ClientInfo{Version: "1.26.60", Protocol: 2225, Platform: 1}, "version=1.26.60&protocol=2225&platform=1&id=123"},
+		"zero is bare": {ClientInfo{}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := ClientConfig{NetworkID: "123", ClientInfo: test.info}.New()
+			req, err := client.ProbeRequest(context.Background(), "https://example.com:19132")
+			if err != nil {
+				t.Fatalf("ProbeRequest() error = %v", err)
+			}
+			if req.Method != http.MethodGet {
+				t.Fatalf("method = %s, want %s", req.Method, http.MethodGet)
+			}
+			if req.URL.Path != "/v1/join" {
+				t.Fatalf("path = %s, want /v1/join", req.URL.Path)
+			}
+			if req.URL.RawQuery != test.wantQuery {
+				t.Fatalf("query = %q, want %q", req.URL.RawQuery, test.wantQuery)
+			}
+		})
+	}
+}
+
+// A malformed (half-set) ClientInfo is rejected rather than sent as a partial query.
+func TestClientProbeRequestRejectsMalformedClientInfo(t *testing.T) {
+	client := ClientConfig{NetworkID: "123", ClientInfo: ClientInfo{Version: "1.26.60"}}.New()
+	if _, err := client.ProbeRequest(context.Background(), "https://example.com:19132"); err == nil {
+		t.Fatal("ProbeRequest() error = nil, want a malformed ClientInfo error")
+	}
+}
+
+// The probe advertises the same network ID that Signal posts the offer to, so a server matches them.
+func TestClientProbeRequestIDMatchesSignalPath(t *testing.T) {
+	paths := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			paths <- r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "v=0\r\n")
+		}
+	}))
+	defer server.Close()
+
+	client := ClientConfig{ClientInfo: ClientInfo{Version: "1.26.60", Protocol: 2225, Platform: 1}}.New()
+	req, err := client.ProbeRequest(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("ProbeRequest() error = %v", err)
+	}
+	gotID := req.URL.Query().Get("id")
+	if gotID == "" || gotID != client.NetworkID() {
+		t.Fatalf("probe id = %q, want the Client network ID %q", gotID, client.NetworkID())
+	}
+	if err := client.Signal(context.Background(), &nethernet.Signal{
+		Type:      nethernet.SignalTypeOffer,
+		NetworkID: server.URL,
+		Data:      "offer",
+	}); err != nil {
+		t.Fatalf("Signal() error = %v", err)
+	}
+	if want, got := "/v1/join/"+gotID, <-paths; got != want {
+		t.Fatalf("Signal POST path = %q, want %q", got, want)
+	}
+}
