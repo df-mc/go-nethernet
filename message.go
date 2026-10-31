@@ -90,7 +90,7 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 		// Since most messages are smaller than 256KB and don't require fragmentation,
 		// we no longer need to pre-allocate a large buffer.
 		message: &message{},
-		packets: make(chan []byte),
+		packets: conn.packets,
 		close:   make(chan struct{}),
 	}
 	ch.OnMessage(func(msg webrtc.DataChannelMessage) {
@@ -135,8 +135,7 @@ type dataChannel struct {
 	// its embedded [sync.Mutex] for guaranteeing ordered segment counts.
 	write sync.Mutex
 
-	// packets can be used to receive packets that are fully-reconstructed from
-	// one or more segments received in the dataChannel.
+	// packets is the Conn's receive queue, shared by both data channels.
 	packets chan []byte
 
 	// close is a channel that is closed when a dataChannel is closed.
@@ -180,8 +179,14 @@ func (c *dataChannel) handleMessage(b []byte) error {
 		return fmt.Errorf("parse: %w", err)
 	}
 
-	if c.reliability == MessageReliabilityUnreliable && msg.segments > 0 {
-		return fmt.Errorf("unexpected segment count on UnreliableDataChannel: %d", msg.segments)
+	if c.reliability == MessageReliabilityUnreliable {
+		// Vanilla ignores the segment header of unreliable messages and queues each one whole.
+		select {
+		case <-c.close:
+			return net.ErrClosed
+		case c.packets <- msg.data:
+		}
+		return nil
 	}
 
 	c.messageMu.Lock()

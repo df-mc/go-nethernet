@@ -82,6 +82,11 @@ type Dialer struct {
 	// a caller-controlled TURN server.
 	Credentials func(ctx context.Context) (*Credentials, error)
 
+	// NegotiationTimeout bounds the wait for the remote answer, measured from sending the offer.
+	// The dial fails when it passes, without signaling an error to the remote network. If zero,
+	// [DefaultNegotiationTimeout] is used.
+	NegotiationTimeout time.Duration
+
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
 	// When set to true, the dialer waits for ICE gathering to complete and embeds
@@ -217,12 +222,22 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 	if err != nil {
 		return nil, fmt.Errorf("encode offer: %w", err)
 	}
-	if err := signaling.Signal(ctx, &Signal{
+	// Like vanilla, the answer must arrive within the negotiation timeout of setting the offer.
+	timeout := d.NegotiationTimeout
+	if timeout == 0 {
+		timeout = DefaultNegotiationTimeout
+	}
+	answerCtx, cancelAnswer := context.WithTimeoutCause(ctx, timeout, ErrNoAnswer)
+	defer cancelAnswer()
+	if err := signaling.Signal(answerCtx, &Signal{
 		Type:         SignalTypeOffer,
 		Data:         string(offer),
 		ConnectionID: d.ConnectionID,
 		NetworkID:    networkID,
 	}); err != nil {
+		if errors.Is(context.Cause(answerCtx), ErrNoAnswer) {
+			err = ErrNoAnswer
+		}
 		return nil, fmt.Errorf("signal offer: %w", err)
 	}
 
@@ -236,7 +251,11 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		select {
 		case <-c.ctx.Done():
 			return nil, context.Cause(c.ctx)
-		case <-ctx.Done():
+		case <-answerCtx.Done():
+			if errors.Is(context.Cause(answerCtx), ErrNoAnswer) {
+				// Like vanilla, the remote network is not told about this timeout.
+				return nil, ErrNoAnswer
+			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
@@ -291,27 +310,18 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 
 				go d.handleConn(c, signals)
 
-				select {
-				case <-c.ctx.Done():
-					return nil, context.Cause(c.ctx)
-				case <-ctx.Done():
-					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
-					}
+				// Like vanilla, ICE starts with the answer; remote candidates may trickle in later
+				// or never, when the server is reached through peer-reflexive checks.
+				if err := d.startTransports(ctx, c, desc); err != nil {
 					if err := context.Cause(c.ctx); err != nil {
 						return nil, err
 					}
-					return nil, ctx.Err()
-				case <-c.candidateReceived:
-					c.log.Debug("received first candidate")
-					if err := d.startTransports(ctx, c, desc); err != nil {
-						if errors.Is(err, context.DeadlineExceeded) {
-							d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
-						}
-						return nil, fmt.Errorf("start transports: %w", err)
+					if errors.Is(err, context.DeadlineExceeded) {
+						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
 					}
-					return c, nil
+					return nil, fmt.Errorf("start transports: %w", err)
 				}
+				return c, nil
 			default:
 				err = c.handleSignal(signal)
 				if err != nil {
@@ -358,6 +368,14 @@ func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
 		})
 	}()
 }
+
+// DefaultNegotiationTimeout is vanilla's limit on waiting for the answer to an offer.
+const DefaultNegotiationTimeout = 10 * time.Second
+
+// ErrNoAnswer is returned from a dial when no answer arrives within the negotiation timeout: the
+// remote network was unreachable over WebRTC, so a caller may fall back to another transport. The
+// timeout is deliberately not signaled to the remote network.
+var ErrNoAnswer = errors.New("nethernet: no answer within the negotiation timeout")
 
 // SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
 // failed dial.

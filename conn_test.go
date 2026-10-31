@@ -34,10 +34,8 @@ func TestConnReadKeepsRemainderWhenBufferIsShort(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
-	conn := &Conn{ctx: ctx}
-	packets := make(chan []byte, 1)
-	conn.storeChannel(MessageReliabilityReliable, &dataChannel{packets: packets})
-	packets <- []byte("hello")
+	conn := &Conn{ctx: ctx, packets: make(chan []byte, 1)}
+	conn.packets <- []byte("hello")
 
 	b := make([]byte, 2)
 	n, err := conn.Read(b)
