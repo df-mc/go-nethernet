@@ -76,6 +76,24 @@ func (c ClientInfo) Query() url.Values {
 	return q
 }
 
+// probeQuery returns the join-probe query in the client's key order: version, protocol, platform
+// and the network ID as id. Values are query-escaped.
+func (c ClientInfo) probeQuery(networkID string) string {
+	var b strings.Builder
+	for i, p := range [...][2]string{
+		{"version", c.Version},
+		{"protocol", strconv.Itoa(c.Protocol)},
+		{"platform", strconv.Itoa(c.Platform)},
+		{"id", networkID},
+	} {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(p[0] + "=" + url.QueryEscape(p[1]))
+	}
+	return b.String()
+}
+
 // New returns a new [Client] from the configuration.
 // The resulting [Client] can be passed to [nethernet.Dialer.DialContext].
 func (conf ClientConfig) New() *Client {
@@ -120,6 +138,28 @@ func (c *Client) PingContext(ctx context.Context, address string) ([]byte, error
 		return nil, err
 	}
 	return status.RakNet(), nil
+}
+
+// ProbeRequest builds the GET request a client sends to discover NetherNet signaling at endpoint:
+// GET {endpoint}/v1/join with [ClientConfig.ClientInfo] and this Client's network ID as query
+// parameters, in the client's key order (version, protocol, platform, id). A zero ClientInfo omits
+// the query. The request is returned unsent so the caller drives it with its own HTTP client,
+// timeout and body handling. The id equals [Client.NetworkID], so a server sees the same id on the
+// probe and on the offer [Client.Signal] posts.
+func (c *Client) ProbeRequest(ctx context.Context, endpoint string) (*http.Request, error) {
+	info := c.conf.ClientInfo
+	if !info.zero() && !info.Valid() {
+		return nil, errors.New("nethernet/endpoint: malformed ClientConfig.ClientInfo")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/v1/join", nil)
+	if err != nil {
+		return nil, fmt.Errorf("make request: %w", err)
+	}
+	if info.Valid() {
+		req.URL.RawQuery = info.probeQuery(c.NetworkID())
+	}
+	req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
+	return req, nil
 }
 
 // Status sends a ping request to the given address and returns the
