@@ -34,8 +34,12 @@ func Marshal(pk Packet, senderID uint64) []byte {
 	pk.Write(buf)
 
 	// Vanilla counts the whole decrypted payload, including this prefix.
+	length := buf.Len() + 2
+	if m, ok := pk.(*MessagePacket); ok {
+		length = messageHeaderLength + declaredMessageLength(m.Data)
+	}
 	payload := append(
-		binary.LittleEndian.AppendUint16(nil, uint16(buf.Len())+2),
+		binary.LittleEndian.AppendUint16(nil, uint16(length)),
 		buf.Bytes()...,
 	)
 	b := encrypt(payload)
@@ -62,10 +66,14 @@ func Unmarshal(b []byte) (Packet, uint64, error) {
 	if checksum := hash.Sum(nil); !bytes.Equal(b[:32], checksum) {
 		return nil, 0, fmt.Errorf("checksum mismatch: %x != %x", b[:32], checksum)
 	}
-	buf := bytes.NewBuffer(payload)
-
-	// Skip the unused uint16 length prefix.
-	buf.Next(2)
+	if len(payload) < 4 {
+		return nil, 0, io.ErrUnexpectedEOF
+	}
+	// Vanilla drops payloads shorter than their declared length but reads past it.
+	if declared := binary.LittleEndian.Uint16(payload); len(payload) < int(declared) {
+		return nil, 0, fmt.Errorf("payload length %d is less than declared %d", len(payload), declared)
+	}
+	buf := bytes.NewBuffer(payload[2:])
 	h := &Header{}
 	if err := h.Read(buf); err != nil {
 		return nil, 0, fmt.Errorf("read header: %w", err)
@@ -85,30 +93,17 @@ func Unmarshal(b []byte) (Packet, uint64, error) {
 	if err := pk.Read(buf); err != nil {
 		return nil, h.SenderID, err
 	}
-	if buf.Len() != 0 {
-		return nil, h.SenderID, fmt.Errorf("unread %d bytes", buf.Len())
-	}
 	return pk, h.SenderID, nil
 }
 
-// readBytes reads bytes from the [io.Reader] prefixed with a length for the generic type (uint32 or uint8).
-func readBytes[L ~uint32 | ~uint8](r io.Reader) ([]byte, error) {
-	var length L
+// readRemaining skips a uint32 length prefix and returns every byte after it,
+// since vanilla ignores that prefix and reads to the end of the payload.
+func readRemaining(r io.Reader) ([]byte, error) {
+	var length uint32
 	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 		return nil, fmt.Errorf("read length: %w", err)
 	}
-	n := uint32(length)
-	if n > maxPacketPayloadLength {
-		return nil, fmt.Errorf("invalid length: %d, max %d", n, maxPacketPayloadLength)
-	}
-	if l, ok := r.(interface{ Len() int }); ok && n > uint32(l.Len()) {
-		return nil, fmt.Errorf("invalid length: %d, remaining %d", n, l.Len())
-	}
-	b := make([]byte, n)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return nil, err
-	}
-	return b, nil
+	return io.ReadAll(r)
 }
 
 // writeBytes writes bytes into the [io.Writer] prefixed with a length for the generic type (uint32 or uint8).
@@ -116,11 +111,6 @@ func writeBytes[L ~uint32 | ~uint8](w io.Writer, b []byte) {
 	_ = binary.Write(w, binary.LittleEndian, (L)(len(b)))
 	_, _ = w.Write(b)
 }
-
-const (
-	// maxPacketPayloadLength is 65,535 bytes, matching the uint16 length prefix.
-	maxPacketPayloadLength = 1<<16 - 1
-)
 
 const (
 	IDRequestPacket uint16 = iota
