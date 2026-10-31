@@ -151,7 +151,7 @@ func (s rejectingSignaling) Signal(ctx context.Context, signal *Signal) error {
 		return err
 	}
 	if signal.Type == SignalTypeOffer {
-		s.memorySignaling.deliver(ctx, &Signal{
+		s.deliver(ctx, &Signal{
 			Type:         SignalTypeError,
 			Data:         strconv.Itoa(s.code),
 			NetworkID:    signal.NetworkID,

@@ -399,7 +399,7 @@ func (conn *Conn) handleTransports() {
 		// A failed agent that never connected never reached the remote network, so a dial carries
 		// ErrICEConnectFailed and a caller may fall back. A close, or a failure after ICE connected,
 		// is not an initial reachability failure.
-		var cause error = fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state)
+		cause := fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state)
 		if state == webrtc.ICETransportStateFailed && !conn.iceConnected.Load() {
 			cause = ErrICEConnectFailed
 		}
