@@ -97,6 +97,16 @@ func TestMarshalCapsDeclaredMessageLength(t *testing.T) {
 	}
 }
 
+// Message framing must stay vanilla's exact sizes; the round-trip tests pin only the behaviour.
+func TestMessageFramingSizesMatchVanilla(t *testing.T) {
+	if maxDeclaredMessageData != 1140 {
+		t.Errorf("maxDeclaredMessageData = %d, want 1140", maxDeclaredMessageData)
+	}
+	if messageHeaderLength != 32 {
+		t.Errorf("messageHeaderLength = %d, want 32", messageHeaderLength)
+	}
+}
+
 func TestUnmarshalAcceptsVanillaInclusiveLength(t *testing.T) {
 	const senderID = 0x1020304050607080
 

@@ -464,9 +464,6 @@ func (l *Listener) deleteInactiveAddressesLocked(now time.Time) {
 	})
 }
 
-// addressLifetime is how long vanilla keeps a LAN peer's address after its last response or message.
-const addressLifetime = time.Minute
-
 // broadcastAddresses returns where the next request goes: the configured address, or port 7551
 // at every directed broadcast address.
 func (l *Listener) broadcastAddresses() []*net.UDPAddr {
@@ -525,6 +522,9 @@ func directedBroadcast(network *net.IPNet) ([4]byte, bool) {
 	}
 	return b, true
 }
+
+// addressLifetime is how long vanilla keeps a LAN peer's address after its last response or message.
+const addressLifetime = time.Minute
 
 // address encapsulates a mapping for NetherNet IDs and the UDP address responsible for sending
 // packets. It is used for signaling a NetherNet network with an ID in [Listener.Signal].

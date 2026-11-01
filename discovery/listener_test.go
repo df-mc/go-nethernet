@@ -268,3 +268,13 @@ func TestDirectedBroadcast(t *testing.T) {
 		t.Fatal("directedBroadcast accepted an IPv6 network")
 	}
 }
+
+// Expiry windows must stay vanilla's exact magnitudes; the boundary tests pin only the comparison.
+func TestExpiryLifetimesMatchVanilla(t *testing.T) {
+	if responseLifetime != 5*time.Second {
+		t.Errorf("responseLifetime = %v, want %v", responseLifetime, 5*time.Second)
+	}
+	if addressLifetime != time.Minute {
+		t.Errorf("addressLifetime = %v, want %v", addressLifetime, time.Minute)
+	}
+}
