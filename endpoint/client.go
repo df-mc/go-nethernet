@@ -69,11 +69,51 @@ func (c ClientInfo) zero() bool {
 // Query returns [url.Values] containing the URL query parameters
 // corresponding to each field in ClientInfo.
 func (c ClientInfo) Query() url.Values {
-	q := make(url.Values)
-	q.Set("version", c.Version)
-	q.Set("protocol", strconv.Itoa(c.Protocol))
-	q.Set("platform", strconv.Itoa(c.Platform))
+	return c.query().values()
+}
+
+// query is like Query, but returns an internal URL query representation
+// that preserves the order.
+func (c ClientInfo) query() *urlQuery {
+	q := new(urlQuery)
+	q.Add("version", c.Version)
+	q.Add("protocol", strconv.Itoa(c.Protocol))
+	q.Add("platform", strconv.Itoa(c.Platform))
 	return q
+}
+
+// urlQuery is a low-level representation of URL query parameters.
+// Unlike [url.Values], it uses a slice instead of a map to preserve the order.
+// Each entry holds exactly one value, but the same key may appear multiple times.
+type urlQuery [][2]string
+
+// Add appends a key-value pair to the URL query.
+func (q *urlQuery) Add(key, value string) {
+	*q = append(*q, [2]string{key, value})
+}
+
+// values converts the urlQuery to [url.Values] so that it can be used returned
+// from exported methods.
+func (q *urlQuery) values() url.Values {
+	v := make(url.Values)
+	for _, kv := range *q {
+		v.Add(kv[0], kv[1])
+	}
+	return v
+}
+
+// Encode encodes the URL query without the '?' prefix.
+func (q *urlQuery) Encode() string {
+	b := &strings.Builder{}
+	for i, kv := range *q {
+		if i != 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(url.QueryEscape(kv[0]))
+		b.WriteByte('=')
+		b.WriteString(url.QueryEscape(kv[1]))
+	}
+	return b.String()
 }
 
 // New returns a new [Client] from the configuration.
@@ -138,8 +178,8 @@ func (c *Client) Status(ctx context.Context, address string) (Status, error) {
 		return Status{}, errors.New("nethernet/endpoint: malformed ClientConfig.ClientInfo")
 	}
 	if info.Valid() {
-		q := info.Query()
-		q.Set("id", c.NetworkID())
+		q := info.query()
+		q.Add("id", c.NetworkID())
 		requestURL.RawQuery = q.Encode()
 	}
 
