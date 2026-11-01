@@ -162,6 +162,30 @@ func (c *Client) PingContext(ctx context.Context, address string) ([]byte, error
 	return status.RakNet(), nil
 }
 
+// ProbeRequest builds the GET request a client sends to discover NetherNet signaling at endpoint:
+// GET {endpoint}/v1/join with [ClientConfig.ClientInfo] and this Client's network ID as query
+// parameters, in the client's key order (version, protocol, platform, id). A zero ClientInfo omits
+// the query. The request is returned unsent so the caller drives it with its own HTTP client,
+// timeout and body handling. The id equals [Client.NetworkID], so a server sees the same id on the
+// probe and on the offer [Client.Signal] posts.
+func (c *Client) ProbeRequest(ctx context.Context, endpoint string) (*http.Request, error) {
+	info := c.conf.ClientInfo
+	if !info.zero() && !info.Valid() {
+		return nil, errors.New("nethernet/endpoint: malformed ClientConfig.ClientInfo")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/v1/join", nil)
+	if err != nil {
+		return nil, fmt.Errorf("make request: %w", err)
+	}
+	if info.Valid() {
+		q := info.query()
+		q.Add("id", c.NetworkID())
+		req.URL.RawQuery = q.Encode()
+	}
+	req.Header.Set("User-Agent", "libhttpclient/1.0.0.0")
+	return req, nil
+}
+
 // Status sends a ping request to the given address and returns the
 // Status reported by the server. The returned Status can also be converted
 // to RakNet-compatible pong data via [Status.RakNet], for use with
