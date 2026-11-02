@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -63,6 +64,41 @@ func TestConnReadKeepsRemainderWhenBufferIsShort(t *testing.T) {
 	}
 	if got := string(b[:n]); got != "o" {
 		t.Fatalf("third Read() = %q, want %q", got, "o")
+	}
+}
+
+// TestReceiveKeepsOrderAfterStop covers a reader still waiting for a packet while the Conn closes:
+// a packet completed after stop must not overtake one already queued in pending.
+func TestReceiveKeepsOrderAfterStop(t *testing.T) {
+	for range 200 {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		ch := &dataChannel{
+			message:  &message{},
+			packets:  make(chan []byte),
+			close:    make(chan struct{}),
+			readDone: make(chan struct{}),
+		}
+		conn := &Conn{ctx: ctx}
+		conn.storeChannel(MessageReliabilityReliable, ch)
+
+		ch.stop()
+		if err := ch.handleMessage([]byte("\x00first")); err != nil {
+			t.Fatalf("handleMessage(first) error = %v", err)
+		}
+		got := make(chan string, 1)
+		go func() {
+			pk, _ := conn.ReadPacket()
+			got <- string(pk)
+		}()
+		runtime.Gosched()
+		if err := ch.handleMessage([]byte("\x00second")); err != nil {
+			t.Fatalf("handleMessage(second) error = %v", err)
+		}
+		ch.endRead()
+		cancel(net.ErrClosed)
+		if pk := <-got; pk != "first" {
+			t.Fatalf("ReadPacket() = %q, want %q", pk, "first")
+		}
 	}
 }
 

@@ -193,12 +193,19 @@ func (c *dataChannel) handleMessage(b []byte) error {
 	}
 
 	select {
-	case c.packets <- c.data:
 	case <-c.close:
-		c.pendingMu.Lock()
-		c.pending = append(c.pending, c.data)
-		c.pendingMu.Unlock()
+	default:
+		select {
+		case c.packets <- c.data:
+			c.data = nil
+			return nil
+		case <-c.close:
+		}
 	}
+	// Once stopped, every completed packet goes to pending, so none overtakes one queued there.
+	c.pendingMu.Lock()
+	c.pending = append(c.pending, c.data)
+	c.pendingMu.Unlock()
 	c.data = nil
 	return nil
 }
