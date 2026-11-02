@@ -128,18 +128,17 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 		return nil, fmt.Errorf("invalid message reliability: %d", r)
 	}
 	ch := conn.channel(r)
-	// A packet that arrived before the Conn closed is returned first, so the final message a
-	// remote peer sends before closing, such as a disconnect, is not lost to the closure.
 	select {
 	case pk := <-ch.packets:
 		return pk, nil
-	default:
-	}
-	select {
 	case <-conn.ctx.Done():
+		// Messages that arrived before the closure come first, so the final one a remote peer
+		// sends before closing, such as a disconnect, is not lost.
+		<-ch.readDone
+		if pk, ok := ch.takePending(); ok {
+			return pk, nil
+		}
 		return nil, errors.Join(context.Cause(conn.ctx), net.ErrClosed)
-	case pk := <-ch.packets:
-		return pk, nil
 	}
 }
 
@@ -324,30 +323,39 @@ func (conn *Conn) remoteAddr() *Addr {
 	}
 }
 
-// close closes the data channels associated with reliability parameters, then closes each transport
-// of the Conn. It also cancels the background context with the provided cause so that may be returned
-// by current-blocking methods such as [Conn.Read].
+// close cancels the background context with the provided cause, so that may be returned by
+// current-blocking methods such as [Conn.Read], then closes each transport of the Conn. Messages
+// already received stay readable: Pion delivers them until SCTP stops.
 func (conn *Conn) close(cause error) (err error) {
 	conn.once.Do(func() {
 		if cause != nil {
 			conn.log.Debug("connection is closing with a cause", slog.Any("cause", cause))
 		}
+		channels := conn.snapshotChannels()
+		// Stop the data channels before canceling ctx, so Receive finds a packet that was
+		// still waiting for it in pending instead of reporting the closure first.
+		for _, ch := range channels {
+			if ch != nil {
+				ch.stop()
+			}
+		}
 		conn.cancel(cause)
 		conn.negotiator.handleClose(conn)
 
-		for _, ch := range conn.snapshotChannels() {
-			if ch != nil {
-				err = errors.Join(err, ch.Close())
-			}
-		}
-
 		err = errors.Join(
-			err,
 			conn.sctp.Stop(),
 			conn.dtls.Stop(),
 			conn.ice.Stop(),
 			conn.gatherer.Close(),
 		)
+		// Pion ends a read loop once SCTP stops, but Receive must not wait on one that never started.
+		time.AfterFunc(readLoopEndTimeout, func() {
+			for _, ch := range channels {
+				if ch != nil {
+					ch.endRead()
+				}
+			}
+		})
 	})
 	return err
 }
@@ -385,10 +393,18 @@ func (conn *Conn) snapshotChannels() [messageReliabilityCapacity]*dataChannel {
 // non-nil errors encountered during closure.
 func (conn *Conn) Close() (err error) {
 	conn.drain(closeDrainTimeout)
-	return conn.close(net.ErrClosed)
+	for _, ch := range conn.snapshotChannels() {
+		if ch != nil {
+			err = errors.Join(err, ch.Close())
+		}
+	}
+	return errors.Join(err, conn.close(net.ErrClosed))
 }
 
 const (
+	// readLoopEndTimeout bounds how long Receive waits after closure for Pion to deliver
+	// messages it already received.
+	readLoopEndTimeout = time.Second
 	// closeDrainTimeout bounds how long [Conn.Close] waits for the remote peer to acknowledge
 	// data already written, so a peer that stopped reading cannot hold Close open.
 	closeDrainTimeout = time.Second
