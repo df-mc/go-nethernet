@@ -477,3 +477,83 @@ func TestRemoteErrorsAfterNegotiation(t *testing.T) {
 		})
 	}
 }
+
+// TestCloseDeliversDataWrittenJustBefore covers a final message written right before Close, such as
+// a disconnect packet: Close must not stop the transports while the peer has yet to acknowledge it.
+func TestCloseDeliversDataWrittenJustBefore(t *testing.T) {
+	client, server := newMemorySignalingPair("1", "2")
+	defer client.close()
+	defer server.close()
+
+	l, err := (ListenConfig{AllowAnonymous: true}).Listen(server)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer l.Close()
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- conn
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	conn, err := (Dialer{}).DialContext(ctx, server.NetworkID(), client)
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	defer conn.Close()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-accepted:
+	case err := <-acceptErr:
+		t.Fatalf("Accept() error = %v", err)
+	case <-ctx.Done():
+		t.Fatalf("Accept() timed out: %v", ctx.Err())
+	}
+
+	const (
+		messages    = 4
+		messageSize = 64 << 10
+	)
+	received := make(chan int, 1)
+	go func() {
+		total := 0
+		b := make([]byte, messageSize)
+		for total < messages*messageSize {
+			n, err := conn.Read(b)
+			total += n
+			if err != nil {
+				break
+			}
+		}
+		received <- total
+	}()
+
+	payload := make([]byte, messageSize)
+	for i := range messages {
+		if _, err := serverConn.Write(payload); err != nil {
+			t.Fatalf("Write() #%d error = %v", i, err)
+		}
+	}
+	if err := serverConn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case got := <-received:
+		if got != messages*messageSize {
+			t.Fatalf("received %d bytes before close, want %d", got, messages*messageSize)
+		}
+	case <-ctx.Done():
+		t.Fatalf("Read() timed out: %v", ctx.Err())
+	}
+}

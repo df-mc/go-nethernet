@@ -127,10 +127,18 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	if r >= messageReliabilityCapacity {
 		return nil, fmt.Errorf("invalid message reliability: %d", r)
 	}
+	ch := conn.channel(r)
+	// A packet that arrived before the Conn closed is returned first, so the final message a
+	// remote peer sends before closing, such as a disconnect, is not lost to the closure.
+	select {
+	case pk := <-ch.packets:
+		return pk, nil
+	default:
+	}
 	select {
 	case <-conn.ctx.Done():
 		return nil, errors.Join(context.Cause(conn.ctx), net.ErrClosed)
-	case pk := <-conn.channel(r).packets:
+	case pk := <-ch.packets:
 		return pk, nil
 	}
 }
@@ -371,11 +379,55 @@ func (conn *Conn) snapshotChannels() [messageReliabilityCapacity]*dataChannel {
 	return conn.channels
 }
 
-// Close closes the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,
+// Close waits up to a second for the remote peer to acknowledge data already written, then closes
+// the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,
 // and ICE transports of the Conn. An error may be returned using [errors.Join], which contains
 // non-nil errors encountered during closure.
 func (conn *Conn) Close() (err error) {
+	conn.drain(closeDrainTimeout)
 	return conn.close(net.ErrClosed)
+}
+
+const (
+	// closeDrainTimeout bounds how long [Conn.Close] waits for the remote peer to acknowledge
+	// data already written, so a peer that stopped reading cannot hold Close open.
+	closeDrainTimeout = time.Second
+	// drainPollInterval is how often drain checks the data channels for unacknowledged data.
+	drainPollInterval = 5 * time.Millisecond
+)
+
+// drain waits until the remote peer has acknowledged all data written to the data channels,
+// because stopping the SCTP transport discards whatever it still buffers: a final message such as
+// a disconnect would never arrive. It returns early once the Conn closes for another reason, and
+// gives up after timeout.
+func (conn *Conn) drain(timeout time.Duration) {
+	if conn.bufferedAmount() == 0 {
+		return
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+	for conn.bufferedAmount() != 0 {
+		select {
+		case <-conn.ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// bufferedAmount returns the number of bytes written to the open data channels that the remote
+// peer has not acknowledged yet.
+func (conn *Conn) bufferedAmount() (n uint64) {
+	for _, ch := range conn.snapshotChannels() {
+		if ch != nil && ch.ReadyState() == webrtc.DataChannelStateOpen {
+			n += ch.BufferedAmount()
+		}
+	}
+	return n
 }
 
 // isTerminalICEState reports whether an ICE transport can no longer recover.
