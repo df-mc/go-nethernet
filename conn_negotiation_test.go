@@ -556,6 +556,41 @@ func TestReceiveReturnsPacketsBeforeRemoteClosure(t *testing.T) {
 	}
 }
 
+// TestAbortEndsCloseWaitingForAcknowledgement covers a peer that stops reading: Abort must not wait
+// for it, and must end a Close that is waiting for it.
+func TestAbortEndsCloseWaitingForAcknowledgement(t *testing.T) {
+	_, serverConn := dialPair(t)
+	conn := serverConn.(*Conn)
+
+	// The dialed side never reads, so Pion stops acknowledging once its receive buffer is full.
+	payload := make([]byte, 1<<20)
+	for i := range 4 {
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatalf("Write() #%d error = %v", i, err)
+		}
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- conn.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close() returned %v before the peer acknowledged the data", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	start := time.Now()
+	if err := conn.Abort(); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close() still waiting after Abort()")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Abort() and Close() took %v, want well under closeDrainTimeout", elapsed)
+	}
+}
+
 // dialPair returns a dialed Conn and the Conn its Listener accepted, both closed on cleanup.
 func dialPair(t *testing.T) (dialed, accepted net.Conn) {
 	t.Helper()

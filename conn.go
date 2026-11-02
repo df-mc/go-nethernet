@@ -386,7 +386,7 @@ func (conn *Conn) snapshotChannels() [messageReliabilityCapacity]*dataChannel {
 	return conn.channels
 }
 
-// Close waits up to a second for the remote peer to acknowledge data already written, then closes
+// Close waits up to three seconds for the remote peer to acknowledge data already written, then closes
 // the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,
 // and ICE transports of the Conn. An error may be returned using [errors.Join], which contains
 // non-nil errors encountered during closure.
@@ -404,13 +404,20 @@ func (conn *Conn) Close() (err error) {
 	return errors.Join(err, conn.close(net.ErrClosed))
 }
 
+// Abort closes the Conn like Close, but discards data the remote peer has yet to acknowledge
+// instead of waiting for it. It also ends a Close that is still waiting.
+func (conn *Conn) Abort() error {
+	return conn.close(net.ErrClosed)
+}
+
 const (
 	// readLoopEndTimeout bounds how long Receive waits after closure for Pion to deliver
 	// messages it already received.
 	readLoopEndTimeout = time.Second
 	// closeDrainTimeout bounds how long [Conn.Close] waits for the remote peer to acknowledge
-	// data already written, so a peer that stopped reading cannot hold Close open.
-	closeDrainTimeout = time.Second
+	// data already written, so a peer that stopped reading cannot hold Close open. It outlasts
+	// one SCTP retransmission, which waits at least a second, so one lost final message still arrives.
+	closeDrainTimeout = 3 * time.Second
 	// drainPollInterval is how often drain checks the data channels for unacknowledged data.
 	drainPollInterval = 5 * time.Millisecond
 )
