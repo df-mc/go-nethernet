@@ -1,7 +1,6 @@
 package discovery
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -25,16 +24,9 @@ func (pk *MessagePacket) Read(r io.Reader) error {
 	if err := binary.Read(r, binary.LittleEndian, &pk.RecipientID); err != nil {
 		return fmt.Errorf("read recipient ID: %w", err)
 	}
-	data, err := readBytes[uint32](r)
+	data, err := readRemaining(r)
 	if err != nil {
 		return fmt.Errorf("read data: %w", err)
-	}
-	// Vanilla may write more data than the length prefix declares, with the
-	// rest of the signal continuing right after the declared range. Read the
-	// remaining bytes as part of the data instead of leaving them for the
-	// trailing-bytes check in Unmarshal.
-	if buf, ok := r.(*bytes.Buffer); ok && buf.Len() > 0 {
-		data = append(data, buf.Next(buf.Len())...)
 	}
 	pk.Data = string(data)
 	return nil
@@ -43,5 +35,18 @@ func (pk *MessagePacket) Read(r io.Reader) error {
 // Write ...
 func (pk *MessagePacket) Write(w io.Writer) {
 	_ = binary.Write(w, binary.LittleEndian, pk.RecipientID)
-	writeBytes[uint32](w, []byte(pk.Data))
+	_ = binary.Write(w, binary.LittleEndian, uint32(declaredMessageLength(pk.Data)))
+	_, _ = io.WriteString(w, pk.Data)
+}
+
+const (
+	// messageHeaderLength is the decrypted size of a message before its data.
+	messageHeaderLength = 32
+	// maxDeclaredMessageData caps the data length vanilla declares; the full data still follows.
+	maxDeclaredMessageData = 1140
+)
+
+// declaredMessageLength returns the data length vanilla writes for a message.
+func declaredMessageLength(data string) int {
+	return min(len(data), maxDeclaredMessageData)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
@@ -282,5 +283,32 @@ func TestParseDescriptionRejectsMessageSizesWithoutFragmentPayload(t *testing.T)
 				t.Fatalf("parseDescription() error = nil, want error for max-message-size %s", max)
 			}
 		})
+	}
+}
+
+// TestLatencyExcludesDelayedAcknowledgement checks that Latency reports the network round trip,
+// not a data round trip stretched by the peer's delayed SCTP acknowledgement.
+func TestLatencyExcludesDelayedAcknowledgement(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+	_, clientConn, serverConn := dialAcceptedListener(t, client, server)
+
+	// A receiver acknowledges every second packet at once and holds the acknowledgement of the
+	// other until the next one arrives (RFC 9260 section 6.2). Paced one-way messages, like a
+	// client's input sent once per tick, therefore give SCTP round-trip samples that each include
+	// the send interval, however close the peers are.
+	const interval = 50 * time.Millisecond
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range 20 {
+		checkConnPayload(t, clientConn, serverConn, []byte("tick"))
+		<-ticker.C
+	}
+
+	// Host candidates on one machine answer ICE connectivity checks far within this bound.
+	const limit = interval / 5
+	if latency := clientConn.Latency(); latency <= 0 || latency >= limit {
+		t.Fatalf("Latency() = %v, want within (0, %v); SCTP SRTT is %.1fms", latency, limit, clientConn.sctp.Stats().SmoothedRoundTripTime*1000)
 	}
 }

@@ -246,10 +246,21 @@ func closedWriteError(cause error) error {
 	return errors.Join(net.ErrClosed, cause)
 }
 
-// Latency returns the current latency to the remote connection as half the Smoothed Round Trip Time (SRTT)
-// from the statistics of the SCTP transport.
+// Latency returns the current latency to the remote connection as half the current round trip time
+// (RTT) of the selected ICE candidate pair, which is also what the vanilla client reports as its ping.
+// ICE measures it with the connectivity and consent checks that both peers answer immediately, and
+// refreshes it every keepalive interval. If no candidate pair is selected or it has not been measured,
+// Latency returns 0.
+//
+// The Smoothed Round Trip Time of the SCTP transport is not used, because each SCTP sample also
+// includes the time the peer holds a delayed acknowledgement, which for messages sent once per tick
+// is the whole interval between them.
 func (conn *Conn) Latency() time.Duration {
-	return time.Duration(conn.sctp.Stats().SmoothedRoundTripTime*float64(time.Second)) / 2
+	stats, ok := conn.ice.GetSelectedCandidatePairStats()
+	if !ok {
+		return 0
+	}
+	return time.Duration(stats.CurrentRoundTripTime*float64(time.Second)) / 2
 }
 
 // SetDeadline is a no-op implementation of [net.Conn.SetDeadline] and returns ErrUnsupported.
