@@ -270,7 +270,7 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		defer resp.Body.Close()
 
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+			return &StatusError{Method: req.Method, URL: req.URL.String(), StatusCode: resp.StatusCode, Status: resp.Status}
 		}
 		b, err := io.ReadAll(io.LimitReader(resp.Body, maxSDPBodySize+1))
 		if err != nil {
@@ -303,6 +303,20 @@ func (c *Client) Signal(ctx context.Context, signal *nethernet.Signal) error {
 	default:
 		return fmt.Errorf("nethernet/endpoint: unknown signal type: %s", signal.Type)
 	}
+}
+
+// StatusError is returned by [Client.Signal] when the server answers an offer with a
+// non-2xx status, so callers can tell a rejected join from a transport failure.
+type StatusError struct {
+	Method     string
+	URL        string
+	StatusCode int
+	Status     string // Status line, such as "400 Bad Request".
+}
+
+// Error implements error.
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s: %s", e.Method, e.URL, e.Status)
 }
 
 // DisableTrickleICE always returns true as it is not supported because the HTTP
