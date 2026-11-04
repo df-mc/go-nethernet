@@ -522,6 +522,23 @@ func TestCloseDeliversDataWrittenJustBefore(t *testing.T) {
 	}
 }
 
+// TestCloseLingersAfterAcknowledgement covers a client that reads once per frame: the connection must
+// stay up briefly after the final message is acknowledged, or the client may see the closure first.
+func TestCloseLingersAfterAcknowledgement(t *testing.T) {
+	_, serverConn := dialPair(t)
+
+	if _, err := serverConn.Write([]byte("disconnect")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	start := time.Now()
+	if err := serverConn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < closeLinger {
+		t.Fatalf("Close() returned after %v, want at least %v", elapsed, closeLinger)
+	}
+}
+
 // TestReceiveReturnsPacketsBeforeRemoteClosure covers a reader that is busy when the remote peer
 // sends its final messages and closes: they must still be read before the closure is reported.
 func TestReceiveReturnsPacketsBeforeRemoteClosure(t *testing.T) {

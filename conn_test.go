@@ -102,6 +102,29 @@ func TestReceiveKeepsOrderAfterStop(t *testing.T) {
 	}
 }
 
+// A closed Conn can be retained, so packets it has returned must not stay reachable from the queue.
+func TestTakePendingReleasesPackets(t *testing.T) {
+	first, second := []byte("first"), []byte("second")
+	backing := [][]byte{first, second}
+	ch := &dataChannel{pending: backing}
+
+	if pk, ok := ch.takePending(); !ok || string(pk) != "first" {
+		t.Fatalf("takePending() = %q, %v", pk, ok)
+	}
+	if backing[0] != nil {
+		t.Fatal("taken packet is still referenced by the queue's backing array")
+	}
+	if _, ok := ch.takePending(); !ok {
+		t.Fatal("second takePending() found nothing")
+	}
+	if ch.pending != nil {
+		t.Fatalf("empty queue keeps its backing array: %#v", ch.pending)
+	}
+	if pk, ok := ch.takePending(); ok {
+		t.Fatalf("takePending() on an empty queue = %q", pk)
+	}
+}
+
 func TestIsTerminalICEState(t *testing.T) {
 	for state, terminal := range map[webrtc.ICETransportState]bool{
 		webrtc.ICETransportStateUnknown:      false,

@@ -420,12 +420,16 @@ const (
 	closeDrainTimeout = 3 * time.Second
 	// drainPollInterval is how often drain checks the data channels for unacknowledged data.
 	drainPollInterval = 5 * time.Millisecond
+	// closeLinger is how long Close keeps the transports up after the last acknowledgement. On a
+	// busy connection that comes milliseconds after delivery, and a client that sees the closure in
+	// the same frame as a final message may never read it.
+	closeLinger = 100 * time.Millisecond
 )
 
 // drain waits until the remote peer has acknowledged all data written to the data channels,
 // because stopping the SCTP transport discards whatever it still buffers: a final message such as
-// a disconnect would never arrive. It returns early once the Conn closes for another reason, and
-// gives up after timeout.
+// a disconnect would never arrive. Once acknowledged it waits closeLinger. It returns early once the
+// Conn closes for another reason, and gives up after timeout.
 func (conn *Conn) drain(timeout time.Duration) {
 	if conn.bufferedAmount() == 0 {
 		return
@@ -442,6 +446,10 @@ func (conn *Conn) drain(timeout time.Duration) {
 			return
 		case <-ticker.C:
 		}
+	}
+	select {
+	case <-conn.ctx.Done():
+	case <-time.After(closeLinger):
 	}
 }
 

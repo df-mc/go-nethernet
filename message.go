@@ -218,7 +218,11 @@ func (c *dataChannel) takePending() ([]byte, bool) {
 		return nil, false
 	}
 	pk := c.pending[0]
+	c.pending[0] = nil // A closed Conn can outlive its packets, so the queue must not keep them.
 	c.pending = c.pending[1:]
+	if len(c.pending) == 0 {
+		c.pending = nil
+	}
 	return pk, true
 }
 
