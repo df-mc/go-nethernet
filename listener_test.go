@@ -1007,3 +1007,47 @@ func TestListenerRemoteErrorDoesNotWaitForTransportCleanup(t *testing.T) {
 	}
 	waitListenerState(t, l, 0, 0)
 }
+
+// Like vanilla, a host starts ICE with the offer, so a client whose candidates never arrive is still
+// reached through peer-reflexive checks.
+func TestListenerConnectsWithoutRemoteCandidates(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+
+	_, clientConn, serverConn := dialAcceptedListener(t, dropOwnCandidatesSignaling{client}, server)
+	checkConnPayload(t, clientConn, serverConn, []byte("reached without client candidates"))
+}
+
+// dropOwnCandidatesSignaling loses every candidate it is asked to send.
+type dropOwnCandidatesSignaling struct{ *memorySignaling }
+
+// Signal forwards everything except candidates.
+func (s dropOwnCandidatesSignaling) Signal(ctx context.Context, signal *Signal) error {
+	if signal.Type == SignalTypeCandidate {
+		return nil
+	}
+	return s.memorySignaling.Signal(ctx, signal)
+}
+
+// A host bundles its candidates over Signaling that asks for it, whatever the configuration says.
+func TestShouldDisableHostTrickleICE(t *testing.T) {
+	if shouldDisableHostTrickleICE(false, hostBundlesSignaling{}) != true {
+		t.Fatal("host trickles over Signaling that disables it")
+	}
+	if shouldDisableTrickleICE(false, hostBundlesSignaling{}) {
+		t.Fatal("a dial must not be affected by the host-only preference")
+	}
+	if shouldDisableHostTrickleICE(false, nil) {
+		t.Fatal("host bundles without being asked to")
+	}
+	if !shouldDisableHostTrickleICE(true, nil) {
+		t.Fatal("host ignores its configuration")
+	}
+}
+
+// hostBundlesSignaling asks hosts to bundle their candidates.
+type hostBundlesSignaling struct{ Signaling }
+
+// DisableHostTrickleICE ...
+func (hostBundlesSignaling) DisableHostTrickleICE() bool { return true }
