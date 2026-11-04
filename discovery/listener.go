@@ -29,6 +29,7 @@ type ListenConfig struct {
 	// BroadcastAddress specifies the UDP address request packets are sent to. If nil, they go out the way
 	// vanilla sends them: to port 7551 at the broadcast address of every IPv4 network and, on a dual-stack
 	// socket, at the IPv6 all-nodes group [ff02::1]. The list is kept until it empties, then rebuilt.
+	// Unlike vanilla, [ff02::1] is used on each interface, since not every platform has a default one.
 	//
 	// Receiving IPv6 multicast on Android requires a MulticastLock held by the app.
 	BroadcastAddress *net.UDPAddr
@@ -76,8 +77,8 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	}
 	// A dual-stack socket joins [ff02::1], as vanilla's does; an IPv4-only bind leaves IPv6 discovery off.
 	if localAddr.IP.To4() == nil {
-		l.multicast6 = true
-		joinMulticast6(ipv6.NewPacketConn(conn), conf.Log)
+		l.dualStack = true
+		joinMulticast6(ipv6.NewPacketConn(conn), localNetworks(), conf.Log)
 	}
 
 	go l.listen()
@@ -108,14 +109,21 @@ func controlBroadcast(_, _ string, c syscall.RawConn) error {
 	return c.Control(setSocketBroadcast)
 }
 
-// joinMulticast6 joins [ff02::1] once on the system's default interface with loopback off, as vanilla's
-// socket does. Failures only cost IPv6 discovery: every peer also sends over IPv4.
-func joinMulticast6(conn multicast6Conn, log *slog.Logger) {
+// joinMulticast6 joins [ff02::1] on each interface with loopback off. Failures only cost IPv6 discovery,
+// as every peer also sends over IPv4. An interface that appears later is not joined.
+func joinMulticast6(conn multicast6Conn, networks []localNetwork, log *slog.Logger) {
 	if err := conn.SetMulticastLoopback(false); err != nil {
 		log.Debug("error disabling IPv6 multicast loopback", slog.Any("error", err))
 	}
-	if err := conn.JoinGroup(nil, &net.IPAddr{IP: multicast6Group}); err != nil {
-		log.Debug("error joining IPv6 discovery group", slog.Any("error", err))
+	joined := make(map[int]bool)
+	for _, network := range networks {
+		if !network.multicast6() || joined[network.ifIndex] {
+			continue
+		}
+		joined[network.ifIndex] = true
+		if err := conn.JoinGroup(&net.Interface{Index: network.ifIndex}, &net.IPAddr{IP: multicast6Group}); err != nil {
+			log.Debug("error joining IPv6 discovery group", slog.Int("interface", network.ifIndex), slog.Any("error", err))
+		}
 	}
 }
 
@@ -137,8 +145,8 @@ type Listener struct {
 
 	// conf is the ListenConfig used for [ListenConfig.Listen].
 	conf ListenConfig
-	// multicast6 reports that conn is dual-stack and joined to [ff02::1].
-	multicast6 bool
+	// dualStack reports that conn can reach [ff02::1].
+	dualStack bool
 	// domain holds where requests go. Only background uses it.
 	domain []*net.UDPAddr
 
@@ -468,17 +476,15 @@ func (l *Listener) background() {
 	}
 }
 
-// broadcast sends a RequestPacket to the configured address or else to the domain, which is rebuilt only
-// when empty and which vanilla's send errors shrink. An empty domain falls back to the limited broadcast.
-func (l *Listener) broadcast(networks func() []*net.IPNet) {
+// broadcast sends a RequestPacket to the configured address or else to the domain, which vanilla's send
+// errors shrink. An empty domain sends to the limited broadcast while it is rebuilt for the next tick.
+func (l *Listener) broadcast(networks func() []localNetwork) {
 	if l.conf.BroadcastAddress != nil {
 		_ = l.sendRequest(l.conf.BroadcastAddress)
 		return
 	}
 	if len(l.domain) == 0 {
-		l.domain = broadcastDomain(networks(), DefaultPort, l.multicast6)
-	}
-	if len(l.domain) == 0 {
+		l.domain = broadcastDomain(networks(), DefaultPort, l.dualStack)
 		_ = l.sendRequest(&net.UDPAddr{IP: net.IPv4bcast, Port: DefaultPort})
 		return
 	}
@@ -509,62 +515,73 @@ func (l *Listener) deleteInactiveAddressesLocked(now time.Time) {
 	})
 }
 
+// localNetwork is an address of an up interface.
+type localNetwork struct {
+	*net.IPNet
+	ifIndex   int
+	multicast bool // The interface carries multicast.
+}
+
+// multicast6 reports whether the interface takes part in IPv6 discovery. Like vanilla's, a host with only
+// link-local IPv6 sends nothing to [ff02::1].
+func (n localNetwork) multicast6() bool {
+	return n.multicast && n.IP.To4() == nil && !n.IP.IsLoopback() && !n.IP.IsLinkLocalUnicast()
+}
+
 // localNetworks returns the addresses of the up interfaces. It uses anet because Android hides them from net.
-func localNetworks() []*net.IPNet {
+func localNetworks() []localNetwork {
 	interfaces, err := anet.Interfaces()
 	if err != nil {
 		return nil
 	}
-	var networks []*net.IPNet
+	var networks []localNetwork
 	for i := range interfaces {
-		if interfaces[i].Flags&net.FlagUp == 0 {
+		iface := &interfaces[i]
+		if iface.Flags&net.FlagUp == 0 {
 			continue
 		}
-		addrs, err := anet.InterfaceAddrsByInterface(&interfaces[i])
+		addrs, err := anet.InterfaceAddrsByInterface(iface)
 		if err != nil {
 			continue
 		}
 		for _, addr := range addrs {
 			if network, ok := addr.(*net.IPNet); ok {
-				networks = append(networks, network)
+				networks = append(networks, localNetwork{network, iface.Index, iface.Flags&net.FlagMulticast != 0})
 			}
 		}
 	}
 	return networks
 }
 
-// broadcastDomain returns port at the broadcast address of every IPv4 network and, if multicast6 is
-// set, at [ff02::1] once when any network is IPv6. Like vanilla's it filters by address, not by interface
-// capability, which skips loopback, link-local IPv4 and addresses below 1.0.0.0.
-func broadcastDomain(networks []*net.IPNet, port int, multicast6 bool) []*net.UDPAddr {
+// broadcastDomain returns port at the broadcast address of every IPv4 network and, if dualStack is set, at
+// [ff02::1] on each IPv6 interface. Numeric zones work on Android, where zone names do not resolve.
+func broadcastDomain(networks []localNetwork, port int, dualStack bool) []*net.UDPAddr {
 	var domain []*net.UDPAddr
-	add := func(ip net.IP) {
-		if !slices.ContainsFunc(domain, func(addr *net.UDPAddr) bool { return addr.IP.Equal(ip) }) {
-			domain = append(domain, &net.UDPAddr{IP: ip, Port: port})
+	add := func(ip net.IP, zone string) {
+		if !slices.ContainsFunc(domain, func(addr *net.UDPAddr) bool { return addr.IP.Equal(ip) && addr.Zone == zone }) {
+			domain = append(domain, &net.UDPAddr{IP: ip, Port: port, Zone: zone})
 		}
 	}
 	for _, network := range networks {
-		if network.IP.IsLoopback() {
-			continue
-		}
-		if ip, ok := directedBroadcast(network); ok {
-			add(ip)
-		} else if multicast6 && network.IP.To4() == nil {
-			add(multicast6Group)
+		if ip, ok := directedBroadcast(network.IPNet); ok {
+			add(ip, "")
+		} else if dualStack && network.multicast6() {
+			add(multicast6Group, strconv.Itoa(network.ifIndex))
 		}
 	}
 	return domain
 }
 
-// directedBroadcast returns the broadcast address of an IPv4 network, rejecting IPv6 networks and
-// addresses vanilla does not send from.
+// directedBroadcast returns the broadcast address of an IPv4 network. It rejects IPv6 networks, loopback,
+// link-local networks and network prefixes below 1.0.0.0, which vanilla does not send on. VMware's virtual
+// adapters, which vanilla also skips, stay in: a peer can be behind one, and the send costs nothing.
 func directedBroadcast(network *net.IPNet) (net.IP, bool) {
 	ip, mask := network.IP.To4(), network.Mask
-	if ip == nil || ip[0] == 0 || ip.IsLinkLocalUnicast() {
-		return nil, false
-	}
 	if len(mask) == net.IPv6len {
 		mask = mask[12:]
+	}
+	if ip == nil || len(mask) != net.IPv4len || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.Mask(mask)[0] == 0 {
+		return nil, false
 	}
 	broadcast := make(net.IP, net.IPv4len)
 	for i := range broadcast {

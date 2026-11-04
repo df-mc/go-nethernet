@@ -16,7 +16,8 @@ import (
 
 func ExampleListen() {
 	cfg := ListenConfig{
-		NetworkID: rand.Uint64(),
+		NetworkID:       rand.Uint64(),
+		DisableRequests: true,
 	}
 	d, err := cfg.Listen(":7551")
 	if err != nil {
