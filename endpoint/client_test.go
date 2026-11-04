@@ -268,8 +268,9 @@ func TestClientSignalHTTPStatuses(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), strconv.Itoa(tt.status)) || len(signals) != 0 {
-				t.Fatalf("Signal() = %v with %d answers, want an HTTP %d error and no answer", err, len(signals), tt.status)
+			var statusErr *StatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode != tt.status || !strings.Contains(err.Error(), strconv.Itoa(tt.status)) || len(signals) != 0 {
+				t.Fatalf("Signal() = %v with %d answers, want an HTTP %d StatusError and no answer", err, len(signals), tt.status)
 			}
 		})
 	}
