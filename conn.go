@@ -54,8 +54,7 @@ type Conn struct {
 	// publicKey is the public key which identifies the remote entity behind this Conn.
 	publicKey *ecdsa.PublicKey
 
-	// candidateReceived notifies that the first candidate is received from the other
-	// end, indicating that the Conn is ready to start its transports.
+	// candidateReceived notifies that the first candidate is received from the other end.
 	candidateReceived chan struct{}
 
 	// candidates includes all [webrtc.ICECandidate] signaled from the remote connection.
@@ -917,7 +916,7 @@ func (desc Description) Encode() ([]byte, error) {
 	// When Trickle ICE is disabled, local ICE candidates are embedded directly in
 	// the SDP instead of being sent later as separate candidate signals.
 	//
-	// This behavior can be only seen on dedicated servers with the
+	// Vanilla does this on LAN hosts, and on dedicated servers with the
 	// 'nethernet-disable-trickle-ice' setting property set to 'true' (including Realms).
 	for i, candidate := range desc.Candidates {
 		media.Attributes = append(media.Attributes, sdp.Attribute{

@@ -118,9 +118,9 @@ type ListenConfig struct {
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
 	// When set to true, the listener waits for ICE gathering to complete and embeds
-	// all local candidates in the answer SDP. Otherwise, candidates are signaled
-	// incrementally as separate [SignalTypeCandidate] signals after the answer is
-	// sent.
+	// all local candidates in the answer SDP. Otherwise, unless the [Signaling]
+	// asks for the same, candidates are signaled incrementally as separate
+	// [SignalTypeCandidate] signals after the answer is sent.
 	//
 	// This may slow connection establishment because the answer cannot be sent
 	// until candidate gathering completes.
@@ -623,9 +623,9 @@ func (n *listenerNegotiator) log() *slog.Logger {
 	)
 }
 
-// DefaultConnTimeout bounds starting a Conn when [ListenConfig.ConnContext] is nil. Vanilla hosts have
-// no such limit; this outlasts ICE failing, and only releases the negotiation of a stuck peer.
-const DefaultConnTimeout = time.Minute
+// DefaultConnTimeout bounds starting a Conn when [ListenConfig.ConnContext] is nil. Vanilla hosts have no
+// such limit. It outlasts a client's 15 second ICE window, and a stuck peer holds a negotiation slot until then.
+const DefaultConnTimeout = time.Second * 20
 
 // finaliseConn starts the transports of the Conn using the remote Description and a [context.Context]
 // returned from [ListenConfig.ConnContext].

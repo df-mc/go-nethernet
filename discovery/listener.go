@@ -188,8 +188,7 @@ func (l *Listener) Credentials(context.Context) (*nethernet.Credentials, error) 
 	}
 }
 
-// DisableHostTrickleICE reports that a host on LAN bundles its candidates in the answer, as vanilla
-// hosts do. LAN packets can be lost or reordered, and an answer arrives whole.
+// DisableHostTrickleICE reports that a host on LAN sends its candidates in the answer, as vanilla hosts do.
 func (l *Listener) DisableHostTrickleICE() bool {
 	return true
 }
