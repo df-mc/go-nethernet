@@ -368,6 +368,9 @@ func (n *listenerNegotiator) reportError(err error) {
 	}
 }
 
+// SignalErrorTimeout bounds an error reply sent to the remote network after a failed negotiation.
+const SignalErrorTimeout = time.Second * 2
+
 // signalError sends an error reply from the offer goroutine under a separate timeout.
 // Keeping its admission slot until delivery finishes bounds slow signaling work
 // without dropping replies for offers the listener has already admitted.

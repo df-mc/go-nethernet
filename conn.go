@@ -796,18 +796,6 @@ func (conn *Conn) trickleCandidate(signaling Signaling, data string) {
 		Data:         data,
 		NetworkID:    conn.networkID,
 	}); err != nil {
-		errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
-		defer cancel()
-
-		// I don't think the error code will be signaled back to the remote connection, but just in case.
-		if err := signaling.Signal(errCtx, &Signal{
-			Type:         SignalTypeError,
-			ConnectionID: conn.id,
-			Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
-			NetworkID:    conn.networkID,
-		}); err != nil {
-			conn.log.Error("error signaling error", slog.Any("error", err))
-		}
 		_ = conn.close(fmt.Errorf("signal candidate: %w", err))
 	}
 }

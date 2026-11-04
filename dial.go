@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
@@ -83,8 +82,7 @@ type Dialer struct {
 	Credentials func(ctx context.Context) (*Credentials, error)
 
 	// NegotiationTimeout bounds the wait for the remote answer, measured from sending the offer.
-	// The dial fails when it passes, without signaling an error to the remote network. If zero,
-	// [DefaultNegotiationTimeout] is used.
+	// If zero, [DefaultNegotiationTimeout] is used.
 	NegotiationTimeout time.Duration
 
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
@@ -106,9 +104,6 @@ type Dialer struct {
 // The Signaling implementation is used to signal an offer with local candidates, and also to
 // notify incoming signals received from the remote network. A Conn may be returned, that is
 // ready to receive and send packets. It is equivalent to calling Dialer{}.Dial.
-//
-// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
-// asynchronously; it is abandoned after [SignalErrorTimeout].
 func Dial(networkID string, signaling Signaling) (*Conn, error) {
 	var d Dialer
 	return d.Dial(networkID, signaling)
@@ -118,9 +113,6 @@ func Dial(networkID string, signaling Signaling) (*Conn, error) {
 // an offer with local candidates, and also to notify incoming signals received from the remote network. The
 // [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
 // ready to receive and send packets. It is equivalent to calling Dialer{}.DialContext.
-//
-// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
-// asynchronously; it is abandoned after [SignalErrorTimeout].
 func DialContext(ctx context.Context, networkID string, signaling Signaling) (*Conn, error) {
 	var d Dialer
 	return d.DialContext(ctx, networkID, signaling)
@@ -130,9 +122,6 @@ func DialContext(ctx context.Context, networkID string, signaling Signaling) (*C
 // The Signaling implementation is used to signal an offer with local candidates, and also to
 // notify incoming signals received from the remote network. A Conn may be returned, that is
 // ready to receive and send packets.
-//
-// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
-// asynchronously; it is abandoned after [SignalErrorTimeout].
 func (d Dialer) Dial(networkID string, signaling Signaling) (*Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
 	defer cancel()
@@ -143,9 +132,6 @@ func (d Dialer) Dial(networkID string, signaling Signaling) (*Conn, error) {
 // an offer with local candidates, and also to notify incoming signals received from the remote network. The
 // [context.Context] may be used to cancel the connection as soon as possible. A Conn may be returned, that is
 // ready to receive and send packets.
-//
-// If the dial fails, a terminal error signal describing the failure may still be sent to the remote network
-// asynchronously; it is abandoned after [SignalErrorTimeout].
 func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Signaling) (_ *Conn, err error) {
 	if d.ConnectionID == 0 {
 		d.ConnectionID = rand.Uint64()
@@ -253,11 +239,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			return nil, context.Cause(c.ctx)
 		case <-answerCtx.Done():
 			if errors.Is(context.Cause(answerCtx), ErrNoAnswer) {
-				// Like vanilla, the remote network is not told about this timeout.
 				return nil, ErrNoAnswer
-			}
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				d.signalError(signaling, networkID, ErrorCodeNegotiationTimeoutWaitingForResponse)
 			}
 			return nil, ctx.Err()
 		case <-signaling.Context().Done():
@@ -270,40 +252,33 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 			case SignalTypeAnswer:
 				s := &sdp.SessionDescription{}
 				if err := s.UnmarshalString(signal.Data); err != nil {
-					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("decode answer: %w", err)
 				}
 				desc, err := ParseDescription(s)
 				if err != nil {
-					d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 					return nil, fmt.Errorf("parse answer: %w", err)
 				}
 				if desc.Identity != nil {
 					publicKey, err := d.VerifyServerIdentity(ctx, desc.Identity)
 					if err != nil {
-						d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 						return nil, fmt.Errorf("verify server identity token: %w", err)
 					}
 					if publicKey == nil {
 						publicKey, err = claimPublicKey(desc.Identity.Assertion.Token, true)
 						if err != nil {
-							d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 							return nil, fmt.Errorf("claim public key: %w", err)
 						}
 					}
 					if err := desc.Identity.Verify(desc, publicKey); err != nil {
-						d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 						return nil, fmt.Errorf("verify server identity: %w", err)
 					}
 					c.publicKey = publicKey
 				} else if !d.AllowIdentitylessServer {
-					d.signalError(signaling, networkID, ErrorCodeIdentityNotAllowed)
 					return nil, errors.New("identityless answer SDP not allowed")
 				}
 				for _, candidate := range desc.Candidates {
 					// Non-trickle ICE connection such as Realms may include candidates in a single SDP.
 					if err := c.addRemoteCandidate(candidate); err != nil {
-						d.signalError(signaling, networkID, ErrorCodeFailedToSetRemoteDescription)
 						return nil, fmt.Errorf("add bundled answer candidate: %w", err)
 					}
 				}
@@ -316,16 +291,12 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 					if err := context.Cause(c.ctx); err != nil {
 						return nil, err
 					}
-					if errors.Is(err, context.DeadlineExceeded) {
-						d.signalError(signaling, networkID, ErrorCodeInactivityTimeout)
-					}
 					return nil, fmt.Errorf("start transports: %w", err)
 				}
 				return c, nil
 			default:
 				err = c.handleSignal(signal)
 				if err != nil {
-					d.signalError(signaling, networkID, ErrorCodeIncomingConnectionIgnored)
 					return nil, fmt.Errorf("handle signal: %w", err)
 				}
 			}
@@ -354,32 +325,12 @@ func (d dialerConn) log() *slog.Logger {
 	return d.Log.With(slog.String("src", "dialer"))
 }
 
-// signalError sends a SignalTypeError to the remote connection using the
-// provided [Signaling] implementation, remote network ID, and error code.
-func (d Dialer) signalError(signaling Signaling, networkID string, code int) {
-	go func() {
-		ctx, cancel := context.WithTimeout(signaling.Context(), SignalErrorTimeout)
-		defer cancel()
-		_ = signaling.Signal(ctx, &Signal{
-			Type:         SignalTypeError,
-			Data:         strconv.Itoa(code),
-			ConnectionID: d.ConnectionID,
-			NetworkID:    networkID,
-		})
-	}()
-}
-
 // DefaultNegotiationTimeout is vanilla's limit on waiting for the answer to an offer.
 const DefaultNegotiationTimeout = 10 * time.Second
 
 // ErrNoAnswer is returned from a dial when no answer arrives within the negotiation timeout: the
-// remote network was unreachable over WebRTC, so a caller may fall back to another transport. The
-// timeout is deliberately not signaled to the remote network.
+// remote network was unreachable over WebRTC, so a caller may fall back to another transport.
 var ErrNoAnswer = errors.New("nethernet: no answer within the negotiation timeout")
-
-// SignalErrorTimeout bounds the asynchronous terminal error signal sent to the remote network after a
-// failed dial.
-const SignalErrorTimeout = time.Second * 2
 
 // startTransports starts the ICE transport as [webrtc.ICERoleControlling],
 // then starts DTLS and SCTP using the parameters from the remote Description.

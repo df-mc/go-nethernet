@@ -138,6 +138,42 @@ func rewriteCandidateAddresses(sdp, host, port string) string {
 	return strings.Join(lines, "\r\n")
 }
 
+// Like vanilla, a client that cannot use an answer closes locally and tells the server nothing.
+func TestDialBadAnswerSignalsNoError(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if _, err := (Dialer{}).DialContext(ctx, "server", badAnswerSignaling{client}); err == nil {
+		t.Fatal("DialContext() accepted a malformed answer")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := client.signalCount(SignalTypeError); got != 0 {
+		t.Fatalf("signaled %d errors to the server, want none", got)
+	}
+}
+
+// badAnswerSignaling answers a dialer's offer with something that is not an SDP.
+type badAnswerSignaling struct{ *memorySignaling }
+
+// Signal forwards the signal and answers an offer with a malformed answer.
+func (s badAnswerSignaling) Signal(ctx context.Context, signal *Signal) error {
+	if err := s.memorySignaling.Signal(ctx, signal); err != nil {
+		return err
+	}
+	if signal.Type == SignalTypeOffer {
+		s.deliver(ctx, &Signal{
+			Type:         SignalTypeAnswer,
+			Data:         "not an sdp",
+			NetworkID:    signal.NetworkID,
+			ConnectionID: signal.ConnectionID,
+		})
+	}
+	return nil
+}
+
 // rejectingSignaling answers a dialer's offer with a terminal error signal, as a server refusing
 // the connection does.
 type rejectingSignaling struct {
