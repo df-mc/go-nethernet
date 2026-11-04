@@ -55,10 +55,14 @@ func (s Status) RakNet() []byte {
 		gameType = "Unknown" //
 	}
 	return []byte(fmt.Sprintf("MCPE;%s;%d;%s;%d;%d;%d;%s;%s;%d;%d;%d;%d;",
-		s.ServerName, s.Protocol, s.Version, s.PlayerCount, s.MaxPlayerCount,
-		rand.Int64(), s.LevelName, gameType, s.GameType, 19132, 19132, 0,
+		pongField(s.ServerName), s.Protocol, pongField(s.Version), s.PlayerCount, s.MaxPlayerCount,
+		rand.Int64(), pongField(s.LevelName), gameType, s.GameType, 19132, 19132, 0,
 	))
 }
+
+// pongField strips ';' from a free-text field so it cannot shift the ';'-delimited pong layout; the
+// RakNet pong format has no way to escape the separator.
+func pongField(v string) string { return strings.ReplaceAll(v, ";", " ") }
 
 // RakNetPongData parses a RakNet-compatible pong data into a Status.
 // It is typically used for maintaining compatibility with older code that

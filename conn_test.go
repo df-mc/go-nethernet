@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -63,6 +64,64 @@ func TestConnReadKeepsRemainderWhenBufferIsShort(t *testing.T) {
 	}
 	if got := string(b[:n]); got != "o" {
 		t.Fatalf("third Read() = %q, want %q", got, "o")
+	}
+}
+
+// TestReceiveKeepsOrderAfterStop covers a reader still waiting for a packet while the Conn closes:
+// a packet completed after stop must not overtake one already queued in pending.
+func TestReceiveKeepsOrderAfterStop(t *testing.T) {
+	for range 200 {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		ch := &dataChannel{
+			message:  &message{},
+			packets:  make(chan []byte),
+			close:    make(chan struct{}),
+			readDone: make(chan struct{}),
+		}
+		conn := &Conn{ctx: ctx}
+		conn.storeChannel(MessageReliabilityReliable, ch)
+
+		ch.stop()
+		if err := ch.handleMessage([]byte("\x00first")); err != nil {
+			t.Fatalf("handleMessage(first) error = %v", err)
+		}
+		got := make(chan string, 1)
+		go func() {
+			pk, _ := conn.ReadPacket()
+			got <- string(pk)
+		}()
+		runtime.Gosched()
+		if err := ch.handleMessage([]byte("\x00second")); err != nil {
+			t.Fatalf("handleMessage(second) error = %v", err)
+		}
+		ch.endRead()
+		cancel(net.ErrClosed)
+		if pk := <-got; pk != "first" {
+			t.Fatalf("ReadPacket() = %q, want %q", pk, "first")
+		}
+	}
+}
+
+// A closed Conn can be retained, so packets it has returned must not stay reachable from the queue.
+func TestTakePendingReleasesPackets(t *testing.T) {
+	first, second := []byte("first"), []byte("second")
+	backing := [][]byte{first, second}
+	ch := &dataChannel{pending: backing}
+
+	if pk, ok := ch.takePending(); !ok || string(pk) != "first" {
+		t.Fatalf("takePending() = %q, %v", pk, ok)
+	}
+	if backing[0] != nil {
+		t.Fatal("taken packet is still referenced by the queue's backing array")
+	}
+	if _, ok := ch.takePending(); !ok {
+		t.Fatal("second takePending() found nothing")
+	}
+	if ch.pending != nil {
+		t.Fatalf("empty queue keeps its backing array: %#v", ch.pending)
+	}
+	if pk, ok := ch.takePending(); ok {
+		t.Fatalf("takePending() on an empty queue = %q", pk)
 	}
 }
 
