@@ -2,6 +2,7 @@ package nethernet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -476,4 +477,176 @@ func TestRemoteErrorsAfterNegotiation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCloseDeliversDataWrittenJustBefore covers a final message written right before Close, such as
+// a disconnect packet: Close must not stop the transports while the peer has yet to acknowledge it.
+func TestCloseDeliversDataWrittenJustBefore(t *testing.T) {
+	conn, serverConn := dialPair(t)
+
+	const (
+		messages    = 4
+		messageSize = 64 << 10
+	)
+	received := make(chan int, 1)
+	go func() {
+		total := 0
+		b := make([]byte, messageSize)
+		for total < messages*messageSize {
+			n, err := conn.Read(b)
+			total += n
+			if err != nil {
+				break
+			}
+		}
+		received <- total
+	}()
+
+	payload := make([]byte, messageSize)
+	for i := range messages {
+		if _, err := serverConn.Write(payload); err != nil {
+			t.Fatalf("Write() #%d error = %v", i, err)
+		}
+	}
+	if err := serverConn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	select {
+	case got := <-received:
+		if got != messages*messageSize {
+			t.Fatalf("received %d bytes before close, want %d", got, messages*messageSize)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Read() timed out")
+	}
+}
+
+// TestCloseLingersAfterAcknowledgement covers a client that reads once per frame: the connection must
+// stay up briefly after the final message is acknowledged, or the client may see the closure first.
+func TestCloseLingersAfterAcknowledgement(t *testing.T) {
+	_, serverConn := dialPair(t)
+
+	if _, err := serverConn.Write([]byte("disconnect")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	start := time.Now()
+	if err := serverConn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < closeLinger {
+		t.Fatalf("Close() returned after %v, want at least %v", elapsed, closeLinger)
+	}
+}
+
+// TestReceiveReturnsPacketsBeforeRemoteClosure covers a reader that is busy when the remote peer
+// sends its final messages and closes: they must still be read before the closure is reported.
+func TestReceiveReturnsPacketsBeforeRemoteClosure(t *testing.T) {
+	conn, serverConn := dialPair(t)
+
+	want := []string{"first", "disconnect"}
+	for _, m := range want {
+		if _, err := serverConn.Write([]byte(m)); err != nil {
+			t.Fatalf("Write(%q) error = %v", m, err)
+		}
+	}
+	if err := serverConn.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case <-conn.(*Conn).Context().Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("remote closure was not observed")
+	}
+
+	for _, m := range want {
+		pk, err := conn.(*Conn).ReadPacket()
+		if err != nil {
+			t.Fatalf("ReadPacket() error = %v, want %q", err, m)
+		}
+		if string(pk) != m {
+			t.Fatalf("ReadPacket() = %q, want %q", pk, m)
+		}
+	}
+	if _, err := conn.(*Conn).ReadPacket(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("ReadPacket() after final packet error = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestAbortEndsCloseWaitingForAcknowledgement covers a peer that stops reading: Abort must not wait
+// for it, and must end a Close that is waiting for it.
+func TestAbortEndsCloseWaitingForAcknowledgement(t *testing.T) {
+	_, serverConn := dialPair(t)
+	conn := serverConn.(*Conn)
+
+	// The dialed side never reads, so Pion stops acknowledging once its receive buffer is full.
+	payload := make([]byte, 1<<20)
+	for i := range 4 {
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatalf("Write() #%d error = %v", i, err)
+		}
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- conn.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close() returned %v before the peer acknowledged the data", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	start := time.Now()
+	if err := conn.Abort(); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close() still waiting after Abort()")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Abort() and Close() took %v, want well under closeDrainTimeout", elapsed)
+	}
+}
+
+// dialPair returns a dialed Conn and the Conn its Listener accepted, both closed on cleanup.
+func dialPair(t *testing.T) (dialed, accepted net.Conn) {
+	t.Helper()
+	client, server := newMemorySignalingPair("1", "2")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+
+	l, err := (ListenConfig{AllowAnonymous: true}).Listen(server)
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	acceptedCh := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		acceptedCh <- conn
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	dialed, err = (Dialer{}).DialContext(ctx, server.NetworkID(), client)
+	if err != nil {
+		t.Fatalf("DialContext() error = %v", err)
+	}
+	t.Cleanup(func() { _ = dialed.Close() })
+
+	select {
+	case accepted = <-acceptedCh:
+	case err := <-acceptErr:
+		t.Fatalf("Accept() error = %v", err)
+	case <-ctx.Done():
+		t.Fatalf("Accept() timed out: %v", ctx.Err())
+	}
+	t.Cleanup(func() { _ = accepted.Close() })
+	return dialed, accepted
 }
