@@ -77,6 +77,8 @@ type Conn struct {
 	// maxSegmentPayload is the negotiated SCTP message size minus the one-byte
 	// NetherNet fragment header.
 	maxSegmentPayload atomic.Uint32
+	// lastSend is the UnixNano time of the last successful Send, or zero if there was none.
+	lastSend atomic.Int64
 
 	readMu  sync.Mutex
 	readBuf []byte
@@ -232,6 +234,7 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 			n += len(frag)
 			remaining--
 		}
+		conn.lastSend.Store(time.Now().UnixNano())
 		return n, nil
 	}
 }
@@ -428,12 +431,32 @@ const (
 
 // drain waits until the remote peer has acknowledged all data written to the data channels,
 // because stopping the SCTP transport discards whatever it still buffers: a final message such as
-// a disconnect would never arrive. Once acknowledged it waits closeLinger. It returns early once the
-// Conn closes for another reason, and gives up after timeout.
+// a disconnect would never arrive. It then lingers: closeLinger after waiting for an acknowledgement,
+// or what remains of closeLinger since the last Send if everything was already acknowledged. It
+// returns early once the Conn closes for another reason, and gives up after timeout.
 func (conn *Conn) drain(timeout time.Duration) {
+	linger := closeLinger
 	if conn.bufferedAmount() == 0 {
+		last := conn.lastSend.Load()
+		if last == 0 {
+			return
+		}
+		linger -= time.Since(time.Unix(0, last))
+	} else if !conn.awaitAcknowledgement(timeout) {
 		return
 	}
+	if linger <= 0 {
+		return
+	}
+	select {
+	case <-conn.ctx.Done():
+	case <-time.After(linger):
+	}
+}
+
+// awaitAcknowledgement reports whether the remote peer acknowledged all written data within timeout
+// and before the Conn closed.
+func (conn *Conn) awaitAcknowledgement(timeout time.Duration) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(drainPollInterval)
@@ -441,16 +464,13 @@ func (conn *Conn) drain(timeout time.Duration) {
 	for conn.bufferedAmount() != 0 {
 		select {
 		case <-conn.ctx.Done():
-			return
+			return false
 		case <-deadline.C:
-			return
+			return false
 		case <-ticker.C:
 		}
 	}
-	select {
-	case <-conn.ctx.Done():
-	case <-time.After(closeLinger):
-	}
+	return true
 }
 
 // bufferedAmount returns the number of bytes written to the open data channels that the remote

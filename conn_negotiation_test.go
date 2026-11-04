@@ -650,3 +650,55 @@ func dialPair(t *testing.T) (dialed, accepted net.Conn) {
 	t.Cleanup(func() { _ = accepted.Close() })
 	return dialed, accepted
 }
+
+// TestCloseLingersWhenAlreadyAcknowledged covers a final message acknowledged before Close starts:
+// the client may not have read it yet, so Close must still keep the connection up.
+func TestCloseLingersWhenAlreadyAcknowledged(t *testing.T) {
+	_, serverConn := dialPair(t)
+	c := serverConn.(*Conn)
+
+	// A second message makes the peer acknowledge at once instead of delaying it.
+	for _, m := range []string{"final state", "disconnect"} {
+		if _, err := c.Write([]byte(m)); err != nil {
+			t.Fatalf("Write(%q) error = %v", m, err)
+		}
+	}
+	sent := time.Now()
+	for c.bufferedAmount() != 0 {
+		if time.Since(sent) > 5*time.Second {
+			t.Fatal("messages were not acknowledged")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if waited := time.Since(sent); waited >= closeLinger {
+		t.Fatalf("acknowledgement took %v, which leaves nothing to wait for", waited)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if elapsed := time.Since(sent); elapsed < closeLinger {
+		t.Fatalf("Close() finished %v after the final write, want at least %v", elapsed, closeLinger)
+	}
+}
+
+// TestCloseSkipsLingerWhenIdle covers a connection with nothing sent recently: Close has no final
+// message to protect, so it must not wait.
+func TestCloseSkipsLingerWhenIdle(t *testing.T) {
+	_, serverConn := dialPair(t)
+	c := serverConn.(*Conn)
+	// The data channels' own open messages are acknowledged shortly after the dial.
+	for deadline := time.Now().Add(5 * time.Second); c.bufferedAmount() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("open messages were not acknowledged")
+		}
+	}
+	c.lastSend.Store(time.Now().Add(-2 * closeLinger).UnixNano())
+
+	start := time.Now()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= closeLinger {
+		t.Fatalf("Close() took %v on an idle connection", elapsed)
+	}
+}
