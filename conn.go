@@ -77,8 +77,9 @@ type Conn struct {
 	// maxSegmentPayload is the negotiated SCTP message size minus the one-byte
 	// NetherNet fragment header.
 	maxSegmentPayload atomic.Uint32
-	// lastSend is the UnixNano time of the last successful Send, or zero if there was none.
-	lastSend atomic.Int64
+	// lastSend is when the last successful Send finished, or nil if there was none. It keeps the
+	// monotonic reading, so a change to the system clock cannot stretch the linger.
+	lastSend atomic.Pointer[time.Time]
 
 	readMu  sync.Mutex
 	readBuf []byte
@@ -234,7 +235,8 @@ func (conn *Conn) Send(data []byte, reliability MessageReliability) (n int, err 
 			n += len(frag)
 			remaining--
 		}
-		conn.lastSend.Store(time.Now().UnixNano())
+		now := time.Now()
+		conn.lastSend.Store(&now)
 		return n, nil
 	}
 }
@@ -438,10 +440,10 @@ func (conn *Conn) drain(timeout time.Duration) {
 	linger := closeLinger
 	if conn.bufferedAmount() == 0 {
 		last := conn.lastSend.Load()
-		if last == 0 {
+		if last == nil {
 			return
 		}
-		linger -= time.Since(time.Unix(0, last))
+		linger -= time.Since(*last)
 	} else if !conn.awaitAcknowledgement(timeout) {
 		return
 	}

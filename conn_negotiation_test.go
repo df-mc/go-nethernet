@@ -651,28 +651,43 @@ func dialPair(t *testing.T) (dialed, accepted net.Conn) {
 	return dialed, accepted
 }
 
+// awaitNothingBuffered waits until the peer has acknowledged everything c wrote, including the data
+// channels' own open messages.
+func awaitNothingBuffered(t *testing.T, c *Conn) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); c.bufferedAmount() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("written data was not acknowledged")
+		}
+	}
+}
+
+// TestSendRecordsLastSend covers what the linger is timed from.
+func TestSendRecordsLastSend(t *testing.T) {
+	_, serverConn := dialPair(t)
+	c := serverConn.(*Conn)
+
+	if c.lastSend.Load() != nil {
+		t.Fatal("lastSend is set before any Send")
+	}
+	before := time.Now()
+	if _, err := c.Write([]byte("disconnect")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if last := c.lastSend.Load(); last == nil || last.Before(before) {
+		t.Fatalf("lastSend = %v, want a time after %v", last, before)
+	}
+}
+
 // TestCloseLingersWhenAlreadyAcknowledged covers a final message acknowledged before Close starts:
 // the client may not have read it yet, so Close must still keep the connection up.
 func TestCloseLingersWhenAlreadyAcknowledged(t *testing.T) {
 	_, serverConn := dialPair(t)
 	c := serverConn.(*Conn)
+	awaitNothingBuffered(t, c)
 
-	// A second message makes the peer acknowledge at once instead of delaying it.
-	for _, m := range []string{"final state", "disconnect"} {
-		if _, err := c.Write([]byte(m)); err != nil {
-			t.Fatalf("Write(%q) error = %v", m, err)
-		}
-	}
 	sent := time.Now()
-	for c.bufferedAmount() != 0 {
-		if time.Since(sent) > 5*time.Second {
-			t.Fatal("messages were not acknowledged")
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if waited := time.Since(sent); waited >= closeLinger {
-		t.Fatalf("acknowledgement took %v, which leaves nothing to wait for", waited)
-	}
+	c.lastSend.Store(&sent)
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -686,14 +701,10 @@ func TestCloseLingersWhenAlreadyAcknowledged(t *testing.T) {
 func TestCloseSkipsLingerWhenIdle(t *testing.T) {
 	_, serverConn := dialPair(t)
 	c := serverConn.(*Conn)
-	// The data channels' own open messages are acknowledged shortly after the dial.
-	for deadline := time.Now().Add(5 * time.Second); c.bufferedAmount() != 0; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("open messages were not acknowledged")
-		}
-	}
-	c.lastSend.Store(time.Now().Add(-2 * closeLinger).UnixNano())
+	awaitNothingBuffered(t, c)
 
+	sent := time.Now().Add(-2 * closeLinger)
+	c.lastSend.Store(&sent)
 	start := time.Now()
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
