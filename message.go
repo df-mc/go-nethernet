@@ -1,11 +1,8 @@
 package nethernet
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"net"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -89,17 +86,13 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 		// Previously, message.data was pre-allocated for all possible segments.
 		// Since most messages are smaller than 256KB and don't require fragmentation,
 		// we no longer need to pre-allocate a large buffer.
-		message: &message{},
-		packets: conn.packets,
-		close:   make(chan struct{}),
+		message:  &message{},
+		packets:  conn.packets,
+		close:    make(chan struct{}),
+		readDone: make(chan struct{}),
 	}
 	ch.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if err := ch.handleMessage(msg.Data); err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				conn.log.Debug("message dropped due to closure of data channel",
-					slog.String("label", ch.Label()))
-				return
-			}
 			// Receiving an invalid or incomplete message is considered unrecoverable
 			// as segmented packets cannot be completed. Closing the connection also
 			// helps mitigate malformed or malicious input from a peer.
@@ -109,6 +102,7 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 		}
 	})
 	ch.OnClose(func() {
+		ch.endRead()
 		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 		go conn.close(fmt.Errorf("nethernet: data channel %q closed by remote peer", ch.Label()))
 	})
@@ -137,11 +131,17 @@ type dataChannel struct {
 
 	// packets is the Conn's receive queue, shared by both data channels.
 	packets chan []byte
+	// pending holds packets completed once the dataChannel closed, which Receive returns
+	// before reporting the closure. It is guarded by pendingMu.
+	pending   [][]byte
+	pendingMu sync.Mutex
 
-	// close is a channel that is closed when a dataChannel is closed.
+	// close is closed once the Conn closes. Completed packets then go to pending.
 	close chan struct{}
-	// once ensures the dataChannel is closed only once.
-	once sync.Once
+	once  sync.Once
+	// readDone is closed once Pion stops delivering messages, so pending is final.
+	readDone chan struct{}
+	readOnce sync.Once
 }
 
 // message represents the structure of remote messages sent in ReliableDataChannel.
@@ -168,29 +168,19 @@ func parseMessage(b []byte) (*message, error) {
 // the incoming data into a message using parseMessage and handles the segments, and if all segments has
 // been received, it sends the buffer to either [Conn.Read] or [Conn.ReadPacket].
 func (c *dataChannel) handleMessage(b []byte) error {
-	select {
-	case <-c.close:
-		return net.ErrClosed
-	default:
-	}
-
 	msg, err := parseMessage(b)
 	if err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 
-	if c.reliability == MessageReliabilityUnreliable {
-		// Vanilla ignores the segment header of unreliable messages and queues each one whole.
-		select {
-		case <-c.close:
-			return net.ErrClosed
-		case c.packets <- msg.data:
-		}
-		return nil
-	}
-
 	c.messageMu.Lock()
 	defer c.messageMu.Unlock()
+
+	if c.reliability == MessageReliabilityUnreliable {
+		// Vanilla ignores the segment header of unreliable messages and queues each one whole.
+		c.deliver(msg.data)
+		return nil
+	}
 
 	if c.segments > 0 && c.segments-1 != msg.segments {
 		return fmt.Errorf("invalid promised segments: expected %d, got %d", c.segments-1, msg.segments)
@@ -203,24 +193,55 @@ func (c *dataChannel) handleMessage(b []byte) error {
 		return nil
 	}
 
-	select {
-	case <-c.close:
-		return net.ErrClosed
-	case c.packets <- c.data:
-		c.data = nil
-	}
-
+	c.deliver(c.data)
+	c.data = nil
 	return nil
 }
 
-// Close closes the underlying [webrtc.DataChannel].
-func (c *dataChannel) Close() (err error) {
+// deliver hands a completed packet to Receive. Once stopped, every packet goes to pending, so none
+// overtakes one queued there.
+func (c *dataChannel) deliver(pk []byte) {
+	select {
+	case <-c.close:
+	default:
+		select {
+		case c.packets <- pk:
+			return
+		case <-c.close:
+		}
+	}
+	c.pendingMu.Lock()
+	c.pending = append(c.pending, pk)
+	c.pendingMu.Unlock()
+}
+
+// takePending returns the oldest packet completed once the dataChannel closed.
+func (c *dataChannel) takePending() ([]byte, bool) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	if len(c.pending) == 0 {
+		return nil, false
+	}
+	pk := c.pending[0]
+	c.pending[0] = nil // A closed Conn can outlive its packets, so the queue must not keep them.
+	c.pending = c.pending[1:]
+	if len(c.pending) == 0 {
+		c.pending = nil
+	}
+	return pk, true
+}
+
+// stop makes handleMessage put completed packets in pending instead of waiting for Receive.
+// Once it returns, a packet that was waiting for Receive is in pending.
+func (c *dataChannel) stop() {
 	c.once.Do(func() {
 		close(c.close)
 		c.messageMu.Lock()
-		clear(c.data)
-		c.messageMu.Unlock()
-		err = c.DataChannel.Close()
+		defer c.messageMu.Unlock()
 	})
-	return err
+}
+
+// endRead marks that Pion delivers no more messages to the dataChannel.
+func (c *dataChannel) endRead() {
+	c.readOnce.Do(func() { close(c.readDone) })
 }

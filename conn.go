@@ -134,10 +134,21 @@ func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 		return nil, fmt.Errorf("invalid message reliability: %d", r)
 	}
 	select {
-	case <-conn.ctx.Done():
-		return nil, errors.Join(context.Cause(conn.ctx), net.ErrClosed)
 	case pk := <-conn.packets:
 		return pk, nil
+	case <-conn.ctx.Done():
+		// Messages that arrived before the closure come first, so the final one a remote peer
+		// sends before closing, such as a disconnect, is not lost.
+		for _, ch := range conn.snapshotChannels() {
+			if ch == nil {
+				continue
+			}
+			<-ch.readDone
+			if pk, ok := ch.takePending(); ok {
+				return pk, nil
+			}
+		}
+		return nil, errors.Join(context.Cause(conn.ctx), net.ErrClosed)
 	}
 }
 
@@ -322,9 +333,9 @@ func (conn *Conn) remoteAddr() *Addr {
 	}
 }
 
-// close closes the data channels associated with reliability parameters, then closes each transport
-// of the Conn. It also cancels the background context with the provided cause so that may be returned
-// by current-blocking methods such as [Conn.Read].
+// close cancels the background context with the provided cause, so that may be returned by
+// current-blocking methods such as [Conn.Read], then closes each transport of the Conn. Messages
+// already received stay readable: Pion keeps delivering them after SCTP stops.
 func (conn *Conn) close(cause error) (err error) {
 	conn.once.Do(func() {
 		if cause != nil {
@@ -333,19 +344,27 @@ func (conn *Conn) close(cause error) (err error) {
 		conn.cancel(cause)
 		conn.negotiator.handleClose(conn)
 
-		for _, ch := range conn.snapshotChannels() {
+		channels := conn.snapshotChannels()
+		for _, ch := range channels {
 			if ch != nil {
-				err = errors.Join(err, ch.Close())
+				ch.stop()
 			}
 		}
 
 		err = errors.Join(
-			err,
 			conn.sctp.Stop(),
 			conn.dtls.Stop(),
 			conn.ice.Stop(),
 			conn.gatherer.Close(),
 		)
+		// Pion ends a read loop once SCTP stops, but Receive must not wait on one that never started.
+		time.AfterFunc(readLoopEndTimeout, func() {
+			for _, ch := range channels {
+				if ch != nil {
+					ch.endRead()
+				}
+			}
+		})
 	})
 	return err
 }
@@ -377,10 +396,27 @@ func (conn *Conn) snapshotChannels() [messageReliabilityCapacity]*dataChannel {
 	return conn.channels
 }
 
-// Close closes the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,
+// Close waits up to three seconds for the remote peer to acknowledge data already written, then closes
+// the 'ReliableDataChannel' and 'UnreliableDataChannel', then closes the SCTP, DTLS,
 // and ICE transports of the Conn. An error may be returned using [errors.Join], which contains
 // non-nil errors encountered during closure.
 func (conn *Conn) Close() (err error) {
+	conn.drain(closeDrainTimeout)
+	// Closing a Pion data channel discards messages it has yet to deliver, so only do it to
+	// notify a remote peer that is still connected.
+	if conn.ctx.Err() == nil {
+		for _, ch := range conn.snapshotChannels() {
+			if ch != nil {
+				err = errors.Join(err, ch.Close())
+			}
+		}
+	}
+	return errors.Join(err, conn.close(net.ErrClosed))
+}
+
+// Abort closes the Conn like Close, but discards data the remote peer has yet to acknowledge
+// instead of waiting for it. It also ends a Close that is still waiting.
+func (conn *Conn) Abort() error {
 	return conn.close(net.ErrClosed)
 }
 
@@ -389,6 +425,60 @@ func (conn *Conn) Close() (err error) {
 // may fall back to another transport. A remote rejection, a transport failure after ICE connected,
 // or a local close is not a reachability failure and does not carry it.
 var ErrICEConnectFailed = errors.New("nethernet: ICE transport failed to connect to the remote network")
+
+const (
+	// readLoopEndTimeout bounds how long Receive waits after closure for Pion to deliver
+	// messages it already received.
+	readLoopEndTimeout = time.Second
+	// closeDrainTimeout bounds how long [Conn.Close] waits for the remote peer to acknowledge
+	// data already written, so a peer that stopped reading cannot hold Close open. It outlasts
+	// one SCTP retransmission, which waits at least a second, so one lost final message still arrives.
+	closeDrainTimeout = 3 * time.Second
+	// drainPollInterval is how often drain checks the data channels for unacknowledged data.
+	drainPollInterval = 5 * time.Millisecond
+	// closeLinger is how long Close keeps the transports up after the last acknowledgement. On a
+	// busy connection that comes milliseconds after delivery, and a client that sees the closure in
+	// the same frame as a final message may never read it.
+	closeLinger = 100 * time.Millisecond
+)
+
+// drain waits until the remote peer has acknowledged all data written to the data channels,
+// because stopping the SCTP transport discards whatever it still buffers: a final message such as
+// a disconnect would never arrive. Once acknowledged it waits closeLinger. It returns early once the
+// Conn closes for another reason, and gives up after timeout.
+func (conn *Conn) drain(timeout time.Duration) {
+	if conn.bufferedAmount() == 0 {
+		return
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(drainPollInterval)
+	defer ticker.Stop()
+	for conn.bufferedAmount() != 0 {
+		select {
+		case <-conn.ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		case <-ticker.C:
+		}
+	}
+	select {
+	case <-conn.ctx.Done():
+	case <-time.After(closeLinger):
+	}
+}
+
+// bufferedAmount returns the number of bytes written to the open data channels that the remote
+// peer has not acknowledged yet.
+func (conn *Conn) bufferedAmount() (n uint64) {
+	for _, ch := range conn.snapshotChannels() {
+		if ch != nil && ch.ReadyState() == webrtc.DataChannelStateOpen {
+			n += ch.BufferedAmount()
+		}
+	}
+	return n
+}
 
 // isTerminalICEState reports whether an ICE transport can no longer recover.
 func isTerminalICEState(state webrtc.ICETransportState) bool {
