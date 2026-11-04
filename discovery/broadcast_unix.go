@@ -9,3 +9,6 @@ import "syscall"
 func setSocketBroadcast(fd uintptr) {
 	_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
 }
+
+// unreachableErrors are the send errors after which vanilla stops sending to a destination.
+var unreachableErrors = []error{syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EAFNOSUPPORT, syscall.EFAULT}
