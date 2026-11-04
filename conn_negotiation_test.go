@@ -650,3 +650,66 @@ func dialPair(t *testing.T) (dialed, accepted net.Conn) {
 	t.Cleanup(func() { _ = accepted.Close() })
 	return dialed, accepted
 }
+
+// awaitNothingBuffered waits until the peer has acknowledged everything c wrote, including the data
+// channels' own open messages.
+func awaitNothingBuffered(t *testing.T, c *Conn) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); c.bufferedAmount() != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("written data was not acknowledged")
+		}
+	}
+}
+
+// TestSendRecordsLastSend covers what the linger is timed from.
+func TestSendRecordsLastSend(t *testing.T) {
+	_, serverConn := dialPair(t)
+	c := serverConn.(*Conn)
+
+	if c.lastSend.Load() != nil {
+		t.Fatal("lastSend is set before any Send")
+	}
+	before := time.Now()
+	if _, err := c.Write([]byte("disconnect")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if last := c.lastSend.Load(); last == nil || last.Before(before) {
+		t.Fatalf("lastSend = %v, want a time after %v", last, before)
+	}
+}
+
+// TestCloseLingersWhenAlreadyAcknowledged covers a final message acknowledged before Close starts:
+// the client may not have read it yet, so Close must still keep the connection up.
+func TestCloseLingersWhenAlreadyAcknowledged(t *testing.T) {
+	_, serverConn := dialPair(t)
+	c := serverConn.(*Conn)
+	awaitNothingBuffered(t, c)
+
+	sent := time.Now()
+	c.lastSend.Store(&sent)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if elapsed := time.Since(sent); elapsed < closeLinger {
+		t.Fatalf("Close() finished %v after the final write, want at least %v", elapsed, closeLinger)
+	}
+}
+
+// TestCloseSkipsLingerWhenIdle covers a connection with nothing sent recently: Close has no final
+// message to protect, so it must not wait.
+func TestCloseSkipsLingerWhenIdle(t *testing.T) {
+	_, serverConn := dialPair(t)
+	c := serverConn.(*Conn)
+	awaitNothingBuffered(t, c)
+
+	sent := time.Now().Add(-2 * closeLinger)
+	c.lastSend.Store(&sent)
+	start := time.Now()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= closeLinger {
+		t.Fatalf("Close() took %v on an idle connection", elapsed)
+	}
+}
