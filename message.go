@@ -87,7 +87,7 @@ func wrapDataChannel(channel *webrtc.DataChannel, reliability MessageReliability
 		// Since most messages are smaller than 256KB and don't require fragmentation,
 		// we no longer need to pre-allocate a large buffer.
 		message:  &message{},
-		packets:  make(chan []byte),
+		packets:  conn.packets,
 		close:    make(chan struct{}),
 		readDone: make(chan struct{}),
 	}
@@ -129,8 +129,7 @@ type dataChannel struct {
 	// its embedded [sync.Mutex] for guaranteeing ordered segment counts.
 	write sync.Mutex
 
-	// packets can be used to receive packets that are fully-reconstructed from
-	// one or more segments received in the dataChannel.
+	// packets is the Conn's receive queue, shared by both data channels.
 	packets chan []byte
 	// pending holds packets completed once the dataChannel closed, which Receive returns
 	// before reporting the closure. It is guarded by pendingMu.
@@ -174,12 +173,14 @@ func (c *dataChannel) handleMessage(b []byte) error {
 		return fmt.Errorf("parse: %w", err)
 	}
 
-	if c.reliability == MessageReliabilityUnreliable && msg.segments > 0 {
-		return fmt.Errorf("unexpected segment count on UnreliableDataChannel: %d", msg.segments)
-	}
-
 	c.messageMu.Lock()
 	defer c.messageMu.Unlock()
+
+	if c.reliability == MessageReliabilityUnreliable {
+		// Vanilla ignores the segment header of unreliable messages and queues each one whole.
+		c.deliver(msg.data)
+		return nil
+	}
 
 	if c.segments > 0 && c.segments-1 != msg.segments {
 		return fmt.Errorf("invalid promised segments: expected %d, got %d", c.segments-1, msg.segments)
@@ -192,22 +193,26 @@ func (c *dataChannel) handleMessage(b []byte) error {
 		return nil
 	}
 
+	c.deliver(c.data)
+	c.data = nil
+	return nil
+}
+
+// deliver hands a completed packet to Receive. Once stopped, every packet goes to pending, so none
+// overtakes one queued there.
+func (c *dataChannel) deliver(pk []byte) {
 	select {
 	case <-c.close:
 	default:
 		select {
-		case c.packets <- c.data:
-			c.data = nil
-			return nil
+		case c.packets <- pk:
+			return
 		case <-c.close:
 		}
 	}
-	// Once stopped, every completed packet goes to pending, so none overtakes one queued there.
 	c.pendingMu.Lock()
-	c.pending = append(c.pending, c.data)
+	c.pending = append(c.pending, pk)
 	c.pendingMu.Unlock()
-	c.data = nil
-	return nil
 }
 
 // takePending returns the oldest packet completed once the dataChannel closed.

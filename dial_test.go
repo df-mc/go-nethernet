@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-func TestDialContextDoesNotWaitIndefinitelyForErrorSignal(t *testing.T) {
+// Like vanilla, a client never reports its own failures to the remote network.
+func TestDialDeadlineSignalsNoError(t *testing.T) {
 	signaling := newBlockingErrorSignaling("client")
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond*20)
@@ -32,8 +33,8 @@ func TestDialContextDoesNotWaitIndefinitelyForErrorSignal(t *testing.T) {
 
 	select {
 	case <-signaling.errorSignalStarted:
-	case <-time.After(time.Second):
-		t.Fatal("DialContext() did not attempt to signal the timeout error")
+		t.Fatal("DialContext() signaled its timeout to the remote network")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

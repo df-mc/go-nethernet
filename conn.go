@@ -74,9 +74,15 @@ type Conn struct {
 	channels [messageReliabilityCapacity]*dataChannel
 	// channelsMu guards channels from concurrent read-write access during startup and closure.
 	channelsMu sync.RWMutex
+	// packets queues reassembled packets from both data channels for Receive.
+	packets chan []byte
 	// maxSegmentPayload is the negotiated SCTP message size minus the one-byte
 	// NetherNet fragment header.
 	maxSegmentPayload atomic.Uint32
+
+	// iceConnected records whether the ICE transport ever reached a connected state, so a later
+	// failure is told apart from one that never connected.
+	iceConnected atomic.Bool
 
 	readMu  sync.Mutex
 	readBuf []byte
@@ -99,7 +105,7 @@ type Conn struct {
 	cancel context.CancelCauseFunc
 }
 
-// Read receives a message from the 'ReliableDataChannel'. The bytes of the message data are copied to
+// Read receives a message from either data channel. The bytes of the message data are copied to
 // the given data. An error may be returned if the Conn has been closed by [Conn.Close].
 func (conn *Conn) Read(b []byte) (n int, err error) {
 	conn.readMu.Lock()
@@ -120,29 +126,33 @@ func (conn *Conn) Read(b []byte) (n int, err error) {
 	return n, nil
 }
 
-// Receive receives a packet in fully reconstructed state combined from multiple segments
-// received from the data channel responsible for the MessageReliability. An error may be
-// returned if the Conn has been closed by [Conn.Close].
+// Receive returns the next fully reassembled packet. As in vanilla, packets from both data
+// channels share one queue, so r only selects a valid reliability. An error may be returned
+// if the Conn has been closed by [Conn.Close].
 func (conn *Conn) Receive(r MessageReliability) ([]byte, error) {
 	if r >= messageReliabilityCapacity {
 		return nil, fmt.Errorf("invalid message reliability: %d", r)
 	}
-	ch := conn.channel(r)
 	select {
-	case pk := <-ch.packets:
+	case pk := <-conn.packets:
 		return pk, nil
 	case <-conn.ctx.Done():
 		// Messages that arrived before the closure come first, so the final one a remote peer
 		// sends before closing, such as a disconnect, is not lost.
-		<-ch.readDone
-		if pk, ok := ch.takePending(); ok {
-			return pk, nil
+		for _, ch := range conn.snapshotChannels() {
+			if ch == nil {
+				continue
+			}
+			<-ch.readDone
+			if pk, ok := ch.takePending(); ok {
+				return pk, nil
+			}
 		}
 		return nil, errors.Join(context.Cause(conn.ctx), net.ErrClosed)
 	}
 }
 
-// ReadPacket receives a message from the 'ReliableDataChannel' and returns the bytes. It is
+// ReadPacket receives a message from either data channel and returns the bytes. It is
 // implemented for Minecraft read operations to avoid some bugs related to the Read method in
 // their decoder.
 func (conn *Conn) ReadPacket() ([]byte, error) {
@@ -410,6 +420,12 @@ func (conn *Conn) Abort() error {
 	return conn.close(net.ErrClosed)
 }
 
+// ErrICEConnectFailed is the cause a Conn is closed with when its ICE transport gives up finding a
+// working path: the remote network was unreachable over WebRTC, so a dial returns it and a caller
+// may fall back to another transport. A remote rejection, a transport failure after ICE connected,
+// or a local close is not a reachability failure and does not carry it.
+var ErrICEConnectFailed = errors.New("nethernet: ICE transport failed to connect to the remote network")
+
 const (
 	// readLoopEndTimeout bounds how long Receive waits after closure for Pion to deliver
 	// messages it already received.
@@ -474,10 +490,22 @@ func isTerminalICEState(state webrtc.ICETransportState) bool {
 // error has occurred in any of the underlying transports and data channels.
 func (conn *Conn) handleTransports() {
 	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
-		if isTerminalICEState(state) {
-			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
-			go conn.close(fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state))
+		if state == webrtc.ICETransportStateConnected || state == webrtc.ICETransportStateCompleted {
+			conn.iceConnected.Store(true)
+			return
 		}
+		if !isTerminalICEState(state) {
+			return
+		}
+		// A failed agent that never connected never reached the remote network, so a dial carries
+		// ErrICEConnectFailed and a caller may fall back. A close, or a failure after ICE connected,
+		// is not an initial reachability failure.
+		cause := fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state)
+		if state == webrtc.ICETransportStateFailed && !conn.iceConnected.Load() {
+			cause = ErrICEConnectFailed
+		}
+		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
+		go conn.close(cause)
 	})
 	conn.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
 		switch state {
@@ -768,18 +796,6 @@ func (conn *Conn) trickleCandidate(signaling Signaling, data string) {
 		Data:         data,
 		NetworkID:    conn.networkID,
 	}); err != nil {
-		errCtx, cancel := context.WithTimeout(conn.Context(), time.Second*15)
-		defer cancel()
-
-		// I don't think the error code will be signaled back to the remote connection, but just in case.
-		if err := signaling.Signal(errCtx, &Signal{
-			Type:         SignalTypeError,
-			ConnectionID: conn.id,
-			Data:         strconv.Itoa(ErrorCodeSignalingFailedToSend),
-			NetworkID:    conn.networkID,
-		}); err != nil {
-			conn.log.Error("error signaling error", slog.Any("error", err))
-		}
 		_ = conn.close(fmt.Errorf("signal candidate: %w", err))
 	}
 }
@@ -1004,6 +1020,7 @@ func newConn(api *webrtc.API, gathererOpts webrtc.ICEGatherOptions, id uint64, n
 		},
 
 		candidateReceived: make(chan struct{}),
+		packets:           make(chan []byte),
 
 		negotiator: n,
 

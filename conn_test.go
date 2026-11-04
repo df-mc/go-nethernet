@@ -36,10 +36,8 @@ func TestConnReadKeepsRemainderWhenBufferIsShort(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
-	conn := &Conn{ctx: ctx}
-	packets := make(chan []byte, 1)
-	conn.storeChannel(MessageReliabilityReliable, &dataChannel{packets: packets})
-	packets <- []byte("hello")
+	conn := &Conn{ctx: ctx, packets: make(chan []byte, 1)}
+	conn.packets <- []byte("hello")
 
 	b := make([]byte, 2)
 	n, err := conn.Read(b)
@@ -122,6 +120,37 @@ func TestTakePendingReleasesPackets(t *testing.T) {
 	}
 	if pk, ok := ch.takePending(); ok {
 		t.Fatalf("takePending() on an empty queue = %q", pk)
+	}
+}
+
+// Both data channels share one receive queue, so packets left on either must survive the closure.
+func TestReceiveReturnsPendingPacketsFromBothChannels(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	conn := &Conn{ctx: ctx}
+	for r, data := range map[MessageReliability]string{MessageReliabilityReliable: "\x00reliable", MessageReliabilityUnreliable: "\x05unreliable"} {
+		ch := &dataChannel{reliability: r, message: &message{}, close: make(chan struct{}), readDone: make(chan struct{})}
+		conn.storeChannel(r, ch)
+		ch.stop()
+		if err := ch.handleMessage([]byte(data)); err != nil {
+			t.Fatalf("handleMessage(%q) error = %v", data, err)
+		}
+		ch.endRead()
+	}
+	cancel(net.ErrClosed)
+
+	got := make(map[string]bool)
+	for range 2 {
+		pk, err := conn.ReadPacket()
+		if err != nil {
+			t.Fatalf("ReadPacket() error = %v", err)
+		}
+		got[string(pk)] = true
+	}
+	if !got["reliable"] || !got["unreliable"] {
+		t.Fatalf("ReadPacket() returned %v, want both packets", got)
+	}
+	if _, err := conn.ReadPacket(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("ReadPacket() after the final packet error = %v, want net.ErrClosed", err)
 	}
 }
 
