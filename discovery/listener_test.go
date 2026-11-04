@@ -267,6 +267,37 @@ func TestDirectedBroadcast(t *testing.T) {
 	if _, ok := directedBroadcast(&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}); ok {
 		t.Fatal("directedBroadcast accepted an IPv6 network")
 	}
+	if _, ok := directedBroadcast(&net.IPNet{IP: net.IPv4(169, 254, 1, 5), Mask: net.CIDRMask(16, 32)}); ok {
+		t.Fatal("directedBroadcast accepted a link-local (169.254.0.0/16) network")
+	}
+}
+
+// With no interface broadcast address found, a discovering Listener still falls back to the
+// limited broadcast rather than sending nothing, as the behavior before directed broadcasts did.
+func TestDirectedBroadcastsOrLimited(t *testing.T) {
+	got := directedBroadcastsOrLimited(nil, DefaultPort)
+	if len(got) != 1 || !got[0].IP.Equal(net.IPv4bcast) || got[0].Port != DefaultPort {
+		t.Fatalf("empty list fell back to %v, want [255.255.255.255:%d]", got, DefaultPort)
+	}
+	bcasts := []*net.UDPAddr{{IP: net.IPv4(192, 168, 1, 255), Port: DefaultPort}}
+	if got := directedBroadcastsOrLimited(bcasts, DefaultPort); len(got) != 1 || !got[0].IP.Equal(bcasts[0].IP) {
+		t.Fatalf("non-empty list = %v, want it returned unchanged", got)
+	}
+}
+
+// A responder sends no requests, an explicit address is used as is, and a discoverer always has at
+// least one IPv4 target thanks to the limited-broadcast fallback.
+func TestBroadcastAddresses(t *testing.T) {
+	explicit := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 255), Port: DefaultPort}
+	if got := (&Listener{conf: ListenConfig{BroadcastAddress: explicit}}).broadcastAddresses(); len(got) != 1 || got[0] != explicit {
+		t.Fatalf("explicit address = %v, want [%v]", got, explicit)
+	}
+	if got := (&Listener{conf: ListenConfig{}, directedBroadcast: false}).broadcastAddresses(); got != nil {
+		t.Fatalf("responder broadcast addresses = %v, want nil", got)
+	}
+	if got := (&Listener{conf: ListenConfig{}, directedBroadcast: true}).broadcastAddresses(); len(got) == 0 {
+		t.Fatal("discoverer produced no IPv4 broadcast address")
+	}
 }
 
 // Expiry windows must stay vanilla's exact magnitudes; the boundary tests pin only the comparison.

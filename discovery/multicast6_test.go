@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"testing"
 
 	"golang.org/x/net/ipv6"
@@ -12,11 +13,15 @@ import (
 // discardLog keeps test output quiet while still exercising the logging branches.
 var discardLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// fakeMulticast6 records the joins and sends made against it and can fail a chosen interface.
+var _ multicast6Conn = (*fakeMulticast6)(nil)
+
+// fakeMulticast6 records the joins, loopback setting and sends made against it, and can fail a
+// chosen interface.
 type fakeMulticast6 struct {
 	joined   []string
 	iface    []string
 	writes   []net.Addr
+	loopback *bool
 	failJoin map[string]error
 	failIf   map[string]error
 	failWS   map[string]error
@@ -43,6 +48,11 @@ func (c *fakeMulticast6) SetMulticastInterface(ifi *net.Interface) error {
 	return nil
 }
 
+func (c *fakeMulticast6) SetMulticastLoopback(on bool) error {
+	c.loopback = &on
+	return nil
+}
+
 func (c *fakeMulticast6) WriteTo(b []byte, _ *ipv6.ControlMessage, dst net.Addr) (int, error) {
 	if err := c.failWS[c.current]; err != nil {
 		return 0, err
@@ -51,18 +61,24 @@ func (c *fakeMulticast6) WriteTo(b []byte, _ *ipv6.ControlMessage, dst net.Addr)
 	return len(b), nil
 }
 
-func (c *fakeMulticast6) ReadFrom([]byte) (int, *ipv6.ControlMessage, net.Addr, error) {
-	return 0, nil, nil, net.ErrClosed
-}
-
-func (c *fakeMulticast6) Close() error { return nil }
-
 func ifaces(names ...string) []net.Interface {
 	out := make([]net.Interface, len(names))
 	for i, name := range names {
 		out[i] = net.Interface{Index: i + 1, Name: name}
 	}
 	return out
+}
+
+// setupMulticast6 turns loopback off and joins ff02::1 on every interface.
+func TestSetupMulticast6DisablesLoopbackAndJoins(t *testing.T) {
+	c := &fakeMulticast6{}
+	setupMulticast6(c, ifaces("eth0", "eth1"), discardLog)
+	if c.loopback == nil || *c.loopback {
+		t.Fatalf("multicast loopback = %v, want set to false", c.loopback)
+	}
+	if len(c.joined) != 2 || c.joined[0] != "eth0" || c.joined[1] != "eth1" {
+		t.Fatalf("joined interfaces = %v, want [eth0 eth1]", c.joined)
+	}
 }
 
 // joinMulticast6 joins ff02::1 on every interface and keeps going past one that fails.
@@ -142,75 +158,68 @@ func TestSupportsMulticast6(t *testing.T) {
 	}
 }
 
-func TestIsIPv6Addr(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		addr net.Addr
-		want bool
-	}{
-		{name: "v6", addr: &net.UDPAddr{IP: net.ParseIP("ff02::1")}, want: true},
-		{name: "v4", addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}},
-		{name: "v4in6", addr: &net.UDPAddr{IP: net.ParseIP("::ffff:127.0.0.1")}},
-		{name: "notUDP", addr: &net.IPAddr{IP: net.ParseIP("ff02::1")}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isIPv6Addr(tt.addr); got != tt.want {
-				t.Fatalf("isIPv6Addr(%v) = %t, want %t", tt.addr, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestMulticast6GroupIsAllNodes(t *testing.T) {
 	if !multicast6Group.Equal(net.ParseIP("ff02::1")) {
 		t.Fatalf("multicast6Group = %v, want ff02::1", multicast6Group)
 	}
 }
 
-// write sends an IPv6 destination out the IPv6 socket and an IPv4 destination out the base socket.
-func TestWriteRoutesByAddressFamily(t *testing.T) {
+// write sends every unicast destination, IPv4 or IPv6, through the dual-stack base socket; the
+// IPv6 wrapper is reserved for multicast sends.
+func TestWriteSendsThroughBaseSocket(t *testing.T) {
 	base := &recordPacketConn{}
-	v6 := &fakeMulticast6{}
-	l := &Listener{conf: ListenConfig{NetworkID: 1}, conn: base, conn6: v6}
+	l := &Listener{conf: ListenConfig{NetworkID: 1}, conn: base, conn6: &fakeMulticast6{}}
 
 	v4Dst := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 255), Port: DefaultPort}
-	v6Dst := &net.UDPAddr{IP: multicast6Group, Port: DefaultPort}
+	v6Dst := &net.UDPAddr{IP: net.ParseIP("fe80::1"), Port: DefaultPort}
 	if err := l.write(&RequestPacket{}, v4Dst); err != nil {
 		t.Fatalf("write v4: %v", err)
 	}
 	if err := l.write(&RequestPacket{}, v6Dst); err != nil {
 		t.Fatalf("write v6: %v", err)
 	}
-	if len(base.writes) != 1 || base.writes[0] != v4Dst {
-		t.Fatalf("base socket writes = %v, want [%v]", base.writes, v4Dst)
-	}
-	if len(v6.writes) != 1 || v6.writes[0] != v6Dst {
-		t.Fatalf("IPv6 socket writes = %v, want [%v]", v6.writes, v6Dst)
+	if len(base.writes) != 2 || base.writes[0] != v4Dst || base.writes[1] != v6Dst {
+		t.Fatalf("base socket writes = %v, want [%v %v]", base.writes, v4Dst, v6Dst)
 	}
 }
 
-// Only a discovering Listener opens an IPv6 socket; a responder bound to 7551 opens none.
-func TestListenOpensIPv6OnlyForDiscoveringRole(t *testing.T) {
-	responder, err := (ListenConfig{}).Listen(net.JoinHostPort("0.0.0.0", "7551"))
-	if err != nil {
-		t.Skipf("cannot bind responder on port %d: %v", DefaultPort, err)
-	}
-	t.Cleanup(func() { _ = responder.Close() })
-	if responder.conn6 != nil {
-		t.Fatal("responder opened an IPv6 discovery socket")
-	}
-
-	discoverer, err := (ListenConfig{}).Listen("")
+// A dual-stack socket joins ff02::1 in both roles, so a responder bound to the well-known port
+// receives IPv6 requests and a discoverer sends and receives them. This is the fix for a responder
+// that previously opened no IPv6 socket at all.
+func TestListenJoinsIPv6OnDualStackSocket(t *testing.T) {
+	d, err := (ListenConfig{}).Listen("")
 	if err != nil {
 		t.Fatalf("Listen(discoverer): %v", err)
 	}
-	t.Cleanup(func() { _ = discoverer.Close() })
-	if local, ok := discoverer.conn.LocalAddr().(*net.UDPAddr); ok && local.Port == DefaultPort {
-		t.Skip("port-zero bind selected the default port")
-	}
-	if discoverer.conn6 == nil {
+	t.Cleanup(func() { _ = d.Close() })
+	if !dualStack(t, d) {
 		t.Skip("host has no usable IPv6")
 	}
+	if d.conn6 == nil {
+		t.Fatal("dual-stack discoverer did not join the IPv6 group")
+	}
+
+	r, err := (ListenConfig{}).Listen(net.JoinHostPort("", strconv.Itoa(DefaultPort)))
+	if err != nil {
+		t.Skipf("cannot bind responder on port %d: %v", DefaultPort, err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	if r.directedBroadcast {
+		t.Fatal("responder on the well-known port acts as a discoverer")
+	}
+	if dualStack(t, r) && r.conn6 == nil {
+		t.Fatal("dual-stack responder did not join the IPv6 group")
+	}
+}
+
+// dualStack reports whether the Listener's socket is bound to an IPv6-capable address.
+func dualStack(t *testing.T, l *Listener) bool {
+	t.Helper()
+	local, ok := l.conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("local address = %T, want *net.UDPAddr", l.conn.LocalAddr())
+	}
+	return local.IP.To4() == nil
 }
 
 // recordPacketConn records the destinations written to it and drops the payload.

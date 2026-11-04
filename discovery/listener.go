@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
@@ -26,7 +27,8 @@ type ListenConfig struct {
 	// is not bound to port 7551, requests go out the way vanilla clients send them: to port 7551 at the
 	// directed broadcast address of every up IPv4 interface, and to the IPv6 all-nodes link-local
 	// multicast group [ff02::1]:7551 on every up, multicast-capable IPv6 interface. A Listener bound to
-	// port 7551 only answers requests and opens no IPv6 socket.
+	// port 7551 only answers requests, but a dual-stack socket still joins [ff02::1] so it receives
+	// IPv6 requests.
 	//
 	// Receiving IPv6 multicast on Android requires a MulticastLock held by the app; this package cannot
 	// acquire one, so inbound IPv6 discovery there is the consumer's responsibility.
@@ -50,8 +52,10 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	if addr == "" {
 		addr = ":0"
 	}
-	// We hardcode network protocol for "udp" as it always expects UDP packets to be received.
-	conn, err := net.ListenPacket("udp", addr)
+	// A single "udp" socket binds dual-stack ([::]) where the platform supports it, so it carries
+	// both IPv4 and IPv6 discovery; SO_BROADCAST lets it send to IPv4 broadcast addresses.
+	lc := net.ListenConfig{Control: controlBroadcast}
+	conn, err := lc.ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -76,18 +80,22 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		closed: make(chan struct{}),
 	}
-	// A discovering Listener also multicasts over IPv6 as vanilla does; the responder role does not.
-	if l.directedBroadcast {
-		l.conn6 = openMulticast6(conf.Log)
+	// A dual-stack socket joins [ff02::1] so it receives IPv6 requests, as vanilla's socket does; an
+	// IPv4-only bind leaves conn6 nil and IPv6 discovery off.
+	if localAddr.IP.To4() == nil {
+		l.conn6 = newMulticast6(conn, conf.Log)
 	}
 
 	go l.listen()
 	go l.background()
-	if l.conn6 != nil {
-		go l.listen6()
-	}
 
 	return l, nil
+}
+
+// controlBroadcast enables SO_BROADCAST on the discovery socket before it is bound, so it may send
+// to IPv4 broadcast addresses.
+func controlBroadcast(_, _ string, c syscall.RawConn) error {
+	return c.Control(setSocketBroadcast)
 }
 
 // DefaultPort is the port used for LAN discovery in Minecraft: Bedrock Edition.
@@ -104,8 +112,9 @@ type Listener struct {
 	conf ListenConfig
 	// directedBroadcast sends requests to each interface's directed broadcast address.
 	directedBroadcast bool
-	// conn6 is the IPv6 socket a discovering Listener multicasts requests to and reads responses on.
-	// It is nil in the responder role and when the host has no usable IPv6.
+	// conn6 wraps conn for IPv6 multicast: it joins [ff02::1] to receive requests, and a discovering
+	// Listener sends requests out each interface through it. It shares conn's socket, so it is not
+	// closed separately. Nil when the socket is not IPv6-capable.
 	conn6 multicast6Conn
 
 	// pongData atomically stores the application data for responding to the clients
@@ -254,16 +263,11 @@ func (l *Listener) listen() {
 // maxUDPPacketSize is 65,535 bytes, the maximum UDP payload size.
 const maxUDPPacketSize = 65535
 
-// write writes the packet to the destination address using the network ID of Listener. An IPv6
-// destination goes out the IPv6 socket when one is open, so a peer discovered over multicast is
-// answered on the same transport that found it.
+// write marshals pk with the Listener's network ID and sends it to addr. The dual-stack socket
+// carries both IPv4 and IPv6 unicast destinations, so a peer is answered on the transport that
+// found it; IPv6 multicast requests go out [Listener.broadcastRequest6] instead.
 func (l *Listener) write(pk Packet, addr net.Addr) error {
-	b := Marshal(pk, l.conf.NetworkID)
-	if l.conn6 != nil && isIPv6Addr(addr) {
-		_, err := l.conn6.WriteTo(b, nil, addr)
-		return err
-	}
-	_, err := l.conn.WriteTo(b, addr)
+	_, err := l.conn.WriteTo(Marshal(pk, l.conf.NetworkID), addr)
 	return err
 }
 
@@ -417,12 +421,8 @@ func parsePongGameType(v string) (int32, bool) {
 func (l *Listener) Close() (err error) {
 	l.once.Do(func() {
 		close(l.closed)
+		// conn6 shares conn's socket, so closing conn closes both.
 		err = l.conn.Close()
-		if l.conn6 != nil {
-			if cerr := l.conn6.Close(); cerr != nil && err == nil {
-				err = cerr
-			}
-		}
 
 		l.notifiersMu.Lock()
 		clear(l.notifiers)
@@ -449,7 +449,7 @@ func (l *Listener) background() {
 					l.conf.Log.Debug("error broadcasting request", slog.Any("to", addr), slog.Any("error", err))
 				}
 			}
-			if l.conn6 != nil {
+			if l.directedBroadcast && l.conn6 != nil {
 				l.broadcastRequest6()
 			}
 		}
@@ -464,8 +464,9 @@ func (l *Listener) deleteInactiveAddressesLocked(now time.Time) {
 	})
 }
 
-// broadcastAddresses returns where the next request goes: the configured address, or port 7551
-// at every directed broadcast address.
+// broadcastAddresses returns where the next IPv4 request goes: the configured address, or port 7551
+// at every interface's directed broadcast address, falling back to the limited broadcast when none
+// is found. It returns nil for the responder role.
 func (l *Listener) broadcastAddresses() []*net.UDPAddr {
 	if l.conf.BroadcastAddress != nil {
 		return []*net.UDPAddr{l.conf.BroadcastAddress}
@@ -473,11 +474,22 @@ func (l *Listener) broadcastAddresses() []*net.UDPAddr {
 	if !l.directedBroadcast {
 		return nil
 	}
-	return DirectedBroadcasts(DefaultPort)
+	return directedBroadcastsOrLimited(DirectedBroadcasts(DefaultPort), DefaultPort)
+}
+
+// directedBroadcastsOrLimited returns bcasts, or the limited broadcast 255.255.255.255:port when
+// bcasts is empty, so a discovering Listener still sends a request when no interface broadcast
+// address is found (for example while offline), as the behavior before directed broadcasts did.
+func directedBroadcastsOrLimited(bcasts []*net.UDPAddr, port int) []*net.UDPAddr {
+	if len(bcasts) > 0 {
+		return bcasts
+	}
+	return []*net.UDPAddr{{IP: net.IPv4bcast, Port: port}}
 }
 
 // DirectedBroadcasts returns port at the directed broadcast address (address | ^mask) of every IPv4
-// address on an up, broadcast-capable, non-loopback interface. It returns none while offline.
+// address on an up, broadcast-capable, non-loopback interface, skipping link-local (169.254.0.0/16)
+// addresses. It returns none while offline.
 func DirectedBroadcasts(port int) []*net.UDPAddr {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -507,7 +519,8 @@ func DirectedBroadcasts(port int) []*net.UDPAddr {
 	return broadcasts
 }
 
-// directedBroadcast returns the broadcast address of an IPv4 network.
+// directedBroadcast returns the broadcast address of an IPv4 network, rejecting link-local
+// (169.254.0.0/16) networks, whose broadcast is not a useful discovery target.
 func directedBroadcast(network *net.IPNet) ([4]byte, bool) {
 	ip, mask := network.IP.To4(), network.Mask
 	if ip == nil || len(mask) != net.IPv4len {
@@ -515,6 +528,9 @@ func directedBroadcast(network *net.IPNet) ([4]byte, bool) {
 			return [4]byte{}, false
 		}
 		mask = mask[12:]
+	}
+	if ip.IsLinkLocalUnicast() {
+		return [4]byte{}, false
 	}
 	var b [4]byte
 	for i := range b {

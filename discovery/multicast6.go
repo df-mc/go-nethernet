@@ -11,36 +11,39 @@ import (
 // multicast6Group is the IPv6 all-nodes link-local multicast group vanilla discovers LAN games on.
 var multicast6Group = net.ParseIP("ff02::1")
 
-// multicast6Conn is the part of *ipv6.PacketConn the discovering role drives, so the join and send
-// paths can be exercised without opening a real socket.
+// multicast6Conn is the subset of *ipv6.PacketConn the discovery socket drives: joining the group
+// it receives requests on and sending requests out a chosen interface with loopback off. It lets
+// the join and send paths be tested without a real socket.
 type multicast6Conn interface {
 	JoinGroup(ifi *net.Interface, group net.Addr) error
 	SetMulticastInterface(ifi *net.Interface) error
+	SetMulticastLoopback(bool) error
 	WriteTo(b []byte, cm *ipv6.ControlMessage, dst net.Addr) (int, error)
-	ReadFrom(b []byte) (n int, cm *ipv6.ControlMessage, src net.Addr, err error)
-	Close() error
 }
 
 var _ multicast6Conn = (*ipv6.PacketConn)(nil)
 
-// openMulticast6 opens the [::] IPv6 socket a discovering Listener uses and joins the all-nodes group on
-// every usable interface, as vanilla opens its socket regardless of the interfaces present. It returns
-// nil, leaving IPv4 discovery to run alone, only when the host has no IPv6 support and the bind fails.
-// The socket is kept for the Listener's life; sends pick up interfaces that appear later, since
-// broadcastRequest6 re-enumerates them every tick like the IPv4 side.
-func openMulticast6(log *slog.Logger) multicast6Conn {
-	conn, err := net.ListenPacket("udp6", net.JoinHostPort("::", "0"))
-	if err != nil {
-		log.Debug("error opening IPv6 discovery socket", slog.Any("error", err))
-		return nil
-	}
+// newMulticast6 wraps the Listener's dual-stack socket for IPv6 multicast and configures it with
+// [setupMulticast6]. The wrapper shares the socket's file descriptor, so it is not closed
+// separately. The group is joined once here; an interface that appears later is used for sending
+// but not re-joined for receiving.
+func newMulticast6(conn net.PacketConn, log *slog.Logger) *ipv6.PacketConn {
 	p := ipv6.NewPacketConn(conn)
-	joinMulticast6(p, multicast6Interfaces(), log)
+	setupMulticast6(p, multicast6Interfaces(), log)
 	return p
 }
 
-// joinMulticast6 joins the all-nodes group on each interface, logging and skipping any that fails, and
-// returns how many joined. A send still reaches a group without membership, so a zero count is not fatal.
+// setupMulticast6 turns multicast loopback off and joins the all-nodes group on each interface, so
+// requests sent to [ff02::1]:7551 reach the socket without it also receiving its own sends.
+func setupMulticast6(conn multicast6Conn, ifaces []net.Interface, log *slog.Logger) {
+	if err := conn.SetMulticastLoopback(false); err != nil {
+		log.Debug("error disabling IPv6 multicast loopback", slog.Any("error", err))
+	}
+	joinMulticast6(conn, ifaces, log)
+}
+
+// joinMulticast6 joins the all-nodes group on each interface, logging and skipping any that fails,
+// and returns how many joined. A send still reaches a group without membership, so zero is not fatal.
 func joinMulticast6(conn multicast6Conn, ifaces []net.Interface, log *slog.Logger) int {
 	group := &net.IPAddr{IP: multicast6Group}
 	var joined int
@@ -77,24 +80,6 @@ func sendMulticast6Requests(conn multicast6Conn, b []byte, ifaces []net.Interfac
 	}
 }
 
-// listen6 reads responses on the IPv6 socket into the same handler path as IPv4 until the Listener closes.
-func (l *Listener) listen6() {
-	b := make([]byte, maxUDPPacketSize)
-	for {
-		n, _, addr, err := l.conn6.ReadFrom(b)
-		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				l.conf.Log.Error("error reading from IPv6 conn", slog.Any("error", err))
-			}
-			_ = l.Close()
-			return
-		}
-		if err := l.handlePacket(b[:n], addr); err != nil {
-			l.conf.Log.Error("error handling packet", slog.Any("error", err), "from", addr)
-		}
-	}
-}
-
 // multicast6Interfaces returns the up, multicast-capable, non-loopback interfaces that hold an IPv6
 // address. It returns none when the host has no usable IPv6.
 func multicast6Interfaces() []net.Interface {
@@ -127,10 +112,4 @@ func supportsMulticast6(flags net.Flags, addrs []net.Addr) bool {
 		}
 	}
 	return false
-}
-
-// isIPv6Addr reports whether addr is a UDP address that is IPv6 rather than IPv4.
-func isIPv6Addr(addr net.Addr) bool {
-	udp, ok := addr.(*net.UDPAddr)
-	return ok && udp.IP.To4() == nil && udp.IP.To16() != nil
 }
