@@ -188,6 +188,11 @@ func (l *Listener) Credentials(context.Context) (*nethernet.Credentials, error) 
 	}
 }
 
+// DisableHostTrickleICE reports that a host on LAN sends its candidates in the answer, as vanilla hosts do.
+func (l *Listener) DisableHostTrickleICE() bool {
+	return true
+}
+
 // NetworkID returns the numerical NetherNet network ID for the Listener in string form.
 func (l *Listener) NetworkID() string {
 	return strconv.FormatUint(l.conf.NetworkID, 10)

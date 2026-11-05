@@ -65,13 +65,30 @@ type trickleICEDisabler interface {
 // for negotiating a WebRTC peer connections with the remote network.
 // The config value must be specified from [ListenConfig.DisableTrickleICE]
 // or [Dialer.DisableTrickleICE].
-// If the given [Signaling] implementation also implements [trickleICEDisabler],
-// it takes priority over the user-provided configuration value.
+// It is disabled if either the configuration value or a [Signaling] implementing
+// [trickleICEDisabler] asks for it.
 func shouldDisableTrickleICE(configValue bool, signaling Signaling) bool {
 	if d, ok := signaling.(trickleICEDisabler); ok {
 		return configValue || d.DisableTrickleICE()
 	}
 	return configValue
+}
+
+// hostTrickleICEDisabler is implemented by Signaling over which a host bundles
+// its candidates in the answer, while clients may still trickle theirs.
+type hostTrickleICEDisabler interface {
+	// DisableHostTrickleICE returns a boolean indicating whether a host should
+	// disable Trickle ICE on this Signaling.
+	DisableHostTrickleICE() bool
+}
+
+// shouldDisableHostTrickleICE determines whether a [Listener] should disable
+// Trickle ICE. It extends [shouldDisableTrickleICE] with [hostTrickleICEDisabler].
+func shouldDisableHostTrickleICE(configValue bool, signaling Signaling) bool {
+	if d, ok := signaling.(hostTrickleICEDisabler); ok && d.DisableHostTrickleICE() {
+		return true
+	}
+	return shouldDisableTrickleICE(configValue, signaling)
 }
 
 const (

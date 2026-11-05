@@ -36,14 +36,14 @@ type ListenConfig struct {
 	API *webrtc.API
 
 	// ConnContext provides a [context.Context] for starting the ICE, DTLS, and SCTP transports of the Conn. If nil,
-	// a default [context.Context] with 5 seconds timeout will be used. The parent [context.Context] may be used to
+	// a [context.Context] with [DefaultConnTimeout] will be used. The parent [context.Context] may be used to
 	// create a [context.Context] to be returned (likely using [context.WithCancel] or [context.WithTimeout]).
 	//
 	// It may be called concurrently for different connections.
 	ConnContext func(parent context.Context, conn *Conn) (context.Context, context.CancelFunc)
 
 	// NegotiationContext provides a [context.Context] for the negotiation. If nil, a default [context.Context]
-	// with 5 seconds timeout will be used. The parent [context.Context] may be used to create a [context.Context]
+	// with 15 seconds timeout will be used. The parent [context.Context] may be used to create a [context.Context]
 	// to be returned (likely using [context.WithCancel] or [context.WithTimeout]). If the deadline of the context
 	// is exceeded, a Signal of SignalTypeError with ErrorCodeNegotiationTimeoutWaitingForAccept will be signaled back.
 	//
@@ -118,9 +118,9 @@ type ListenConfig struct {
 	// DisableTrickleICE disables trickle ICE for connection negotiation.
 	//
 	// When set to true, the listener waits for ICE gathering to complete and embeds
-	// all local candidates in the answer SDP. Otherwise, candidates are signaled
-	// incrementally as separate [SignalTypeCandidate] signals after the answer is
-	// sent.
+	// all local candidates in the answer SDP. Otherwise, unless the [Signaling]
+	// asks for the same, candidates are signaled incrementally as separate
+	// [SignalTypeCandidate] signals after the answer is sent.
 	//
 	// This may slow connection establishment because the answer cannot be sent
 	// until candidate gathering completes.
@@ -466,7 +466,7 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 			_ = c.Close()
 		}
 	}()
-	disableTrickleICE := shouldDisableTrickleICE(n.conf.DisableTrickleICE, n.signaling)
+	disableTrickleICE := shouldDisableHostTrickleICE(n.conf.DisableTrickleICE, n.signaling)
 	if disableTrickleICE {
 		c.description.Candidates, err = c.gatherCandidates(ctx)
 		if err != nil {
@@ -623,8 +623,11 @@ func (n *listenerNegotiator) log() *slog.Logger {
 	)
 }
 
-// finaliseConn finalises the Conn. Once an ICE candidate for the Conn has been signaled from the remote
-// connection, it starts the transports of the Conn using the remote Description and a [context.Context]
+// DefaultConnTimeout bounds starting a Conn when [ListenConfig.ConnContext] is nil. Vanilla hosts have no
+// such limit. It outlasts a client's 15 second ICE window, and a stuck peer holds a negotiation slot until then.
+const DefaultConnTimeout = time.Second * 20
+
+// finaliseConn starts the transports of the Conn using the remote Description and a [context.Context]
 // returned from [ListenConfig.ConnContext].
 func (n *listenerNegotiator) finaliseConn(conn *Conn, d *Description, channelsReady <-chan struct{}) (err error) {
 	var (
@@ -640,7 +643,7 @@ func (n *listenerNegotiator) finaliseConn(conn *Conn, d *Description, channelsRe
 		defer cancel()
 	} else {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(parent, time.Second*5)
+		ctx, cancel = context.WithTimeout(parent, DefaultConnTimeout)
 		defer cancel()
 	}
 
@@ -666,23 +669,24 @@ func (n *listenerNegotiator) finaliseConn(conn *Conn, d *Description, channelsRe
 		return net.ErrClosed
 	case <-conn.ctx.Done():
 		return context.Cause(conn.ctx)
-	case <-conn.candidateReceived:
-		conn.log.Debug("received first candidate")
-		if err := n.startTransports(ctx, conn, d, channelsReady); err != nil {
-			return fmt.Errorf("start transports: %w", err)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-conn.ctx.Done():
-			return context.Cause(conn.ctx)
-		case <-n.closed:
-			return net.ErrClosed
-		case n.incoming <- conn:
-		}
-		return nil
+	default:
 	}
+	// Like vanilla, ICE starts with the offer; remote candidates may trickle in later or never, when
+	// the client is reached through peer-reflexive checks.
+	if err := n.startTransports(ctx, conn, d, channelsReady); err != nil {
+		return fmt.Errorf("start transports: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-conn.ctx.Done():
+		return context.Cause(conn.ctx)
+	case <-n.closed:
+		return net.ErrClosed
+	case n.incoming <- conn:
+	}
+	return nil
 }
 
 // startTransports starts ICE as [webrtc.ICERoleControlled], then starts DTLS
