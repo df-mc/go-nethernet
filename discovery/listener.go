@@ -8,13 +8,17 @@ import (
 	"maps"
 	"math/rand"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
+	"github.com/wlynxg/anet"
+	"golang.org/x/net/ipv6"
 )
 
 type ListenConfig struct {
@@ -22,18 +26,25 @@ type ListenConfig struct {
 	// same network. In NetherNet, it is explicitly defined as a string, but in LAN discovery it is sent as an uint8.
 	NetworkID uint64
 
-	// BroadcastAddress specifies the UDP broadcast address for sending request packets to the servers in
-	// the same network. If nil, an *net.UDPAddr with net.IPv4bcast and port 7551 will be used.
+	// BroadcastAddress specifies the UDP address request packets are sent to. If nil, they go out the way
+	// vanilla sends them: to port 7551 at the broadcast address of every IPv4 network and, on a dual-stack
+	// socket, at the IPv6 all-nodes group [ff02::1]. The list is kept until it empties, then rebuilt.
+	// Unlike vanilla, [ff02::1] is used on each interface, since not every platform has a default one.
+	//
+	// Receiving IPv6 multicast on Android requires a MulticastLock held by the app.
 	BroadcastAddress *net.UDPAddr
+
+	// DisableRequests stops the Listener sending request packets, for one that only announces a server.
+	// Whatever its port, a Listener answers requests once [Listener.ServerData] or [Listener.PongData] is set.
+	DisableRequests bool
 
 	// Log is used for logging messages at various levels.
 	Log *slog.Logger
 }
 
-// Listen starts listening on the specified address. For servers, it should be typically composed for using port
-// 7551 to respond from request packets broadcasted from clients. For clients, it can be an empty string or any
-// address with any port, as it doesn't need to response with other clients; when you expect that port 7551 is
-// already in use by the game itself, you might want to specify the address in this way.
+// Listen starts listening on the specified address. An empty address binds port 7551 or else an ephemeral
+// port, so requests sent to 7551 only reach the first Listener on a host.
+// Any other address either binds or returns an error.
 func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	if conf.Log == nil {
 		conf.Log = slog.Default()
@@ -41,11 +52,7 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	if conf.NetworkID == 0 {
 		conf.NetworkID = rand.Uint64()
 	}
-	if addr == "" {
-		addr = ":0"
-	}
-	// We hardcode network protocol for "udp" as it always expects UDP packets to be received.
-	conn, err := net.ListenPacket("udp", addr)
+	conn, err := listenPacket(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -54,15 +61,6 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	if !ok {
 		_ = conn.Close()
 		return nil, fmt.Errorf("unexpected local address type %T", conn.LocalAddr())
-	}
-
-	if conf.BroadcastAddress == nil && localAddr.Port != DefaultPort {
-		// If the port for the address is 7551, it means no applications are listening on this network
-		// and server discovery using limited broadcast on net.IPv4bcast is not meaningful.
-		conf.BroadcastAddress = &net.UDPAddr{
-			IP:   net.IPv4bcast,
-			Port: DefaultPort,
-		}
 	}
 
 	l := &Listener{
@@ -77,11 +75,62 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		closed: make(chan struct{}),
 	}
+	// A dual-stack socket joins [ff02::1], as vanilla's does; a socket without IPv6 leaves IPv6 discovery off.
+	if localAddr.IP.To4() == nil {
+		l.dualStack = true
+		joinMulticast6(ipv6.NewPacketConn(conn), localNetworks(), conf.Log)
+	}
 
 	go l.listen()
-	go l.background()
+	if !conf.DisableRequests {
+		go l.background()
+	}
 
 	return l, nil
+}
+
+// listenPacket binds the discovery socket: a single "udp" socket binds dual-stack ([::]) where the
+// platform supports it, so it carries both IPv4 and IPv6 discovery.
+func listenPacket(addr string) (net.PacketConn, error) {
+	lc := net.ListenConfig{Control: controlBroadcast}
+	if addr != "" {
+		return lc.ListenPacket(context.Background(), "udp", addr)
+	}
+	conn, err := lc.ListenPacket(context.Background(), "udp", ":"+strconv.Itoa(DefaultPort))
+	if err != nil {
+		return lc.ListenPacket(context.Background(), "udp", ":0")
+	}
+	return conn, nil
+}
+
+// controlBroadcast enables SO_BROADCAST on the discovery socket before it is bound, so it may send
+// to IPv4 broadcast addresses.
+func controlBroadcast(_, _ string, c syscall.RawConn) error {
+	return c.Control(setSocketBroadcast)
+}
+
+// joinMulticast6 joins [ff02::1] on each interface with loopback off. Failures only cost IPv6 discovery,
+// as every peer also sends over IPv4. An interface that appears later is not joined.
+func joinMulticast6(conn multicast6Conn, networks []localNetwork, log *slog.Logger) {
+	if err := conn.SetMulticastLoopback(false); err != nil {
+		log.Debug("error disabling IPv6 multicast loopback", slog.Any("error", err))
+	}
+	joined := make(map[int]bool)
+	for _, network := range networks {
+		if !network.joinsMulticast6() || joined[network.ifIndex] {
+			continue
+		}
+		joined[network.ifIndex] = true
+		if err := conn.JoinGroup(&net.Interface{Index: network.ifIndex}, &net.IPAddr{IP: multicast6Group}); err != nil {
+			log.Debug("error joining IPv6 discovery group", slog.Int("interface", network.ifIndex), slog.Any("error", err))
+		}
+	}
+}
+
+// multicast6Conn is the part of *ipv6.PacketConn the discovery socket uses.
+type multicast6Conn interface {
+	JoinGroup(ifi *net.Interface, group net.Addr) error
+	SetMulticastLoopback(bool) error
 }
 
 // DefaultPort is the port used for LAN discovery in Minecraft: Bedrock Edition.
@@ -96,6 +145,10 @@ type Listener struct {
 
 	// conf is the ListenConfig used for [ListenConfig.Listen].
 	conf ListenConfig
+	// dualStack reports that conn can reach [ff02::1].
+	dualStack bool
+	// domain holds where requests go. Only background uses it.
+	domain []*net.UDPAddr
 
 	// pongData atomically stores the application data for responding to the clients
 	// broadcasting RequestPacket with a ResponsePacket containing the same data.
@@ -243,10 +296,9 @@ func (l *Listener) listen() {
 // maxUDPPacketSize is 65,535 bytes, the maximum UDP payload size.
 const maxUDPPacketSize = 65535
 
-// write writes the packet to the destination address using the network ID of Listener.
+// write marshals pk with the Listener's network ID and sends it to addr.
 func (l *Listener) write(pk Packet, addr net.Addr) error {
-	b := Marshal(pk, l.conf.NetworkID)
-	_, err := l.conn.WriteTo(b, addr)
+	_, err := l.conn.WriteTo(Marshal(pk, l.conf.NetworkID), addr)
 	return err
 }
 
@@ -285,12 +337,12 @@ func (l *Listener) handlePacket(data []byte, addr net.Addr) error {
 	return err
 }
 
-// handleRequest handles a RequestPacket broadcasted from the clients.
-// It responds with a ResponsePacket containing the pongData if it was non-nil.
+// handleRequest responds to a RequestPacket with a ResponsePacket containing the pongData. A Listener
+// without pongData hosts nothing and ignores it.
 func (l *Listener) handleRequest(addr net.Addr) error {
 	data := l.pongData.Load()
 	if data == nil {
-		return errors.New("application data not set yet")
+		return nil
 	}
 	if err := l.write(&ResponsePacket{
 		ApplicationData: *data,
@@ -414,20 +466,46 @@ func (l *Listener) background() {
 	ticker := time.NewTicker(time.Second * 2)
 	defer ticker.Stop()
 
+	l.broadcast(localNetworks)
 	for {
 		select {
 		case <-l.closed:
 			return
 		case <-ticker.C:
-			if l.conf.BroadcastAddress != nil {
-				if err := l.write(&RequestPacket{}, l.conf.BroadcastAddress); err != nil {
-					if !errors.Is(err, net.ErrClosed) {
-						l.conf.Log.Error("error broadcasting request", slog.Any("error", err))
-					}
-				}
-			}
+			l.broadcast(localNetworks)
 		}
 	}
+}
+
+// broadcast sends a RequestPacket to the configured address or else to the domain, which vanilla's send
+// errors shrink. An empty domain sends to the limited broadcast while it is rebuilt for the next tick.
+func (l *Listener) broadcast(networks func() []localNetwork) {
+	if l.conf.BroadcastAddress != nil {
+		_ = l.sendRequest(l.conf.BroadcastAddress)
+		return
+	}
+	if len(l.domain) == 0 {
+		l.domain = broadcastDomain(networks(), DefaultPort, l.dualStack)
+		_ = l.sendRequest(&net.UDPAddr{IP: net.IPv4bcast, Port: DefaultPort})
+		return
+	}
+	l.domain = slices.DeleteFunc(l.domain, func(addr *net.UDPAddr) bool {
+		return unreachable(l.sendRequest(addr))
+	})
+}
+
+// sendRequest sends a RequestPacket to addr and logs a failure.
+func (l *Listener) sendRequest(addr *net.UDPAddr) error {
+	err := l.write(&RequestPacket{}, addr)
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		l.conf.Log.Debug("error broadcasting request", slog.Any("to", addr), slog.Any("error", err))
+	}
+	return err
+}
+
+// unreachable reports whether err means vanilla stops sending to a destination.
+func unreachable(err error) bool {
+	return slices.ContainsFunc(unreachableErrors, func(target error) bool { return errors.Is(err, target) })
 }
 
 // deleteInactiveAddressesLocked forgets peers silent for addressLifetime, as vanilla
@@ -437,6 +515,89 @@ func (l *Listener) deleteInactiveAddressesLocked(now time.Time) {
 		return now.Sub(a.t) >= addressLifetime
 	})
 }
+
+// localNetwork is an address of an up interface.
+type localNetwork struct {
+	*net.IPNet
+	ifIndex   int
+	multicast bool // The interface carries multicast.
+}
+
+// joinsMulticast6 reports whether the interface can receive requests sent to [ff02::1].
+func (n localNetwork) joinsMulticast6() bool {
+	return n.multicast && n.IP.To4() == nil && !n.IP.IsLoopback()
+}
+
+// sendsMulticast6 reports whether requests go to [ff02::1] on the interface. Like vanilla's, a host with
+// only link-local IPv6 sends none.
+func (n localNetwork) sendsMulticast6() bool {
+	return n.joinsMulticast6() && !n.IP.IsLinkLocalUnicast()
+}
+
+// localNetworks returns the addresses of the up interfaces. It uses anet because Android hides them from net.
+func localNetworks() []localNetwork {
+	interfaces, err := anet.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var networks []localNetwork
+	for i := range interfaces {
+		iface := &interfaces[i]
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := anet.InterfaceAddrsByInterface(iface)
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			if network, ok := addr.(*net.IPNet); ok {
+				networks = append(networks, localNetwork{network, iface.Index, iface.Flags&net.FlagMulticast != 0})
+			}
+		}
+	}
+	return networks
+}
+
+// broadcastDomain returns port at the broadcast address of every IPv4 network and, if dualStack is set, at
+// [ff02::1] on each IPv6 interface. Numeric zones work on Android, where zone names do not resolve.
+func broadcastDomain(networks []localNetwork, port int, dualStack bool) []*net.UDPAddr {
+	var domain []*net.UDPAddr
+	add := func(ip net.IP, zone string) {
+		if !slices.ContainsFunc(domain, func(addr *net.UDPAddr) bool { return addr.IP.Equal(ip) && addr.Zone == zone }) {
+			domain = append(domain, &net.UDPAddr{IP: ip, Port: port, Zone: zone})
+		}
+	}
+	for _, network := range networks {
+		if ip, ok := directedBroadcast(network.IPNet); ok {
+			add(ip, "")
+		} else if dualStack && network.sendsMulticast6() {
+			add(multicast6Group, strconv.Itoa(network.ifIndex))
+		}
+	}
+	return domain
+}
+
+// directedBroadcast returns the broadcast address of an IPv4 network. It rejects IPv6 networks, loopback,
+// link-local networks and network prefixes below 1.0.0.0, which vanilla does not send on. VMware's virtual
+// adapters, which vanilla also skips, stay in: a peer can be behind one, and the send costs nothing.
+func directedBroadcast(network *net.IPNet) (net.IP, bool) {
+	ip, mask := network.IP.To4(), network.Mask
+	if len(mask) == net.IPv6len {
+		mask = mask[12:]
+	}
+	if ip == nil || len(mask) != net.IPv4len || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.Mask(mask)[0] == 0 {
+		return nil, false
+	}
+	broadcast := make(net.IP, net.IPv4len)
+	for i := range broadcast {
+		broadcast[i] = ip[i] | ^mask[i]
+	}
+	return broadcast, true
+}
+
+// multicast6Group is the IPv6 all-nodes link-local multicast group vanilla discovers LAN games on.
+var multicast6Group = net.ParseIP("ff02::1")
 
 // addressLifetime is how long vanilla keeps a LAN peer's address after its last response or message.
 const addressLifetime = time.Minute

@@ -1,12 +1,19 @@
 package discovery
 
 import (
+	"errors"
+	"log/slog"
 	"net"
+	"os"
+	"slices"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
+	"golang.org/x/net/ipv6"
 )
 
 func TestListenAcceptsClientAddressForms(t *testing.T) {
@@ -28,22 +35,6 @@ func TestListenAcceptsClientAddressForms(t *testing.T) {
 				}
 			})
 
-			localAddr, ok := l.conn.LocalAddr().(*net.UDPAddr)
-			if !ok {
-				t.Fatalf("local address = %T, want *net.UDPAddr", l.conn.LocalAddr())
-			}
-			if localAddr.Port == DefaultPort {
-				t.Skipf("port-zero bind selected default port %d", DefaultPort)
-			}
-			if l.conf.BroadcastAddress == nil {
-				t.Fatal("BroadcastAddress is nil")
-			}
-			if !l.conf.BroadcastAddress.IP.Equal(net.IPv4bcast) {
-				t.Fatalf("BroadcastAddress.IP = %v, want %v", l.conf.BroadcastAddress.IP, net.IPv4bcast)
-			}
-			if l.conf.BroadcastAddress.Port != DefaultPort {
-				t.Fatalf("BroadcastAddress.Port = %d, want %d", l.conf.BroadcastAddress.Port, DefaultPort)
-			}
 		})
 	}
 }
@@ -249,6 +240,247 @@ func TestDeleteInactiveAddressesAtOneMinute(t *testing.T) {
 	if _, ok := l.addresses[2]; ok {
 		t.Fatal("kept a peer silent for a minute")
 	}
+}
+
+// parseNetwork returns cidr as an address on an up multicast interface.
+func parseNetwork(t *testing.T, cidr string, ifIndex int) localNetwork {
+	t.Helper()
+	ip, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	network.IP = ip
+	return localNetwork{network, ifIndex, true}
+}
+
+// The domain follows vanilla's address filters, sets every host bit, and holds each target once.
+func TestBroadcastDomain(t *testing.T) {
+	var networks []localNetwork
+	for _, cidr := range []string{
+		"127.0.0.1/8", "::1/128", "169.254.1.5/16", "0.1.2.3/8", "10.1.2.3/4", "192.168.1.5/0",
+		"192.168.1.20/24", "192.168.1.21/24", "10.0.3.7/22", "172.16.5.4/16",
+		"fe80::1/64", "2001:db8::1/64", "2001:db8::2/64",
+	} {
+		networks = append(networks, parseNetwork(t, cidr, 1))
+	}
+	networks = append(networks, parseNetwork(t, "fd77::1/64", 2))
+	noMulticast := parseNetwork(t, "fd78::1/64", 3)
+	noMulticast.multicast = false
+	networks = append(networks, noMulticast)
+
+	domain := func(dualStack bool) string {
+		var addrs []string
+		for _, addr := range broadcastDomain(networks, DefaultPort, dualStack) {
+			addrs = append(addrs, addr.String())
+		}
+		return strings.Join(addrs, " ")
+	}
+	const ipv4 = "192.168.1.255:7551 10.0.3.255:7551 172.16.255.255:7551"
+	if got, want := domain(true), ipv4+" [ff02::1%1]:7551 [ff02::1%2]:7551"; got != want {
+		t.Fatalf("dual-stack domain = %s, want %s", got, want)
+	}
+	if got := domain(false); got != ipv4 {
+		t.Fatalf("IPv4 domain = %s, want %s", got, ipv4)
+	}
+}
+
+// Link-local IPv6 alone sends nothing to the group, and a malformed mask must not panic the send loop.
+func TestBroadcastDomainSkipsUnusableNetworks(t *testing.T) {
+	networks := []localNetwork{
+		parseNetwork(t, "fe80::1/64", 1),
+		{IPNet: &net.IPNet{IP: net.IPv4(192, 168, 1, 20)}, ifIndex: 1},
+	}
+	if domain := broadcastDomain(networks, DefaultPort, true); len(domain) != 0 {
+		t.Fatalf("domain = %v, want none", domain)
+	}
+}
+
+// failingPacketConn fails sends to one host with err and records every destination.
+type failingPacketConn struct {
+	net.PacketConn
+	host   string
+	err    error
+	writes []string
+}
+
+func (c *failingPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	host, _, _ := net.SplitHostPort(addr.String())
+	c.writes = append(c.writes, host)
+	if host == c.host {
+		return 0, &net.OpError{Op: "write", Err: os.NewSyscallError("sendto", c.err)}
+	}
+	return len(b), nil
+}
+
+// A send error drops a destination only if it is one of vanilla's, without rediscovering the rest.
+func TestBroadcastDropsUnreachableDestinations(t *testing.T) {
+	bad, good := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 255)}, &net.UDPAddr{IP: net.IPv4(192, 168, 1, 255)}
+	for _, err := range unreachableErrors {
+		l := &Listener{conf: ListenConfig{Log: slog.Default()}, domain: []*net.UDPAddr{bad, good}}
+		l.conn = &failingPacketConn{host: "10.0.0.255", err: err}
+		l.broadcast(nil)
+		if len(l.domain) != 1 || l.domain[0] != good {
+			t.Fatalf("after %v: domain = %v, want [%v]", err, l.domain, good)
+		}
+	}
+
+	l := &Listener{conf: ListenConfig{Log: slog.Default()}, domain: []*net.UDPAddr{bad, good}}
+	l.conn = &failingPacketConn{host: "10.0.0.255", err: errors.New("no buffer space")}
+	l.broadcast(nil)
+	if len(l.domain) != 2 {
+		t.Fatalf("other error: domain = %v, want both destinations", l.domain)
+	}
+}
+
+// A send error on the configured address changes nothing and later sends still happen.
+func TestBroadcastConfiguredAddress(t *testing.T) {
+	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 255), Port: DefaultPort}
+	conn := &failingPacketConn{host: "10.0.0.255", err: syscall.EHOSTUNREACH}
+	l := &Listener{conf: ListenConfig{Log: slog.Default(), BroadcastAddress: addr}, conn: conn}
+	l.broadcast(nil)
+	l.broadcast(nil)
+	if len(conn.writes) != 2 || l.domain != nil {
+		t.Fatalf("writes = %v, domain = %v; want two sends and no domain", conn.writes, l.domain)
+	}
+}
+
+// An empty domain sends to the fallback on the tick that rebuilds it, and interfaces are read again only
+// while it stays empty.
+func TestBroadcastRebuildsOnlyEmptyDomain(t *testing.T) {
+	var (
+		reads    int
+		networks []localNetwork
+	)
+	read := func() []localNetwork {
+		reads++
+		return networks
+	}
+	conn := &failingPacketConn{}
+	l := &Listener{conf: ListenConfig{Log: slog.Default()}, conn: conn}
+
+	l.broadcast(read)
+	networks = []localNetwork{parseNetwork(t, "192.168.1.20/24", 1)}
+	l.broadcast(read)
+	l.broadcast(read)
+	l.broadcast(read)
+	want := []string{"255.255.255.255", "255.255.255.255", "192.168.1.255", "192.168.1.255"}
+	if !slices.Equal(conn.writes, want) {
+		t.Fatalf("sends = %v, want %v", conn.writes, want)
+	}
+	if reads != 2 {
+		t.Fatalf("interfaces read %d times, want 2", reads)
+	}
+}
+
+// A Listener hosting nothing stays quiet on requests from peers, which now reach it on port 7551.
+func TestHandleRequestWithoutServerDataIgnored(t *testing.T) {
+	conn := &failingPacketConn{}
+	l := &Listener{conf: ListenConfig{Log: slog.Default()}, conn: conn}
+	if err := l.handleRequest(&net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: DefaultPort}); err != nil {
+		t.Fatalf("handleRequest: %v", err)
+	}
+	if len(conn.writes) != 0 {
+		t.Fatalf("answered with no server data: %v", conn.writes)
+	}
+}
+
+// An empty address takes the next ephemeral port once 7551 is held, while an explicit one fails.
+func TestListenFallsBackOnlyForEmptyAddress(t *testing.T) {
+	first, err := (ListenConfig{DisableRequests: true}).Listen("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	if first.conn.LocalAddr().(*net.UDPAddr).Port != DefaultPort {
+		t.Skipf("port %d is held by another process", DefaultPort)
+	}
+
+	second, err := (ListenConfig{DisableRequests: true}).Listen("")
+	if err != nil {
+		t.Fatalf("Listen(\"\") with 7551 held: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	if second.conn.LocalAddr().(*net.UDPAddr).Port == DefaultPort {
+		t.Fatal("second Listener bound the held port")
+	}
+
+	if l, err := (ListenConfig{DisableRequests: true}).Listen(":" + strconv.Itoa(DefaultPort)); err == nil {
+		_ = l.Close()
+		t.Fatal("explicit address bound a held port")
+	}
+}
+
+// Each IPv6 interface joins the group once, with this host's own sends not looped back.
+func TestJoinMulticast6(t *testing.T) {
+	conn := &recordMulticast6{loopback: true}
+	joinMulticast6(conn, []localNetwork{
+		parseNetwork(t, "2001:db8::1/64", 1), parseNetwork(t, "2001:db8::2/64", 1),
+		parseNetwork(t, "fd77::1/64", 2), parseNetwork(t, "fe80::1/64", 3), parseNetwork(t, "10.0.0.1/24", 4),
+	}, slog.Default())
+	if conn.loopback {
+		t.Fatal("multicast loopback left on")
+	}
+	if want := []int{1, 2, 3}; !slices.Equal(conn.joins, want) {
+		t.Fatalf("joined interfaces %v, want %v", conn.joins, want)
+	}
+}
+
+// A request sent to the group on an interface reaches a joined socket through the real network stack.
+func TestMulticast6RequestReachesJoinedSocket(t *testing.T) {
+	l, err := (ListenConfig{DisableRequests: true}).Listen(":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	l.ServerData(&ServerData{ServerName: "test"})
+
+	local := l.conn.LocalAddr().(*net.UDPAddr)
+	// A tunnel does not loop multicast back.
+	groups := slices.DeleteFunc(broadcastDomain(localNetworks(), local.Port, l.dualStack), func(addr *net.UDPAddr) bool {
+		index, err := strconv.Atoi(addr.Zone)
+		if err != nil || !addr.IP.Equal(multicast6Group) {
+			return true
+		}
+		iface, err := net.InterfaceByIndex(index)
+		return err != nil || iface.Flags&net.FlagPointToPoint != 0
+	})
+	if len(groups) == 0 {
+		t.Skip("host has no routable IPv6 LAN interface")
+	}
+	client, err := (ListenConfig{DisableRequests: true}).Listen(":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := ipv6.NewPacketConn(client.conn).SetMulticastLoopback(true); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups {
+		_ = client.write(&RequestPacket{}, group)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(client.Responses()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no response to a request sent to the group")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// recordMulticast6 records the calls made on a discovery socket.
+type recordMulticast6 struct {
+	loopback bool
+	joins    []int
+}
+
+func (c *recordMulticast6) SetMulticastLoopback(on bool) error {
+	c.loopback = on
+	return nil
+}
+
+func (c *recordMulticast6) JoinGroup(ifi *net.Interface, _ net.Addr) error {
+	c.joins = append(c.joins, ifi.Index)
+	return nil
 }
 
 // Expiry windows must stay vanilla's exact magnitudes; the boundary tests pin only the comparison.

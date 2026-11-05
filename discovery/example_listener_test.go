@@ -16,9 +16,10 @@ import (
 
 func ExampleListen() {
 	cfg := ListenConfig{
-		NetworkID: rand.Uint64(),
+		NetworkID:       rand.Uint64(),
+		DisableRequests: true,
 	}
-	d, err := cfg.Listen("0.0.0.0:7551")
+	d, err := cfg.Listen(":7551")
 	if err != nil {
 		panic(fmt.Sprintf("error listening on discovery: %s", err))
 	}
