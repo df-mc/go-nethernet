@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -334,7 +335,7 @@ func TestBroadcastDropsUnreachableDestinations(t *testing.T) {
 // A send error on the configured address changes nothing and later sends still happen.
 func TestBroadcastConfiguredAddress(t *testing.T) {
 	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 255), Port: DefaultPort}
-	conn := &failingPacketConn{host: "10.0.0.255", err: unreachableErrors[0]}
+	conn := &failingPacketConn{host: "10.0.0.255", err: syscall.EHOSTUNREACH}
 	l := &Listener{conf: ListenConfig{Log: slog.Default(), BroadcastAddress: addr}, conn: conn}
 	l.broadcast(nil)
 	l.broadcast(nil)
