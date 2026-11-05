@@ -419,7 +419,7 @@ func TestJoinMulticast6(t *testing.T) {
 	if conn.loopback {
 		t.Fatal("multicast loopback left on")
 	}
-	if want := []int{1, 2}; !slices.Equal(conn.joins, want) {
+	if want := []int{1, 2, 3}; !slices.Equal(conn.joins, want) {
 		t.Fatalf("joined interfaces %v, want %v", conn.joins, want)
 	}
 }
@@ -434,11 +434,17 @@ func TestMulticast6RequestReachesJoinedSocket(t *testing.T) {
 	l.ServerData(&ServerData{ServerName: "test"})
 
 	local := l.conn.LocalAddr().(*net.UDPAddr)
+	// A tunnel does not loop multicast back.
 	groups := slices.DeleteFunc(broadcastDomain(localNetworks(), local.Port, l.dualStack), func(addr *net.UDPAddr) bool {
-		return !addr.IP.Equal(multicast6Group)
+		index, err := strconv.Atoi(addr.Zone)
+		if err != nil || !addr.IP.Equal(multicast6Group) {
+			return true
+		}
+		iface, err := net.InterfaceByIndex(index)
+		return err != nil || iface.Flags&net.FlagPointToPoint != 0
 	})
 	if len(groups) == 0 {
-		t.Skip("host has no routable IPv6 interface")
+		t.Skip("host has no routable IPv6 LAN interface")
 	}
 	client, err := (ListenConfig{DisableRequests: true}).Listen(":0")
 	if err != nil {
@@ -448,7 +454,6 @@ func TestMulticast6RequestReachesJoinedSocket(t *testing.T) {
 	if err := ipv6.NewPacketConn(client.conn).SetMulticastLoopback(true); err != nil {
 		t.Fatal(err)
 	}
-	// A tunnel does not loop multicast back, so one responding interface is enough.
 	for _, group := range groups {
 		_ = client.write(&RequestPacket{}, group)
 	}

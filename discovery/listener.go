@@ -42,8 +42,8 @@ type ListenConfig struct {
 	Log *slog.Logger
 }
 
-// Listen starts listening on the specified address. An empty address binds port 7551 and, like vanilla, an
-// ephemeral port if that one is unavailable, so requests sent to 7551 only reach the first Listener on a host.
+// Listen starts listening on the specified address. An empty address binds port 7551 or else an ephemeral
+// port, so requests sent to 7551 only reach the first Listener on a host.
 // Any other address either binds or returns an error.
 func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 	if conf.Log == nil {
@@ -75,7 +75,7 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 
 		closed: make(chan struct{}),
 	}
-	// A dual-stack socket joins [ff02::1], as vanilla's does; an IPv4-only bind leaves IPv6 discovery off.
+	// A dual-stack socket joins [ff02::1], as vanilla's does; a socket without IPv6 leaves IPv6 discovery off.
 	if localAddr.IP.To4() == nil {
 		l.dualStack = true
 		joinMulticast6(ipv6.NewPacketConn(conn), localNetworks(), conf.Log)
@@ -117,7 +117,7 @@ func joinMulticast6(conn multicast6Conn, networks []localNetwork, log *slog.Logg
 	}
 	joined := make(map[int]bool)
 	for _, network := range networks {
-		if !network.multicast6() || joined[network.ifIndex] {
+		if !network.joinsMulticast6() || joined[network.ifIndex] {
 			continue
 		}
 		joined[network.ifIndex] = true
@@ -466,6 +466,7 @@ func (l *Listener) background() {
 	ticker := time.NewTicker(time.Second * 2)
 	defer ticker.Stop()
 
+	l.broadcast(localNetworks)
 	for {
 		select {
 		case <-l.closed:
@@ -522,10 +523,15 @@ type localNetwork struct {
 	multicast bool // The interface carries multicast.
 }
 
-// multicast6 reports whether the interface takes part in IPv6 discovery. Like vanilla's, a host with only
-// link-local IPv6 sends nothing to [ff02::1].
-func (n localNetwork) multicast6() bool {
-	return n.multicast && n.IP.To4() == nil && !n.IP.IsLoopback() && !n.IP.IsLinkLocalUnicast()
+// joinsMulticast6 reports whether the interface can receive requests sent to [ff02::1].
+func (n localNetwork) joinsMulticast6() bool {
+	return n.multicast && n.IP.To4() == nil && !n.IP.IsLoopback()
+}
+
+// sendsMulticast6 reports whether requests go to [ff02::1] on the interface. Like vanilla's, a host with
+// only link-local IPv6 sends none.
+func (n localNetwork) sendsMulticast6() bool {
+	return n.joinsMulticast6() && !n.IP.IsLinkLocalUnicast()
 }
 
 // localNetworks returns the addresses of the up interfaces. It uses anet because Android hides them from net.
@@ -565,7 +571,7 @@ func broadcastDomain(networks []localNetwork, port int, dualStack bool) []*net.U
 	for _, network := range networks {
 		if ip, ok := directedBroadcast(network.IPNet); ok {
 			add(ip, "")
-		} else if dualStack && network.multicast6() {
+		} else if dualStack && network.sendsMulticast6() {
 			add(multicast6Group, strconv.Itoa(network.ifIndex))
 		}
 	}
