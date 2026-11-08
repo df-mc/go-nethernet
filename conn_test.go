@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pion/sdp/v3"
+	"github.com/pion/turn/v5"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -373,3 +375,115 @@ func TestLatencyExcludesDelayedAcknowledgement(t *testing.T) {
 		t.Fatalf("Latency() = %v, want within (0, %v); SCTP SRTT is %.1fms", latency, limit, clientConn.sctp.Stats().SmoothedRoundTripTime*1000)
 	}
 }
+
+// Relay-only gathering signals relay candidates with a blank related address, as libwebrtc does.
+func TestSignaledCandidateSanitizesRelayRelatedAddress(t *testing.T) {
+	t.Parallel()
+	relay := webrtc.ICECandidate{Foundation: "1", Protocol: webrtc.ICEProtocolUDP, Address: "203.0.113.7", Port: 50000, Typ: webrtc.ICECandidateTypeRelay, RelatedAddress: "198.51.100.20", RelatedPort: 41000}
+	relay6 := relay
+	relay6.Address = "2001:db8::7"
+	srflx := relay
+	srflx.Typ = webrtc.ICECandidateTypeSrflx
+
+	for name, test := range map[string]struct {
+		relayOnly   bool
+		candidate   webrtc.ICECandidate
+		wantAddress string
+		wantPort    uint16
+	}{
+		"relay-only IPv4 relay": {true, relay, "0.0.0.0", 0},
+		"relay-only IPv6 relay": {true, relay6, "::", 0},
+		"all-candidate relay":   {false, relay, "198.51.100.20", 41000},
+		"relay-only srflx":      {true, srflx, "198.51.100.20", 41000},
+	} {
+		got := (&Conn{relayOnly: test.relayOnly}).signaledCandidate(test.candidate)
+		if got.RelatedAddress != test.wantAddress || got.RelatedPort != test.wantPort {
+			t.Errorf("%s: related address = %s:%d, want %s:%d", name, got.RelatedAddress, got.RelatedPort, test.wantAddress, test.wantPort)
+		}
+	}
+	line := formatICECandidate(0, (&Conn{relayOnly: true}).signaledCandidate(relay), webrtc.ICEParameters{UsernameFragment: "u"}, true)
+	if !strings.Contains(line, "raddr 0.0.0.0 rport 0") || strings.Contains(line, "198.51.100.20") {
+		t.Fatalf("signaled candidate %q still names the local address", line)
+	}
+}
+
+// A relay-only dial through a TURN server signals relay candidates with a blank related address.
+func TestRelayOnlyDialSanitizesRelatedAddress(t *testing.T) {
+	udp, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := turn.NewServer(turn.ServerConfig{
+		Realm: "test",
+		AuthHandler: func(ra *turn.RequestAttributes) (string, []byte, bool) {
+			return ra.Username, turn.GenerateAuthKey(ra.Username, ra.Realm, "pass"), true
+		},
+		PacketConnConfigs: []turn.PacketConnConfig{{
+			PacketConn:            udp,
+			RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{RelayAddress: net.ParseIP("127.0.0.1"), Address: "127.0.0.1"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+
+	for _, bundled := range []bool{false, true} {
+		signaling := &signalRecorder{signals: make(chan *Signal, 64)}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = (Dialer{
+				ICEGatherPolicy:   webrtc.ICETransportPolicyRelay,
+				DisableTrickleICE: bundled,
+				Credentials: func(context.Context) (*Credentials, error) {
+					return &Credentials{ICEServers: []ICEServer{{Username: "user", Password: "pass", URLs: []string{"turn:" + udp.LocalAddr().String() + "?transport=udp"}}}}, nil
+				},
+			}).DialContext(ctx, "2", signaling)
+		}()
+		candidate := awaitRelayCandidate(ctx, signaling.signals)
+		cancel()
+		<-done
+		if candidate == "" {
+			t.Fatalf("bundled=%v: no relay candidate was signaled", bundled)
+		}
+		if !strings.Contains(candidate, "raddr 0.0.0.0 rport 0") {
+			t.Fatalf("bundled=%v: relay candidate %q has a related address", bundled, candidate)
+		}
+	}
+}
+
+// awaitRelayCandidate returns the first relay candidate line a dial signals, trickled or in its offer.
+func awaitRelayCandidate(ctx context.Context, signals <-chan *Signal) string {
+	for {
+		select {
+		case signal := <-signals:
+			for _, line := range strings.Split(signal.Data, "\n") {
+				if strings.Contains(line, "typ relay") {
+					return strings.TrimSpace(line)
+				}
+			}
+		case <-ctx.Done():
+			return ""
+		}
+	}
+}
+
+// signalRecorder is a Signaling that records every signal sent and never answers.
+type signalRecorder struct{ signals chan *Signal }
+
+func (s *signalRecorder) Signal(ctx context.Context, signal *Signal) error {
+	select {
+	case s.signals <- signal:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (*signalRecorder) Notify(Notifier) func()                            { return func() {} }
+func (*signalRecorder) Context() context.Context                          { return context.Background() }
+func (*signalRecorder) Credentials(context.Context) (*Credentials, error) { return nil, nil }
+func (*signalRecorder) NetworkID() string                                 { return "1" }
+func (*signalRecorder) PongData([]byte)                                   {}
