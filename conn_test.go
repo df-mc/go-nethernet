@@ -327,6 +327,74 @@ func TestDescriptionEncodeKeepsDummyAddressForHostnameCandidate(t *testing.T) {
 	}
 }
 
+// sdpDescriptionText returns SDP text with the given session-level and media-level attribute lines.
+func sdpDescriptionText(session, media string) string {
+	return "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n" + session +
+		"m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n" + media
+}
+
+// Transport attributes may sit at the session level, and a media-level value takes precedence.
+func TestParseDescriptionReadsSessionLevelTransportAttributes(t *testing.T) {
+	session := "a=ice-ufrag:session-ufrag\r\na=ice-pwd:session-pwd\r\na=fingerprint:sha-256 AA:BB\r\na=setup:active\r\n"
+	for name, test := range map[string]struct {
+		media             string
+		ufrag, pwd, value string
+		role              webrtc.DTLSRole
+	}{
+		"session level": {
+			ufrag: "session-ufrag", pwd: "session-pwd", value: "AA:BB", role: webrtc.DTLSRoleClient,
+		},
+		"media level wins": {
+			media: "a=ice-ufrag:media-ufrag\r\na=ice-pwd:media-pwd\r\na=fingerprint:sha-256 CC:DD\r\na=setup:passive\r\n",
+			ufrag: "media-ufrag", pwd: "media-pwd", value: "CC:DD", role: webrtc.DTLSRoleServer,
+		},
+		"empty media value falls back": {
+			media: "a=ice-ufrag:\r\n",
+			ufrag: "session-ufrag", pwd: "session-pwd", value: "AA:BB", role: webrtc.DTLSRoleClient,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			parsed := &sdp.SessionDescription{}
+			if err := parsed.UnmarshalString(sdpDescriptionText(session, "a=max-message-size:262144\r\n"+test.media)); err != nil {
+				t.Fatalf("UnmarshalString: %v", err)
+			}
+			desc, err := ParseDescription(parsed)
+			if err != nil {
+				t.Fatalf("ParseDescription: %v", err)
+			}
+			if desc.ICE.UsernameFragment != test.ufrag || desc.ICE.Password != test.pwd {
+				t.Fatalf("ICE parameters = %+v, want %q and %q", desc.ICE, test.ufrag, test.pwd)
+			}
+			if desc.DTLS.Role != test.role || desc.DTLS.Fingerprints[0].Value != test.value {
+				t.Fatalf("DTLS parameters = %+v, want role %v and fingerprint %q", desc.DTLS, test.role, test.value)
+			}
+		})
+	}
+}
+
+// A description without max-message-size uses the RFC's default, and empty credentials stay missing.
+func TestParseDescriptionDefaultsAndEmptyCredentials(t *testing.T) {
+	parsed := &sdp.SessionDescription{}
+	if err := parsed.UnmarshalString(sdpDescriptionText("a=ice-ufrag:u\r\na=ice-pwd:p\r\na=fingerprint:sha-256 AA\r\na=setup:active\r\n", "")); err != nil {
+		t.Fatalf("UnmarshalString: %v", err)
+	}
+	desc, err := ParseDescription(parsed)
+	if err != nil {
+		t.Fatalf("ParseDescription: %v", err)
+	}
+	if desc.SCTP.MaxMessageSize != defaultSCTPMaxMessageSize {
+		t.Fatalf("MaxMessageSize = %d, want %d", desc.SCTP.MaxMessageSize, defaultSCTPMaxMessageSize)
+	}
+
+	empty := &sdp.SessionDescription{}
+	if err := empty.UnmarshalString(sdpDescriptionText("a=ice-ufrag:\r\na=ice-pwd:p\r\n", "")); err != nil {
+		t.Fatalf("UnmarshalString: %v", err)
+	}
+	if _, err := ParseDescription(empty); err == nil {
+		t.Fatal("ParseDescription accepted an empty ice-ufrag")
+	}
+}
+
 func TestParseDescriptionRejectsMessageSizesWithoutFragmentPayload(t *testing.T) {
 	for _, max := range []string{"0", "1"} {
 		t.Run(max, func(t *testing.T) {

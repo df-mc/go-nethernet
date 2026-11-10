@@ -602,21 +602,18 @@ func ParseDescription(d *sdp.SessionDescription) (*Description, error) {
 	}
 	m := d.MediaDescriptions[0]
 
-	ufrag, ok := m.Attribute("ice-ufrag")
+	ufrag, ok := descriptionAttribute(d, m, "ice-ufrag")
 	if !ok {
 		return nil, errors.New("missing ice-ufrag attribute")
 	}
-	pwd, ok := m.Attribute("ice-pwd")
+	pwd, ok := descriptionAttribute(d, m, "ice-pwd")
 	if !ok {
 		return nil, errors.New("missing ice-pwd attribute")
 	}
 
-	attr, ok := m.Attribute("fingerprint")
+	attr, ok := descriptionAttribute(d, m, "fingerprint")
 	if !ok {
-		attr, ok = d.Attribute("fingerprint")
-		if !ok {
-			return nil, errors.New("missing fingerprint attribute")
-		}
+		return nil, errors.New("missing fingerprint attribute")
 	}
 	fingerprint := strings.Split(attr, " ")
 	if len(fingerprint) != 2 {
@@ -638,7 +635,7 @@ func ParseDescription(d *sdp.SessionDescription) (*Description, error) {
 		}
 	}
 
-	attr, ok = m.Attribute("setup")
+	attr, ok = descriptionAttribute(d, m, "setup")
 	if !ok {
 		return nil, errors.New("missing setup attribute")
 	}
@@ -654,13 +651,12 @@ func ParseDescription(d *sdp.SessionDescription) (*Description, error) {
 		return nil, fmt.Errorf("invalid setup attribute: %s", attr)
 	}
 
-	attr, ok = m.Attribute("max-message-size")
-	if !ok {
-		return nil, errors.New("missing max-message-size attribute")
-	}
-	maxMessageSize, err := strconv.ParseUint(attr, 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("parse max-message-size attribute as uint32: %w", err)
+	maxMessageSize := uint64(defaultSCTPMaxMessageSize)
+	if attr, ok = m.Attribute("max-message-size"); ok {
+		var err error
+		if maxMessageSize, err = strconv.ParseUint(attr, 10, 32); err != nil {
+			return nil, fmt.Errorf("parse max-message-size attribute as uint32: %w", err)
+		}
 	}
 	if maxMessageSize <= 1 {
 		return nil, fmt.Errorf("max-message-size attribute must exceed one byte: %d", maxMessageSize)
@@ -698,6 +694,35 @@ func ParseDescription(d *sdp.SessionDescription) (*Description, error) {
 		Identity:   identity,
 		Candidates: candidates,
 	}, nil
+}
+
+// defaultSCTPMaxMessageSize is the size RFC 8841 assumes when a description has no max-message-size.
+const defaultSCTPMaxMessageSize = 65536
+
+// descriptionAttribute returns the non-empty media-level value of key, or the session-level one libwebrtc also accepts.
+func descriptionAttribute(d *sdp.SessionDescription, m *sdp.MediaDescription, key string) (string, bool) {
+	value, ok := m.Attribute(key)
+	if !ok || value == "" {
+		value, _ = d.Attribute(key)
+	}
+	return value, value != ""
+}
+
+// attributeKeys returns the keys of attrs, without their values, for diagnosing an unusable description.
+func attributeKeys(attrs []sdp.Attribute) []string {
+	keys := make([]string, len(attrs))
+	for i, attr := range attrs {
+		keys[i] = attr.Key
+	}
+	return keys
+}
+
+// answerMediaKeys returns the attribute keys of the first media section, if there is one.
+func answerMediaKeys(d *sdp.SessionDescription) []string {
+	if len(d.MediaDescriptions) == 0 {
+		return nil
+	}
+	return attributeKeys(d.MediaDescriptions[0].Attributes)
 }
 
 // gatherCandidates blocks until local ICE gathering completes and returns every
