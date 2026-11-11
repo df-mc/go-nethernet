@@ -30,9 +30,10 @@ type ListenConfig struct {
 	// to mark that the Conn has been negotiated by Listener.
 	Log *slog.Logger
 
-	// API specifies custom configuration for WebRTC transports and data channels. If nil, a new [webrtc.API] will
-	// be set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels,
-	// as it requires additional steps on the Conn (which cannot be determined by the Conn).
+	// API specifies custom configuration for WebRTC transports and data channels. If nil, a new [webrtc.API] will be
+	// built from [NewSettingEngine]; a custom API should start from it too, to keep vanilla's SCTP receive window.
+	// The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires additional
+	// steps on the Conn (which cannot be determined by the Conn).
 	API *webrtc.API
 
 	// ConnContext provides a [context.Context] for starting the ICE, DTLS, and SCTP transports of the Conn. If nil,
@@ -146,7 +147,7 @@ func (conf ListenConfig) Listen(signaling Signaling) (*Listener, error) {
 		conf.Log = slog.Default()
 	}
 	if conf.API == nil {
-		conf.API = webrtc.NewAPI()
+		conf.API = webrtc.NewAPI(webrtc.WithSettingEngine(NewSettingEngine()))
 	}
 	if conf.IssueServerIdentity == nil {
 		conf.Log.Warn("generating a new private key for this listener. a TOFU (Trust on First Use) prompt may be surfaced to players on first join")
