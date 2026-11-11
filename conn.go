@@ -590,6 +590,17 @@ func (conn *Conn) addRemoteCandidate(candidate webrtc.ICECandidate) error {
 // matching the 'a=max-message-size' value in the SDP sent by vanilla peer connections.
 const maxMessageSize = 262143
 
+// vanillaSCTPReceiveWindow is libwebrtc's dcsctp receive buffer, which vanilla peers advertise in the SCTP INIT
+// in place of pion's 1 MiB. A message is delivered only once all of its fragments fit the buffer.
+const vanillaSCTPReceiveWindow = 5 << 20
+
+// NewSettingEngine returns a [webrtc.SettingEngine] with vanilla's SCTP receive window.
+func NewSettingEngine() webrtc.SettingEngine {
+	var settings webrtc.SettingEngine
+	settings.SetSCTPMaxReceiveBufferSize(vanillaSCTPReceiveWindow)
+	return settings
+}
+
 // ParseDescription parses a [sdp.SessionDescription] signaled from a remote connection.
 // It transforms the fields of the [sdp.SessionDescription] into a Description, which can be
 // used to start ICE, DTLS, and SCTP transports for a Conn.

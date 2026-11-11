@@ -30,8 +30,9 @@ type Dialer struct {
 	Log *slog.Logger
 
 	// API specifies custom configuration for WebRTC transports and data channels. If nil, a new [webrtc.API] will be
-	// set from [webrtc.NewAPI]. The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires
-	// additional steps on the Conn (which cannot be determined by the Conn).
+	// built from [NewSettingEngine]; a custom API should start from it too, to keep vanilla's SCTP receive window.
+	// The [webrtc.SettingEngine] of the API should not allow detaching data channels, as it requires additional
+	// steps on the Conn (which cannot be determined by the Conn).
 	API *webrtc.API
 
 	// Identity specifies the identity presented to the remote peer during
@@ -146,7 +147,7 @@ func (d Dialer) DialContext(ctx context.Context, networkID string, signaling Sig
 		d.ConnectionID = rand.Uint64()
 	}
 	if d.API == nil {
-		d.API = webrtc.NewAPI()
+		d.API = webrtc.NewAPI(webrtc.WithSettingEngine(NewSettingEngine()))
 	}
 	if d.Log == nil {
 		d.Log = slog.Default()

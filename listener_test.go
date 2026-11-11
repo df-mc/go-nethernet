@@ -160,7 +160,7 @@ func TestListenerNonTrickleGatheringDoesNotBlockOtherOffers(t *testing.T) {
 	t.Cleanup(base.close)
 	responses := make(chan Signal, 4)
 	signaling := &firstOfferSTUNSignaling{Signaling: listenerResponseSignaling{base, responses}, url: "stun:" + stun.LocalAddr().String()}
-	var settings webrtc.SettingEngine
+	settings := NewSettingEngine()
 	settings.SetIncludeLoopbackCandidate(true)
 	settings.SetSTUNGatherTimeout(time.Minute)
 	l, err := (ListenConfig{
@@ -733,6 +733,22 @@ func TestAcceptedConnUsesNegotiatedMessageSize(t *testing.T) {
 
 	_, clientConn, serverConn := dialAcceptedListener(t, smallMessageSignaling{client}, server)
 	checkConnPayload(t, serverConn, clientConn, bytes.Repeat([]byte{0x5a}, 2048))
+}
+
+// Default APIs advertise vanilla's SCTP receive window to the peer, not pion's 1 MiB.
+func TestDefaultAPIsAdvertiseVanillaReceiveWindow(t *testing.T) {
+	client, server := newMemorySignalingPair("client", "server")
+	t.Cleanup(client.close)
+	t.Cleanup(server.close)
+
+	_, clientConn, serverConn := dialAcceptedListener(t, client, server)
+	// Each side's ReceiverWindow is the window its peer last advertised, less any message the peer
+	// had not yet read, such as a data channel open.
+	for name, conn := range map[string]*Conn{"dialer": serverConn, "listener": clientConn} {
+		if got := conn.sctp.Stats().ReceiverWindow; got > vanillaSCTPReceiveWindow || got+64<<10 < vanillaSCTPReceiveWindow {
+			t.Errorf("%s advertised a %d byte receive window, want %d", name, got, vanillaSCTPReceiveWindow)
+		}
+	}
 }
 
 func TestListenerIgnoresMalformedDeferredSignals(t *testing.T) {
