@@ -475,8 +475,12 @@ func isTerminalICEState(state webrtc.ICETransportState) bool {
 func (conn *Conn) handleTransports() {
 	conn.ice.OnConnectionStateChange(func(state webrtc.ICETransportState) {
 		if isTerminalICEState(state) {
+			cause := fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state)
+			if state == webrtc.ICETransportStateFailed {
+				cause = fmt.Errorf("%w: ICE transport entered unrecoverable state: %s", ErrTransportFailed, state)
+			}
 			// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
-			go conn.close(fmt.Errorf("nethernet: ICE transport entered unrecoverable state: %s", state))
+			go conn.close(cause)
 		}
 	})
 	conn.dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
@@ -488,11 +492,11 @@ func (conn *Conn) handleTransports() {
 		}
 	})
 	conn.sctp.OnClose(func(err error) {
-		var e error
+		// Pion closes the association with no error however it ended. An error means only that a
+		// new data channel failed to open, which neither side closed.
+		e := fmt.Errorf("%w: SCTP transport closed", ErrClosedByPeer)
 		if err != nil {
-			e = fmt.Errorf("nethernet: SCTP transport closed: %w", err)
-		} else {
-			e = errors.New("nethernet: SCTP transport closed")
+			e = fmt.Errorf("nethernet: open data channel: %w", err)
 		}
 		// This handler function itself is invoked while holding an internal lock, so call close in a goroutine to avoid deadlock.
 		go conn.close(e)
@@ -1033,3 +1037,12 @@ type negotiator interface {
 }
 
 var ErrUnsupported = errors.New("nethernet: unsupported")
+
+// ErrClosedByPeer is matched by a Conn's close cause when the connection ended before ICE failed:
+// the remote peer closed a data channel or the SCTP association.
+var ErrClosedByPeer = errors.New("nethernet: closed by remote peer")
+
+// ErrTransportFailed is matched by a Conn's close cause when ICE failed, as when the remote peer
+// stops answering or cannot be reached. SCTP retransmits without limit, so a silent peer always
+// ends this way.
+var ErrTransportFailed = errors.New("nethernet: transport failed")
