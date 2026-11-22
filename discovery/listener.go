@@ -26,6 +26,12 @@ type ListenConfig struct {
 	// the same network. If nil, an *net.UDPAddr with net.IPv4bcast and port 7551 will be used.
 	BroadcastAddress *net.UDPAddr
 
+	// DisableReliableSignals specifies whether to use MessagePacket instead of ReliablePacket for sending
+	// NetherNet signals. By default, [Listener.Signal] will send [ReliablePacket] to the remote network
+	// and wait for acknowledgement. When set to true, it may reduce the reliability of signals but may improve
+	// performance.
+	DisableReliableSignals bool
+
 	// Log is used for logging messages at various levels.
 	Log *slog.Logger
 }
@@ -75,6 +81,9 @@ func (conf ListenConfig) Listen(addr string) (*Listener, error) {
 		notifiers: make(map[uint32]nethernet.Notifier),
 		responses: make(map[uint64]response),
 
+		reliable: make(map[reliableKey]time.Time),
+		pending:  make(map[reliableKey]chan struct{}),
+
 		closed: make(chan struct{}),
 	}
 
@@ -115,6 +124,13 @@ type Listener struct {
 	notifiers   map[uint32]nethernet.Notifier
 	notifiersMu sync.RWMutex
 
+	reliable   map[reliableKey]time.Time
+	reliableMu sync.RWMutex
+
+	seq       atomic.Uint64
+	pending   map[reliableKey]chan struct{}
+	pendingMu sync.Mutex
+
 	// responses maps NetherNet network IDs to the application data each server
 	// last answered with, and when.
 	responses   map[uint64]response
@@ -143,16 +159,66 @@ func (l *Listener) Signal(ctx context.Context, signal *nethernet.Signal) error {
 		l.deleteInactiveAddressesLocked(time.Now())
 		addr, ok := l.addresses[networkID]
 		l.addressesMu.Unlock()
-
 		if !ok {
 			return fmt.Errorf("no address found for network ID: %d", networkID)
 		}
 
-		return l.write(&MessagePacket{
+		msg := &MessagePacket{
 			RecipientID: networkID,
 			Data:        signal.String(),
-		}, addr.addr)
+		}
+
+		if l.conf.DisableReliableSignals {
+			return l.write(msg, addr.addr)
+		}
+
+		// TODO(lactyy): This is not how vanilla works it seems. It does not wait for acknowledgement.
+
+		key := reliableKey{
+			senderID: networkID,
+			nonce:    rand.Uint64(),
+			sequence: l.seq.Add(1),
+		}
+		ch := l.expect(key)
+		defer l.unexpect(key)
+
+		pk := &ReliablePacket{
+			RecipientID: networkID,
+			Nonce:       key.nonce,
+			Sequence:    key.sequence,
+			SenderID:    l.conf.NetworkID,
+			Message:     msg,
+		}
+
+		for { // toriaezu, dayo...
+			if err := l.write(pk, addr.addr); err != nil {
+				return fmt.Errorf("write packet: %w", err)
+			}
+			select {
+			case <-ch:
+				return nil
+			case <-l.closed:
+				return net.ErrClosed
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
 	}
+}
+
+func (l *Listener) expect(key reliableKey) <-chan struct{} {
+	ch := make(chan struct{})
+	l.pendingMu.Lock()
+	l.pending[key] = ch
+	l.pendingMu.Unlock()
+	return ch
+}
+
+func (l *Listener) unexpect(key reliableKey) {
+	l.pendingMu.Lock()
+	delete(l.pending, key)
+	l.pendingMu.Unlock()
 }
 
 // Notify registers n to receive incoming NetherNet signals.
@@ -278,11 +344,108 @@ func (l *Listener) handlePacket(data []byte, addr net.Addr) error {
 		err = l.handleResponse(pk, senderID)
 	case *MessagePacket:
 		err = l.handleMessage(pk, senderID)
+	case *ReliablePacket:
+		err = l.handleReliable(pk, senderID, addr)
+	case *AcknowledgementPacket:
+		err = l.handleACK(pk, senderID)
 	default:
 		err = fmt.Errorf("unknown packet: %T", pk)
 	}
 
 	return err
+}
+
+// handleReliable handles a ReliablePacket sent from the remote network.
+// It responds with an AcknowledgementPacket containing the same identifiers.
+// If the packet is received for the first time, it calls handleMessage with
+// the encapsulated message.
+func (l *Listener) handleReliable(pk *ReliablePacket, senderID uint64, addr net.Addr) error {
+	if pk.RecipientID != l.conf.NetworkID {
+		return nil
+	}
+	if pk.RecipientID != pk.Message.RecipientID {
+		return fmt.Errorf("recipient ID mismatch with encapsulated packet: expected %d, got %d", pk.RecipientID, pk.Message.RecipientID)
+	}
+	if pk.SenderID != senderID {
+		return fmt.Errorf("sender ID mismatch: %d != %d", pk.RecipientID, senderID)
+	}
+
+	key := reliableKey{
+		senderID: senderID,
+		nonce:    pk.Nonce,
+		sequence: pk.Sequence,
+	}
+
+	l.reliableMu.Lock()
+	for key, timestamp := range l.reliable {
+		if time.Since(timestamp) > time.Second*15 {
+			delete(l.reliable, key)
+		}
+	}
+	_, duplicate := l.reliable[key]
+	if !duplicate && len(l.reliable) >= 128 {
+		l.reliableMu.Unlock()
+		return fmt.Errorf("lost motivation") // todo
+	}
+	l.reliable[key] = time.Now()
+	l.reliableMu.Unlock()
+
+	if err := l.write(&AcknowledgementPacket{
+		RecipientID: senderID,
+		Nonce:       pk.Nonce,
+		Sequence:    pk.Sequence,
+	}, addr); err != nil {
+		return fmt.Errorf("write ACK: %w", err)
+	}
+
+	if !duplicate {
+		if err := l.handleMessage(pk.Message, senderID); err != nil {
+			return fmt.Errorf("handle message: %w", err)
+		}
+	}
+	return nil
+}
+
+// reliableKey represents a key used for identifying reliable packets.
+type reliableKey struct {
+	// senderID is the network ID of the sender.
+	senderID uint64
+	// nonce seems to be a random number generated by the sender.
+	// It remains consistent until the client restarts.
+	nonce uint64
+	// sequence is an incrementing number unique to the senderID and nonce.
+	sequence uint64
+}
+
+// String returns a string representation of reliable key.
+func (k reliableKey) String() string {
+	return fmt.Sprintf("%d/%d/%d", k.senderID, k.nonce, k.sequence)
+}
+
+// handleACK handles an incoming AcknowledgementPacket. It unblocks the goroutine waiting
+// for the acknowledgement using the identifiers in the packet.
+func (l *Listener) handleACK(pk *AcknowledgementPacket, senderID uint64) error {
+	if pk.RecipientID != l.conf.NetworkID {
+		return nil
+	}
+	key := reliableKey{
+		senderID: senderID,
+		nonce:    pk.Nonce,
+		sequence: pk.Sequence,
+	}
+
+	l.pendingMu.Lock()
+	ch, ok := l.pending[key]
+	if ok {
+		close(ch)
+		delete(l.pending, key)
+	}
+	l.pendingMu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("unexpected acknowledgement: %d", key)
+	}
+	return nil
 }
 
 // handleRequest handles a RequestPacket broadcasted from the clients.

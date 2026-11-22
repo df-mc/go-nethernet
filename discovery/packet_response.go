@@ -18,7 +18,7 @@ func (*ResponsePacket) ID() uint16 { return IDResponsePacket }
 
 // Read ...
 func (pk *ResponsePacket) Read(r io.Reader) error {
-	data, err := readRemaining(r)
+	data, err := readBytes(r)
 	if err != nil {
 		return fmt.Errorf("read application data: %w", err)
 	}

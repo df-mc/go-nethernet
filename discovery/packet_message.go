@@ -24,7 +24,7 @@ func (pk *MessagePacket) Read(r io.Reader) error {
 	if err := binary.Read(r, binary.LittleEndian, &pk.RecipientID); err != nil {
 		return fmt.Errorf("read recipient ID: %w", err)
 	}
-	data, err := readRemaining(r)
+	data, err := readBytes(r)
 	if err != nil {
 		return fmt.Errorf("read data: %w", err)
 	}
