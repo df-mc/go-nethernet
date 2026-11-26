@@ -74,6 +74,35 @@ func shouldDisableTrickleICE(configValue bool, signaling Signaling) bool {
 	return configValue
 }
 
+// signalLengthLimiter is implemented by Signaling that carries each signal in a single datagram,
+// which a peer may lose once it is long enough to be fragmented.
+type signalLengthLimiter interface {
+	// MaxSignalLength returns the longest signal, as [Signal.String] encodes it, that reliably
+	// reaches a peer.
+	MaxSignalLength() int
+}
+
+// maxSignalLength returns the longest signal the Signaling reliably delivers, or zero for no limit.
+func maxSignalLength(signaling Signaling) int {
+	if l, ok := signaling.(signalLengthLimiter); ok {
+		return l.MaxSignalLength()
+	}
+	return 0
+}
+
+// lanSignaling is implemented by Signaling over LAN discovery, where vanilla hosts answer without an
+// identity assertion and an assertion alone would overflow one datagram.
+type lanSignaling interface {
+	// LAN reports whether signals travel over LAN discovery.
+	LAN() bool
+}
+
+// overLAN reports whether the Signaling carries signals over LAN discovery.
+func overLAN(signaling Signaling) bool {
+	l, ok := signaling.(lanSignaling)
+	return ok && l.LAN()
+}
+
 const (
 	// SignalTypeOffer is signaled by a client to request a connection to the remote host.
 	// Signals of SignalTypeOffer typically contain a data for a local description of the connection.
