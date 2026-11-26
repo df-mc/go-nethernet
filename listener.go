@@ -507,13 +507,15 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 		)
 		return wrapSignalError(errors.New("nethernet: anonymous identity not allowed"), ErrorCodeIdentityNotAllowed)
 	}
-	identity, err := n.conf.IssueServerIdentity(ctx)
-	if err != nil {
-		return wrapSignalError(fmt.Errorf("issue server identity: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
-	}
-	c.description.Identity, err = identity.Sign(c.description)
-	if err != nil {
-		return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
+	if !overLAN(n.signaling) {
+		identity, err := n.conf.IssueServerIdentity(ctx)
+		if err != nil {
+			return wrapSignalError(fmt.Errorf("issue server identity: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
+		}
+		c.description.Identity, err = identity.Sign(c.description)
+		if err != nil {
+			return wrapSignalError(fmt.Errorf("generate identity assertion: %w", err), ErrorCodeFailedToCreateIdentityAssertion)
+		}
 	}
 
 	// Register a callback function immediately since the remote peer
@@ -542,18 +544,16 @@ func (n *listenerNegotiator) handleOffer(signal *Signal) error {
 		go c.close(fmt.Errorf("invalid data channel opened: %q", channel.Label()))
 	})
 
-	// Encode an answer using the local parameters!
-	answer, err := c.description.Encode()
-	if err != nil {
+	answer := &Signal{
+		Type:         SignalTypeAnswer,
+		ConnectionID: signal.ConnectionID,
+		NetworkID:    signal.NetworkID,
+	}
+	if err := fitSignal(n.conf.Log, c.description, desc.Candidates, answer, maxSignalLength(n.signaling)); err != nil {
 		return wrapSignalError(fmt.Errorf("encode answer: %w", err), ErrorCodeFailedToCreateAnswer)
 	}
 
-	if err := n.signaling.Signal(ctx, &Signal{
-		Type:         SignalTypeAnswer,
-		ConnectionID: signal.ConnectionID,
-		Data:         string(answer),
-		NetworkID:    signal.NetworkID,
-	}); err != nil {
+	if err := n.signaling.Signal(ctx, answer); err != nil {
 		// I don't think the error code will be signaled back to the remote connection, but just in case.
 		return wrapSignalError(fmt.Errorf("signal answer: %w", err), ErrorCodeSignalingFailedToSend)
 	}

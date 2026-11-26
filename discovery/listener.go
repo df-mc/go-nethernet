@@ -188,6 +188,18 @@ func (l *Listener) Credentials(context.Context) (*nethernet.Credentials, error) 
 	}
 }
 
+// LAN reports that signals travel over LAN discovery, where vanilla hosts answer without an identity assertion.
+func (l *Listener) LAN() bool {
+	return true
+}
+
+// MaxSignalLength returns the longest signal a message carries within the data length vanilla declares.
+// Such a message fits one datagram down to IPv6's 1280-byte minimum MTU; Xbox consoles lose an answer
+// split into IP fragments.
+func (l *Listener) MaxSignalLength() int {
+	return maxDeclaredMessageData
+}
+
 // NetworkID returns the numerical NetherNet network ID for the Listener in string form.
 func (l *Listener) NetworkID() string {
 	return strconv.FormatUint(l.conf.NetworkID, 10)

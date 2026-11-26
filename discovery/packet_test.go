@@ -208,3 +208,12 @@ func sealPayload(payload []byte) []byte {
 	hash.Write(payload)
 	return append(hash.Sum(nil), encrypt(payload)...)
 }
+
+// A signal of the length a Listener allows fits one datagram on a link with IPv6's minimum MTU.
+func TestMaxSignalLengthFitsOneDatagram(t *testing.T) {
+	const minIPv6Payload = 1280 - 40 - 8
+	pk := &MessagePacket{RecipientID: 1<<64 - 1, Data: strings.Repeat("x", (&Listener{}).MaxSignalLength())}
+	if n := len(Marshal(pk, 1<<64-1)); n > minIPv6Payload {
+		t.Fatalf("message is %d bytes, want at most %d", n, minIPv6Payload)
+	}
+}
